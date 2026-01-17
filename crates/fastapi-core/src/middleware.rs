@@ -202,11 +202,8 @@ pub trait Middleware: Send + Sync {
 /// any type that can handle requests.
 pub trait Handler: Send + Sync {
     /// Process a request and return a response.
-    fn call<'a>(
-        &'a self,
-        ctx: &'a RequestContext,
-        req: &'a mut Request,
-    ) -> BoxFuture<'a, Response>;
+    fn call<'a>(&'a self, ctx: &'a RequestContext, req: &'a mut Request)
+    -> BoxFuture<'a, Response>;
 }
 
 /// Implement Handler for async functions.
@@ -327,7 +324,9 @@ impl MiddlewareStack {
                 }
                 ControlFlow::Break(response) => {
                     // Short-circuit: run after hooks for middleware that already ran
-                    return self.run_after_hooks(ctx, req, response, ran_before_count).await;
+                    return self
+                        .run_after_hooks(ctx, req, response, ran_before_count)
+                        .await;
                 }
             }
         }
@@ -336,7 +335,8 @@ impl MiddlewareStack {
         let response = handler.call(ctx, req).await;
 
         // Run after hooks in reverse order
-        self.run_after_hooks(ctx, req, response, ran_before_count).await
+        self.run_after_hooks(ctx, req, response, ran_before_count)
+            .await
     }
 
     /// Runs after hooks for middleware that ran their before hook.

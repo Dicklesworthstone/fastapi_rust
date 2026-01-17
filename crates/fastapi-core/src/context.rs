@@ -195,9 +195,7 @@ where
     fn into_outcome(self) -> Outcome<T, E> {
         match self {
             Ok(v) => Outcome::Ok(v),
-            Err(CancelledError) => {
-                Outcome::Cancelled(CancelReason::user("request cancelled"))
-            }
+            Err(CancelledError) => Outcome::Cancelled(CancelReason::user("request cancelled")),
         }
     }
 }

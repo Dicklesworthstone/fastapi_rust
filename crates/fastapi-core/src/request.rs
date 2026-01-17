@@ -57,12 +57,15 @@ impl Headers {
     /// Get a header value by name (case-insensitive).
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&[u8]> {
-        self.inner.get(&name.to_ascii_lowercase()).map(Vec::as_slice)
+        self.inner
+            .get(&name.to_ascii_lowercase())
+            .map(Vec::as_slice)
     }
 
     /// Insert a header.
     pub fn insert(&mut self, name: impl Into<String>, value: impl Into<Vec<u8>>) {
-        self.inner.insert(name.into().to_ascii_lowercase(), value.into());
+        self.inner
+            .insert(name.into().to_ascii_lowercase(), value.into());
     }
 }
 
