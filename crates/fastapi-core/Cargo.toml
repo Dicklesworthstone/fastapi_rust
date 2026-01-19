@@ -10,9 +10,18 @@ rust-version.workspace = true
 asupersync = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+parking_lot = "0.12"
 
 # Testing utilities (used by TestClient for sync execution)
 futures-executor = "0.3"
+
+# Optional regex support for testing assertions
+regex = { version = "1.11", optional = true }
+
+[features]
+default = []
+# Enable regex support in testing assertions
+regex = ["dep:regex"]
 
 [lints]
 workspace = true

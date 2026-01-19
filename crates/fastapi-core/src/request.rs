@@ -1,6 +1,8 @@
 //! HTTP request types.
 
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::fmt;
 
 /// HTTP method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,6 +41,27 @@ impl Method {
             _ => None,
         }
     }
+
+    /// Return the canonical uppercase method name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Patch => "PATCH",
+            Self::Options => "OPTIONS",
+            Self::Head => "HEAD",
+            Self::Trace => "TRACE",
+        }
+    }
+}
+
+impl fmt::Display for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// HTTP headers collection.
@@ -66,6 +89,25 @@ impl Headers {
     pub fn insert(&mut self, name: impl Into<String>, value: impl Into<Vec<u8>>) {
         self.inner
             .insert(name.into().to_ascii_lowercase(), value.into());
+    }
+
+    /// Iterate over all headers as (name, value) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.inner
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_slice()))
+    }
+
+    /// Returns the number of headers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns true if there are no headers.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 }
 
@@ -171,5 +213,25 @@ impl Request {
     /// Set the query string.
     pub fn set_query(&mut self, query: Option<String>) {
         self.query = query;
+    }
+
+    /// Insert a typed extension value.
+    pub fn insert_extension<T: Any + Send + Sync>(&mut self, value: T) {
+        self.extensions.insert(TypeId::of::<T>(), Box::new(value));
+    }
+
+    /// Get a typed extension value.
+    #[must_use]
+    pub fn get_extension<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.extensions
+            .get(&TypeId::of::<T>())
+            .and_then(|boxed| boxed.downcast_ref::<T>())
+    }
+
+    /// Get a mutable typed extension value.
+    pub fn get_extension_mut<T: Any + Send + Sync>(&mut self) -> Option<&mut T> {
+        self.extensions
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|boxed| boxed.downcast_mut::<T>())
     }
 }

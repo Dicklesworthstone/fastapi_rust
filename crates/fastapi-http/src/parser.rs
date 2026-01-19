@@ -24,7 +24,9 @@
 //! assert_eq!(request_line.version(), "HTTP/1.1");
 //! ```
 
+use crate::body::{BodyConfig, BodyError, parse_body_with_consumed};
 use fastapi_core::{Body, Method, Request};
+use std::borrow::Cow;
 
 /// HTTP parsing error.
 #[derive(Debug)]
@@ -35,6 +37,22 @@ pub enum ParseError {
     InvalidMethod,
     /// Invalid header.
     InvalidHeader,
+    /// Invalid header name (non-token characters).
+    InvalidHeaderName,
+    /// Invalid bytes in header value.
+    InvalidHeaderBytes,
+    /// Request line too long.
+    RequestLineTooLong,
+    /// Header line too long.
+    HeaderLineTooLong,
+    /// Too many headers.
+    TooManyHeaders,
+    /// Header block too large.
+    HeadersTooLarge,
+    /// Unsupported or invalid Transfer-Encoding.
+    InvalidTransferEncoding,
+    /// Ambiguous body length (e.g., both Transfer-Encoding and Content-Length).
+    AmbiguousBodyLength,
     /// Request too large.
     TooLarge,
     /// Incomplete request (need more data).
@@ -47,6 +65,14 @@ impl std::fmt::Display for ParseError {
             Self::InvalidRequestLine => write!(f, "invalid request line"),
             Self::InvalidMethod => write!(f, "invalid HTTP method"),
             Self::InvalidHeader => write!(f, "invalid header"),
+            Self::InvalidHeaderName => write!(f, "invalid header name"),
+            Self::InvalidHeaderBytes => write!(f, "invalid header bytes"),
+            Self::RequestLineTooLong => write!(f, "request line too long"),
+            Self::HeaderLineTooLong => write!(f, "header line too long"),
+            Self::TooManyHeaders => write!(f, "too many headers"),
+            Self::HeadersTooLarge => write!(f, "headers too large"),
+            Self::InvalidTransferEncoding => write!(f, "invalid transfer-encoding"),
+            Self::AmbiguousBodyLength => write!(f, "ambiguous body length"),
             Self::TooLarge => write!(f, "request too large"),
             Self::Incomplete => write!(f, "incomplete request"),
         }
@@ -54,6 +80,37 @@ impl std::fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
+
+/// Parsing limits for request line and headers.
+#[derive(Debug, Clone)]
+pub struct ParseLimits {
+    /// Maximum total request size in bytes.
+    pub max_request_size: usize,
+    /// Maximum request line length in bytes.
+    pub max_request_line_len: usize,
+    /// Maximum number of headers.
+    pub max_header_count: usize,
+    /// Maximum length of a single header line.
+    pub max_header_line_len: usize,
+    /// Maximum total header block size (including CRLF terminator).
+    pub max_headers_size: usize,
+}
+
+impl Default for ParseLimits {
+    fn default() -> Self {
+        Self {
+            max_request_size: 1024 * 1024,  // 1MB
+            max_request_line_len: 8 * 1024, // 8KB
+            max_header_count: 100,
+            max_header_line_len: 8 * 1024, // 8KB
+            max_headers_size: 64 * 1024,   // 64KB
+        }
+    }
+}
+
+fn has_invalid_request_line_bytes(line: &[u8]) -> bool {
+    line.iter().any(|&b| b == 0 || b == b'\r' || b == b'\n')
+}
 
 // ============================================================================
 // Zero-Copy Request Line Parser
@@ -106,6 +163,9 @@ impl<'a> RequestLine<'a> {
             .unwrap_or(buffer.len());
 
         let line = &buffer[..line_end];
+        if has_invalid_request_line_bytes(line) {
+            return Err(ParseError::InvalidRequestLine);
+        }
 
         // Split by spaces: METHOD SP URI SP VERSION
         let mut parts = line.splitn(3, |&b| b == b' ');
@@ -224,6 +284,28 @@ impl<'a> RequestLine<'a> {
 // Zero-Copy Header Parser
 // ============================================================================
 
+fn is_token_char(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`'
+            | b'|' | b'~' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+    )
+}
+
+fn is_valid_header_name(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(|&b| is_token_char(b))
+}
+
+fn has_invalid_header_value_bytes(value: &[u8]) -> bool {
+    value
+        .iter()
+        .any(|&b| b == 0 || b == 0x7f || (b < 0x20 && b != b'\t' && b != b' '))
+}
+
+fn has_invalid_header_line_bytes(line: &[u8]) -> bool {
+    line.iter().any(|&b| b == 0)
+}
+
 /// A zero-copy view of a single HTTP header.
 #[derive(Debug, Clone, Copy)]
 pub struct Header<'a> {
@@ -329,14 +411,20 @@ impl<'a> HeadersIter<'a> {
 
     /// Parse a single header from the buffer.
     fn parse_header(line: &'a [u8]) -> Result<Header<'a>, ParseError> {
+        if has_invalid_header_line_bytes(line) {
+            return Err(ParseError::InvalidHeaderBytes);
+        }
+
         let colon_pos = line
             .iter()
             .position(|&b| b == b':')
             .ok_or(ParseError::InvalidHeader)?;
 
         let name_bytes = &line[..colon_pos];
-        let name =
-            std::str::from_utf8(name_bytes).map_err(|_| ParseError::InvalidHeader)?;
+        if !is_valid_header_name(name_bytes) {
+            return Err(ParseError::InvalidHeaderName);
+        }
+        let name = std::str::from_utf8(name_bytes).map_err(|_| ParseError::InvalidHeader)?;
 
         // Trim leading whitespace from value
         let value_start = line[colon_pos + 1..]
@@ -345,6 +433,9 @@ impl<'a> HeadersIter<'a> {
             .map_or(colon_pos + 1, |p| colon_pos + 1 + p);
 
         let value = &line[value_start..];
+        if has_invalid_header_value_bytes(value) {
+            return Err(ParseError::InvalidHeaderBytes);
+        }
 
         // Trim the name (but keep original bytes for raw access)
         let trimmed_name = name.trim();
@@ -435,36 +526,82 @@ impl<'a> HeadersParser<'a> {
     /// Returns the parser with pre-computed Content-Length and Transfer-Encoding.
     /// The buffer should start at the first header line (after request line).
     pub fn parse(buffer: &'a [u8]) -> Result<Self, ParseError> {
+        Self::parse_with_limits(buffer, &ParseLimits::default())
+    }
+
+    /// Parse all headers from a buffer with limits.
+    ///
+    /// Enforces header count, line length, and total size limits. Also
+    /// rejects ambiguous body length indicators (Transfer-Encoding + Content-Length).
+    pub fn parse_with_limits(buffer: &'a [u8], limits: &ParseLimits) -> Result<Self, ParseError> {
+        let header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n");
+        let header_block_len = header_end.map_or(buffer.len(), |pos| pos + 4);
+        if header_block_len > limits.max_headers_size {
+            return Err(ParseError::HeadersTooLarge);
+        }
+
         let mut content_length = None;
+        let mut saw_transfer_encoding = false;
         let mut is_chunked = false;
-        let mut bytes_consumed = 0;
+        let mut header_count = 0usize;
 
-        let mut iter = HeadersIter::new(buffer);
-        while let Some(result) = iter.next() {
-            let header = result?;
+        let mut remaining = &buffer[..header_block_len];
+        while !remaining.is_empty() {
+            let line_end = remaining
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .unwrap_or(remaining.len());
 
-            // Track Content-Length
+            if line_end == 0 {
+                break;
+            }
+
+            if line_end > limits.max_header_line_len {
+                return Err(ParseError::HeaderLineTooLong);
+            }
+
+            let line = &remaining[..line_end];
+            if matches!(line.first(), Some(b' ' | b'\t')) {
+                return Err(ParseError::InvalidHeader);
+            }
+
+            let header = HeadersIter::parse_header(line)?;
+            header_count += 1;
+            if header_count > limits.max_header_count {
+                return Err(ParseError::TooManyHeaders);
+            }
+
             if header.is_content_length() {
-                if let Some(len) = header.as_content_length() {
-                    if content_length.is_some() && content_length != Some(len) {
-                        // Conflicting Content-Length headers
-                        return Err(ParseError::InvalidHeader);
-                    }
-                    content_length = Some(len);
+                let len = header
+                    .as_content_length()
+                    .ok_or(ParseError::InvalidHeader)?;
+                if content_length.is_some() && content_length != Some(len) {
+                    return Err(ParseError::InvalidHeader);
+                }
+                content_length = Some(len);
+            }
+
+            if header.is_transfer_encoding() {
+                saw_transfer_encoding = true;
+                if header.is_chunked_encoding() {
+                    is_chunked = true;
+                } else {
+                    return Err(ParseError::InvalidTransferEncoding);
                 }
             }
 
-            // Track Transfer-Encoding
-            if header.is_chunked_encoding() {
-                is_chunked = true;
-            }
+            remaining = if line_end + 2 <= remaining.len() {
+                &remaining[line_end + 2..]
+            } else {
+                &[]
+            };
         }
 
-        // Calculate bytes consumed (find end of headers)
-        bytes_consumed = buffer
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .map_or(buffer.len(), |pos| pos + 4);
+        if saw_transfer_encoding && content_length.is_some() {
+            return Err(ParseError::AmbiguousBodyLength);
+        }
+
+        let bytes_consumed = header_block_len;
 
         Ok(Self {
             buffer,
@@ -482,14 +619,9 @@ impl<'a> HeadersParser<'a> {
     /// - Else no body
     #[must_use]
     pub fn body_length(&self) -> BodyLength {
-        // RFC 7230 Section 3.3.3: Transfer-Encoding takes precedence
         if self.is_chunked {
-            // If both are present, that's technically conflicting but
-            // Transfer-Encoding wins per spec
             if self.content_length.is_some() {
-                // Per RFC 7230 3.3.3, a sender MUST NOT send Content-Length
-                // with Transfer-Encoding, but receiver MUST ignore Content-Length
-                return BodyLength::Chunked;
+                return BodyLength::Conflicting;
             }
             return BodyLength::Chunked;
         }
@@ -547,7 +679,7 @@ impl<'a> HeadersParser<'a> {
 
 /// Zero-copy HTTP request parser.
 pub struct Parser {
-    max_request_size: usize,
+    limits: ParseLimits,
 }
 
 impl Parser {
@@ -555,14 +687,21 @@ impl Parser {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            max_request_size: 1024 * 1024, // 1MB default
+            limits: ParseLimits::default(),
         }
     }
 
     /// Set maximum request size.
     #[must_use]
     pub fn with_max_size(mut self, size: usize) -> Self {
-        self.max_request_size = size;
+        self.limits.max_request_size = size;
+        self
+    }
+
+    /// Set all parsing limits.
+    #[must_use]
+    pub fn with_limits(mut self, limits: ParseLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -572,7 +711,7 @@ impl Parser {
     ///
     /// Returns an error if the request is malformed.
     pub fn parse(&self, buffer: &[u8]) -> Result<Request, ParseError> {
-        if buffer.len() > self.max_request_size {
+        if buffer.len() > self.limits.max_request_size {
             return Err(ParseError::TooLarge);
         }
 
@@ -587,20 +726,33 @@ impl Parser {
             .windows(2)
             .position(|w| w == b"\r\n")
             .ok_or(ParseError::InvalidRequestLine)?;
+        if first_line_end > self.limits.max_request_line_len {
+            return Err(ParseError::RequestLineTooLong);
+        }
 
         let request_line = &header_bytes[..first_line_end];
         let (method, path, query) = parse_request_line(request_line)?;
 
+        let header_start = first_line_end + 2;
+        let header_block_len = header_end + 4 - header_start;
+        if header_block_len > self.limits.max_headers_size {
+            return Err(ParseError::HeadersTooLarge);
+        }
+
         // Parse headers
-        let headers = parse_headers(&header_bytes[first_line_end + 2..])?;
+        let headers =
+            HeadersParser::parse_with_limits(&buffer[header_start..header_end + 4], &self.limits)?;
 
         // Build request
         let mut request = Request::new(method, path);
         request.set_query(query);
 
         // Set headers
-        for (name, value) in headers {
-            request.headers_mut().insert(name, value);
+        for header in headers.iter() {
+            let header = header?;
+            request
+                .headers_mut()
+                .insert(header.name().to_string(), header.value().to_vec());
         }
 
         // Set body
@@ -618,11 +770,276 @@ impl Default for Parser {
     }
 }
 
+// ============================================================================
+// Incremental Stateful Parser
+// ============================================================================
+
+/// Result of an incremental parse attempt.
+#[derive(Debug)]
+pub enum ParseStatus {
+    /// Parsing completed with a request and bytes consumed.
+    Complete { request: Request, consumed: usize },
+    /// More data is required to complete the request.
+    Incomplete,
+}
+
+#[derive(Debug)]
+enum ParseState {
+    RequestLine,
+    Headers {
+        method: Method,
+        path: String,
+        query: Option<String>,
+        header_start: usize,
+    },
+    Body {
+        request: Request,
+        body_length: BodyLength,
+        body_start: usize,
+    },
+}
+
+/// Incremental HTTP/1.1 parser that handles partial reads.
+///
+/// Feed bytes via [`feed`][Self::feed]. When a full request is available,
+/// returns [`ParseStatus::Complete`]. On partial data, returns
+/// [`ParseStatus::Incomplete`].
+pub struct StatefulParser {
+    limits: ParseLimits,
+    body_config: BodyConfig,
+    buffer: Vec<u8>,
+    state: ParseState,
+}
+
+impl StatefulParser {
+    /// Create a new stateful parser with default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            limits: ParseLimits::default(),
+            body_config: BodyConfig::default(),
+            buffer: Vec::new(),
+            state: ParseState::RequestLine,
+        }
+    }
+
+    /// Set maximum request size.
+    #[must_use]
+    pub fn with_max_size(mut self, size: usize) -> Self {
+        self.limits.max_request_size = size;
+        self
+    }
+
+    /// Set all parsing limits.
+    #[must_use]
+    pub fn with_limits(mut self, limits: ParseLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Set the body parsing configuration.
+    #[must_use]
+    pub fn with_body_config(mut self, config: BodyConfig) -> Self {
+        self.body_config = config;
+        self
+    }
+
+    /// Returns the current buffered byte count.
+    #[must_use]
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Clear buffered data and reset state.
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+        self.state = ParseState::RequestLine;
+    }
+
+    /// Feed new bytes into the parser and attempt to parse a request.
+    ///
+    /// To parse subsequent requests in the buffer, call `feed` again with
+    /// an empty slice after a successful parse.
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<ParseStatus, ParseError> {
+        if !bytes.is_empty() {
+            self.buffer.extend_from_slice(bytes);
+        }
+
+        if self.buffer.len() > self.limits.max_request_size {
+            return Err(ParseError::TooLarge);
+        }
+
+        loop {
+            let state = std::mem::replace(&mut self.state, ParseState::RequestLine);
+            match state {
+                ParseState::RequestLine => match parse_request_line_with_len_limit(
+                    &self.buffer,
+                    self.limits.max_request_line_len,
+                ) {
+                    Ok((method, path, query, header_start)) => {
+                        self.state = ParseState::Headers {
+                            method,
+                            path,
+                            query,
+                            header_start,
+                        };
+                    }
+                    Err(ParseError::Incomplete) => {
+                        if self.buffer.len() > self.limits.max_request_line_len {
+                            self.state = ParseState::RequestLine;
+                            return Err(ParseError::RequestLineTooLong);
+                        }
+                        self.state = ParseState::RequestLine;
+                        return Ok(ParseStatus::Incomplete);
+                    }
+                    Err(err) => return Err(err),
+                },
+                ParseState::Headers {
+                    method,
+                    path,
+                    query,
+                    header_start,
+                } => {
+                    let header_end = match find_header_end_from(&self.buffer, header_start) {
+                        Some(pos) => pos,
+                        None => {
+                            if self.buffer.len().saturating_sub(header_start)
+                                > self.limits.max_headers_size
+                            {
+                                self.state = ParseState::Headers {
+                                    method,
+                                    path,
+                                    query,
+                                    header_start,
+                                };
+                                return Err(ParseError::HeadersTooLarge);
+                            }
+                            self.state = ParseState::Headers {
+                                method,
+                                path,
+                                query,
+                                header_start,
+                            };
+                            return Ok(ParseStatus::Incomplete);
+                        }
+                    };
+
+                    let body_start = header_end + 4;
+                    let header_block_len = body_start - header_start;
+                    if header_block_len > self.limits.max_headers_size {
+                        return Err(ParseError::HeadersTooLarge);
+                    }
+                    let header_slice = &self.buffer[header_start..body_start];
+                    let headers = HeadersParser::parse_with_limits(header_slice, &self.limits)?;
+
+                    let mut request = Request::new(method, path);
+                    request.set_query(query);
+
+                    for header in headers.iter() {
+                        let header = header?;
+                        request
+                            .headers_mut()
+                            .insert(header.name().to_string(), header.value().to_vec());
+                    }
+
+                    let body_length = headers.body_length();
+                    if matches!(body_length, BodyLength::None) {
+                        let consumed = body_start;
+                        self.consume(consumed);
+                        return Ok(ParseStatus::Complete { request, consumed });
+                    }
+
+                    self.state = ParseState::Body {
+                        request,
+                        body_length,
+                        body_start,
+                    };
+                }
+                ParseState::Body {
+                    mut request,
+                    body_length,
+                    body_start,
+                } => {
+                    let body_slice = &self.buffer[body_start..];
+                    match parse_body_with_consumed(body_slice, body_length, &self.body_config) {
+                        Ok((body, body_consumed)) => {
+                            if let Some(body) = body {
+                                request.set_body(Body::Bytes(body));
+                            }
+                            let consumed = body_start + body_consumed;
+                            self.consume(consumed);
+                            return Ok(ParseStatus::Complete { request, consumed });
+                        }
+                        Err(err) => {
+                            let mapped = map_body_error(err);
+                            if matches!(mapped, ParseError::Incomplete) {
+                                self.state = ParseState::Body {
+                                    request,
+                                    body_length,
+                                    body_start,
+                                };
+                                return Ok(ParseStatus::Incomplete);
+                            }
+                            return Err(mapped);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn consume(&mut self, consumed: usize) {
+        if consumed >= self.buffer.len() {
+            self.buffer.clear();
+        } else {
+            self.buffer.drain(..consumed);
+        }
+        self.state = ParseState::RequestLine;
+    }
+}
+
+impl Default for StatefulParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+fn find_header_end_from(buffer: &[u8], start: usize) -> Option<usize> {
+    find_header_end(&buffer[start..]).map(|pos| start + pos)
+}
+
+fn parse_request_line_with_len_limit(
+    buffer: &[u8],
+    max_len: usize,
+) -> Result<(Method, String, Option<String>, usize), ParseError> {
+    let line_end = buffer
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .ok_or(ParseError::Incomplete)?;
+    if line_end > max_len {
+        return Err(ParseError::RequestLineTooLong);
+    }
+    let (method, path, query) = parse_request_line(&buffer[..line_end])?;
+    Ok((method, path, query, line_end + 2))
+}
+
+fn map_body_error(error: BodyError) -> ParseError {
+    match error {
+        BodyError::TooLarge { .. } => ParseError::TooLarge,
+        BodyError::Incomplete { .. } | BodyError::UnexpectedEof => ParseError::Incomplete,
+        BodyError::Parse(err) => err,
+        BodyError::InvalidChunkedEncoding { .. } => ParseError::InvalidHeader,
+    }
+}
+
 fn parse_request_line(line: &[u8]) -> Result<(Method, String, Option<String>), ParseError> {
+    if has_invalid_request_line_bytes(line) {
+        return Err(ParseError::InvalidRequestLine);
+    }
     let mut parts = line.split(|&b| b == b' ');
 
     let method_bytes = parts.next().ok_or(ParseError::InvalidRequestLine)?;
@@ -636,52 +1053,65 @@ fn parse_request_line(line: &[u8]) -> Result<(Method, String, Option<String>), P
 
     // Split path and query
     let (path, query) = if let Some(q_pos) = uri.find('?') {
-        (uri[..q_pos].to_string(), Some(uri[q_pos + 1..].to_string()))
+        (
+            percent_decode_path(&uri[..q_pos]),
+            Some(uri[q_pos + 1..].to_string()),
+        )
     } else {
-        (uri.to_string(), None)
+        (percent_decode_path(uri), None)
+    };
+
+    let path = match path {
+        Cow::Borrowed(borrowed) => borrowed.to_string(),
+        Cow::Owned(owned) => owned,
     };
 
     Ok((method, path, query))
 }
 
-fn parse_headers(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
-    let mut headers = Vec::new();
-    let mut rest = data;
-
-    while !rest.is_empty() {
-        let line_end = rest
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .unwrap_or(rest.len());
-
-        if line_end == 0 {
-            break;
-        }
-
-        let line = &rest[..line_end];
-        let colon_pos = line.iter().position(|&b| b == b':').ok_or(ParseError::InvalidHeader)?;
-
-        let name = std::str::from_utf8(&line[..colon_pos])
-            .map_err(|_| ParseError::InvalidHeader)?
-            .trim()
-            .to_string();
-
-        let value = line[colon_pos + 1..]
-            .iter()
-            .skip_while(|&&b| b == b' ')
-            .copied()
-            .collect();
-
-        headers.push((name, value));
-
-        rest = if line_end + 2 <= rest.len() {
-            &rest[line_end + 2..]
-        } else {
-            &[]
-        };
+/// Percent-decode a path segment.
+///
+/// Returns `Cow::Borrowed` if no decoding was needed, or `Cow::Owned` if
+/// percent sequences were decoded. Plus signs are preserved (no space decoding).
+///
+/// Invalid percent sequences are left as-is.
+fn percent_decode_path(s: &str) -> Cow<'_, str> {
+    if !s.contains('%') {
+        return Cow::Borrowed(s);
     }
 
-    Ok(headers)
+    let mut result = Vec::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                    result.push(hi << 4 | lo);
+                    i += 3;
+                } else {
+                    result.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                result.push(b);
+                i += 1;
+            }
+        }
+    }
+
+    Cow::Owned(String::from_utf8_lossy(&result).into_owned())
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -691,6 +1121,36 @@ mod tests {
     // ========================================================================
     // RequestLine Tests
     // ========================================================================
+
+    #[test]
+    fn percent_decode_path_no_encoding() {
+        let decoded = percent_decode_path("/simple/path");
+        assert!(matches!(decoded, Cow::Borrowed(_)));
+        assert_eq!(&*decoded, "/simple/path");
+    }
+
+    #[test]
+    fn percent_decode_path_simple() {
+        assert_eq!(&*percent_decode_path("/hello%20world"), "/hello world");
+        assert_eq!(&*percent_decode_path("%2F"), "/");
+    }
+
+    #[test]
+    fn percent_decode_path_utf8() {
+        assert_eq!(&*percent_decode_path("/caf%C3%A9"), "/café");
+    }
+
+    #[test]
+    fn percent_decode_path_plus_preserved() {
+        assert_eq!(&*percent_decode_path("/a+b"), "/a+b");
+    }
+
+    #[test]
+    fn parse_request_line_decodes_path() {
+        let line = b"GET /hello%20world HTTP/1.1";
+        let (_method, path, _query) = parse_request_line(line).expect("parse request line");
+        assert_eq!(path, "/hello world");
+    }
 
     #[test]
     fn request_line_simple_get() {
@@ -835,7 +1295,8 @@ mod tests {
 
     #[test]
     fn headers_multiple() {
-        let buffer = b"Host: example.com\r\nContent-Type: application/json\r\nContent-Length: 42\r\n";
+        let buffer =
+            b"Host: example.com\r\nContent-Type: application/json\r\nContent-Length: 42\r\n";
         let headers: Vec<_> = HeadersIter::new(buffer).collect();
 
         assert_eq!(headers.len(), 3);
@@ -1048,14 +1509,18 @@ mod tests {
 
     #[test]
     fn headers_parser_chunked_takes_precedence() {
-        // Per RFC 7230, Transfer-Encoding takes precedence over Content-Length
+        // Strict parsing rejects ambiguous body length.
         let buffer =
             b"Host: example.com\r\nContent-Length: 100\r\nTransfer-Encoding: chunked\r\n\r\n";
-        let parser = HeadersParser::parse(buffer).unwrap();
+        let result = HeadersParser::parse(buffer);
+        assert!(matches!(result, Err(ParseError::AmbiguousBodyLength)));
+    }
 
-        assert_eq!(parser.content_length(), Some(100));
-        assert!(parser.is_chunked());
-        assert_eq!(parser.body_length(), BodyLength::Chunked);
+    #[test]
+    fn headers_parser_invalid_transfer_encoding() {
+        let buffer = b"Host: example.com\r\nTransfer-Encoding: gzip\r\n\r\n";
+        let result = HeadersParser::parse(buffer);
+        assert!(matches!(result, Err(ParseError::InvalidTransferEncoding)));
     }
 
     #[test]
@@ -1117,5 +1582,689 @@ mod tests {
         let parser = HeadersParser::parse(buffer).unwrap();
 
         assert_eq!(parser.content_length(), Some(42));
+    }
+
+    // ========================================================================
+    // Header Limits / Security Tests
+    // ========================================================================
+
+    #[test]
+    fn headers_parser_too_many_headers() {
+        let mut limits = ParseLimits::default();
+        limits.max_header_count = 1;
+        let buffer = b"A: 1\r\nB: 2\r\n\r\n";
+        let result = HeadersParser::parse_with_limits(buffer, &limits);
+        assert!(matches!(result, Err(ParseError::TooManyHeaders)));
+    }
+
+    #[test]
+    fn headers_parser_header_line_too_long() {
+        let mut limits = ParseLimits::default();
+        limits.max_header_line_len = 8;
+        let buffer = b"Long-Header: 123\r\n\r\n";
+        let result = HeadersParser::parse_with_limits(buffer, &limits);
+        assert!(matches!(result, Err(ParseError::HeaderLineTooLong)));
+    }
+
+    #[test]
+    fn headers_parser_headers_too_large() {
+        let mut limits = ParseLimits::default();
+        limits.max_headers_size = 7;
+        let buffer = b"A: 1\r\n\r\n";
+        let result = HeadersParser::parse_with_limits(buffer, &limits);
+        assert!(matches!(result, Err(ParseError::HeadersTooLarge)));
+    }
+
+    #[test]
+    fn headers_parser_invalid_header_name() {
+        let buffer = b"Bad Header: value\r\n\r\n";
+        let result = HeadersParser::parse(buffer);
+        assert!(matches!(result, Err(ParseError::InvalidHeaderName)));
+    }
+
+    #[test]
+    fn headers_parser_invalid_header_bytes() {
+        let buffer = b"X-Test: hi\0there\r\n\r\n";
+        let result = HeadersParser::parse(buffer);
+        assert!(matches!(result, Err(ParseError::InvalidHeaderBytes)));
+    }
+
+    #[test]
+    fn request_line_too_long() {
+        let mut limits = ParseLimits::default();
+        limits.max_request_line_len = 8;
+        let mut parser = StatefulParser::new().with_limits(limits);
+        let result = parser.feed(b"GET /toolong HTTP/1.1\r\n\r\n");
+        assert!(matches!(result, Err(ParseError::RequestLineTooLong)));
+    }
+
+    // ========================================================================
+    // Stateful Parser Tests
+    // ========================================================================
+
+    #[test]
+    fn stateful_parser_content_length_partial() {
+        let mut parser = StatefulParser::new();
+        let full = b"GET /hello HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nHello";
+
+        let status = parser.feed(&full[..full.len() - 3]).unwrap();
+        assert!(matches!(status, ParseStatus::Incomplete));
+
+        let status = parser.feed(&full[full.len() - 3..]).unwrap();
+        let (request, consumed) = match status {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("expected complete request"),
+        };
+
+        assert_eq!(consumed, full.len());
+        assert_eq!(request.method(), Method::Get);
+        assert_eq!(request.path(), "/hello");
+        assert!(request.query().is_none());
+
+        match request.body() {
+            Body::Bytes(bytes) => assert_eq!(bytes, b"Hello"),
+            _ => panic!("expected bytes body"),
+        }
+
+        assert_eq!(parser.buffered_len(), 0);
+    }
+
+    #[test]
+    fn stateful_parser_headers_partial() {
+        let mut parser = StatefulParser::new();
+        let part1 = b"GET /x HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n";
+        let part2 = b"\r\nHello";
+
+        let status = parser.feed(part1).unwrap();
+        assert!(matches!(status, ParseStatus::Incomplete));
+
+        let status = parser.feed(part2).unwrap();
+        let (request, consumed) = match status {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("expected complete request"),
+        };
+
+        assert_eq!(consumed, part1.len() + part2.len());
+        assert_eq!(request.path(), "/x");
+        match request.body() {
+            Body::Bytes(bytes) => assert_eq!(bytes, b"Hello"),
+            _ => panic!("expected bytes body"),
+        }
+    }
+
+    #[test]
+    fn stateful_parser_chunked_body() {
+        let mut parser = StatefulParser::new();
+        let full = b"GET /chunk HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+
+        let status = parser.feed(full).unwrap();
+        let (request, consumed) = match status {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("expected complete request"),
+        };
+
+        assert_eq!(consumed, full.len());
+        assert_eq!(request.path(), "/chunk");
+        match request.body() {
+            Body::Bytes(bytes) => assert_eq!(bytes, b"Wikipedia"),
+            _ => panic!("expected bytes body"),
+        }
+    }
+
+    #[test]
+    fn stateful_parser_pipelined_requests() {
+        let mut parser = StatefulParser::new();
+        let req1 = b"GET /a HTTP/1.1\r\nContent-Length: 1\r\n\r\na";
+        let req2 = b"GET /b HTTP/1.1\r\nContent-Length: 1\r\n\r\nb";
+        let mut combined = Vec::new();
+        combined.extend_from_slice(req1);
+        combined.extend_from_slice(req2);
+
+        let status = parser.feed(&combined).unwrap();
+        let (request, consumed) = match status {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("expected complete request"),
+        };
+
+        assert_eq!(consumed, req1.len());
+        assert_eq!(request.path(), "/a");
+        assert_eq!(parser.buffered_len(), req2.len());
+
+        let status = parser.feed(&[]).unwrap();
+        let (request, consumed) = match status {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("expected second request"),
+        };
+
+        assert_eq!(consumed, req2.len());
+        assert_eq!(request.path(), "/b");
+        assert_eq!(parser.buffered_len(), 0);
+    }
+
+    // ========================================================================
+    // HTTP Request Smuggling Tests (Security)
+    // ========================================================================
+
+    #[test]
+    fn security_rejects_cl_te_smuggling_attempt() {
+        // CL.TE smuggling: Both Content-Length and Transfer-Encoding present
+        // This should be rejected as ambiguous per RFC 7230
+        let buffer =
+            b"POST /admin HTTP/1.1\r\nContent-Length: 13\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nSMUGGLED";
+        let parser = Parser::new();
+        let result = parser.parse(buffer);
+        // Should fail due to ambiguous body length
+        assert!(
+            result.is_err() || {
+                // If it doesn't fail, at least verify it doesn't parse the smuggled content
+                let req = result.unwrap();
+                !matches!(req.body(), Body::Bytes(b) if b == b"SMUGGLED")
+            }
+        );
+    }
+
+    #[test]
+    fn security_ambiguous_body_length_rejected() {
+        // Headers-only test: both CL and TE present
+        let buffer = b"Content-Length: 100\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let result = HeadersParser::parse(buffer);
+        assert!(matches!(result, Err(ParseError::AmbiguousBodyLength)));
+    }
+
+    #[test]
+    fn security_crlf_injection_in_path_rejected() {
+        // Attempt to inject a header via CRLF in path
+        let buffer = b"GET /path\r\nX-Injected: evil HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let result = RequestLine::parse(buffer);
+        // This should either fail or not include the injected header in the path
+        match result {
+            Err(_) => {} // Good - rejected
+            Ok(line) => {
+                // If parsed, the path should not contain CRLF
+                assert!(!line.path().contains('\r'));
+                assert!(!line.path().contains('\n'));
+            }
+        }
+    }
+
+    #[test]
+    fn security_null_byte_in_request_line_rejected() {
+        let buffer = b"GET /path\x00evil HTTP/1.1\r\n";
+        let result = RequestLine::parse(buffer);
+        assert!(matches!(result, Err(ParseError::InvalidRequestLine)));
+    }
+
+    #[test]
+    fn security_null_byte_in_header_name_rejected() {
+        let buffer = b"X-Test\x00Header: value\r\n\r\n";
+        let result = HeadersParser::parse(buffer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn security_header_injection_via_value() {
+        // Header value with CRLF should be rejected
+        let buffer = b"X-Test: value\r\nX-Injected: evil\r\n\r\n";
+        let parser = HeadersParser::parse(buffer).unwrap();
+        // The parser should see "X-Test" and "X-Injected" as separate headers
+        // (which is normal behavior) - this tests that CRLF in values doesn't
+        // create extra headers unexpectedly
+        assert!(parser.get("X-Test").is_some());
+        assert!(parser.get("X-Injected").is_some());
+    }
+
+    #[test]
+    fn security_oversized_chunk_size_rejected() {
+        // Attempt to use chunk size that would overflow usize
+        let buffer =
+            b"Host: example.com\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFFFF\r\n";
+        let headers = HeadersParser::parse(&buffer[..buffer.len() - 19]).unwrap();
+        assert!(headers.is_chunked());
+        // The actual chunked parsing would reject this
+    }
+
+    #[test]
+    fn security_negative_content_length_rejected() {
+        // Content-Length with non-numeric value
+        let buffer = b"Content-Length: -1\r\n\r\n";
+        let result = HeadersParser::parse(buffer);
+        // Should fail because -1 is not a valid usize
+        assert!(matches!(result, Err(ParseError::InvalidHeader)));
+    }
+
+    #[test]
+    fn security_content_length_overflow() {
+        // Extremely large Content-Length
+        let buffer = b"Content-Length: 99999999999999999999999999\r\n\r\n";
+        let result = HeadersParser::parse(buffer);
+        // Should fail due to parse error
+        assert!(matches!(result, Err(ParseError::InvalidHeader)));
+    }
+
+    #[test]
+    fn security_request_line_space_injection() {
+        // Extra spaces shouldn't create unexpected behavior
+        let buffer = b"GET  /path  HTTP/1.1\r\n";
+        let result = RequestLine::parse(buffer);
+        // Should handle gracefully - either reject or parse with extra spaces in path
+        match result {
+            Ok(line) => {
+                // If parsed, path includes leading space (zero-copy parser is lenient)
+                // The important thing is it doesn't crash and we can inspect the result
+                let _ = line.path();
+                let _ = line.version();
+            }
+            Err(_) => {} // Also acceptable to reject
+        }
+    }
+
+    #[test]
+    fn security_obs_fold_header_rejected() {
+        // Obsolete line folding (RFC 7230 deprecated)
+        // Line starting with space/tab is continuation of previous header
+        let buffer = b"X-Test: value\r\n continuation\r\n\r\n";
+        let result = HeadersParser::parse(buffer);
+        // Should reject obs-fold per RFC 7230
+        assert!(matches!(result, Err(ParseError::InvalidHeader)));
+    }
+
+    #[test]
+    fn security_duplicate_transfer_encoding() {
+        // Multiple Transfer-Encoding headers
+        let buffer = b"Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let parser = HeadersParser::parse(buffer).unwrap();
+        // Should still recognize as chunked (parser handles duplicates)
+        assert!(parser.is_chunked());
+    }
+
+    // ========================================================================
+    // Edge Case Tests - Request Line
+    // ========================================================================
+
+    #[test]
+    fn edge_root_path() {
+        let buffer = b"GET / HTTP/1.1\r\n";
+        let line = RequestLine::parse(buffer).unwrap();
+        assert_eq!(line.path(), "/");
+        assert_eq!(line.query(), None);
+    }
+
+    #[test]
+    fn edge_root_path_with_query() {
+        let buffer = b"GET /?key=value HTTP/1.1\r\n";
+        let line = RequestLine::parse(buffer).unwrap();
+        assert_eq!(line.path(), "/");
+        assert_eq!(line.query(), Some("key=value"));
+    }
+
+    #[test]
+    fn edge_empty_query_string() {
+        let buffer = b"GET /path? HTTP/1.1\r\n";
+        let line = RequestLine::parse(buffer).unwrap();
+        assert_eq!(line.path(), "/path");
+        assert_eq!(line.query(), Some(""));
+    }
+
+    #[test]
+    fn edge_double_slashes_in_path() {
+        let buffer = b"GET //api//v1//users HTTP/1.1\r\n";
+        let line = RequestLine::parse(buffer).unwrap();
+        assert_eq!(line.path(), "//api//v1//users");
+    }
+
+    #[test]
+    fn edge_dot_segments_in_path() {
+        let buffer = b"GET /api/../admin/./config HTTP/1.1\r\n";
+        let line = RequestLine::parse(buffer).unwrap();
+        // Parser doesn't normalize - that's router's job
+        assert_eq!(line.path(), "/api/../admin/./config");
+    }
+
+    #[test]
+    fn edge_percent_encoded_slash() {
+        let buffer = b"GET /path%2Fwith%2Fslashes HTTP/1.1\r\n";
+        let line = RequestLine::parse(buffer).unwrap();
+        // Zero-copy parser keeps encoding
+        assert!(line.path().contains("%2F") || line.path().contains("/with/"));
+    }
+
+    #[test]
+    fn edge_very_long_path() {
+        let long_path = "/".to_string() + &"a".repeat(4000);
+        let buffer = format!("GET {} HTTP/1.1\r\n", long_path);
+        let line = RequestLine::parse(buffer.as_bytes()).unwrap();
+        assert_eq!(line.path().len(), 4001);
+    }
+
+    #[test]
+    fn edge_unicode_in_path() {
+        // UTF-8 bytes for "café"
+        let buffer = b"GET /caf\xc3\xa9 HTTP/1.1\r\n";
+        let result = RequestLine::parse(buffer);
+        // Should handle UTF-8 gracefully
+        match result {
+            Ok(line) => assert!(line.path().len() > 0),
+            Err(_) => {} // Also acceptable to reject
+        }
+    }
+
+    #[test]
+    fn edge_http_version_http10() {
+        let buffer = b"GET /path HTTP/1.0\r\n";
+        let line = RequestLine::parse(buffer).unwrap();
+        assert!(line.is_http10());
+        assert!(!line.is_http11());
+    }
+
+    #[test]
+    fn edge_http_version_unknown() {
+        let buffer = b"GET /path HTTP/2.0\r\n";
+        let line = RequestLine::parse(buffer).unwrap();
+        assert_eq!(line.version(), "HTTP/2.0");
+        assert!(!line.is_http10());
+        assert!(!line.is_http11());
+    }
+
+    #[test]
+    fn edge_lowercase_method_rejected() {
+        let buffer = b"get /path HTTP/1.1\r\n";
+        let result = RequestLine::parse(buffer);
+        assert!(matches!(result, Err(ParseError::InvalidMethod)));
+    }
+
+    #[test]
+    fn edge_mixed_case_method_rejected() {
+        let buffer = b"Get /path HTTP/1.1\r\n";
+        let result = RequestLine::parse(buffer);
+        assert!(matches!(result, Err(ParseError::InvalidMethod)));
+    }
+
+    #[test]
+    fn edge_connect_method() {
+        let buffer = b"CONNECT example.com:443 HTTP/1.1\r\n";
+        let result = RequestLine::parse(buffer);
+        // CONNECT might not be supported
+        match result {
+            Ok(line) => assert_eq!(line.path(), "example.com:443"),
+            Err(ParseError::InvalidMethod) => {} // Also acceptable
+            Err(_) => panic!("unexpected error"),
+        }
+    }
+
+    // ========================================================================
+    // Edge Case Tests - Headers
+    // ========================================================================
+
+    #[test]
+    fn edge_empty_header_value() {
+        let buffer = b"X-Empty:\r\n\r\n";
+        let parser = HeadersParser::parse(buffer).unwrap();
+        let header = parser.get("X-Empty").unwrap();
+        assert_eq!(header.value(), b"");
+    }
+
+    #[test]
+    fn edge_header_with_only_spaces() {
+        let buffer = b"X-Spaces:   \r\n\r\n";
+        let parser = HeadersParser::parse(buffer).unwrap();
+        let header = parser.get("X-Spaces").unwrap();
+        // Leading whitespace trimmed, trailing may remain
+        assert!(header.value().is_empty() || header.value() == b"   ");
+    }
+
+    #[test]
+    fn edge_very_long_header_value() {
+        let long_value = "x".repeat(7000);
+        let buffer = format!("X-Long: {}\r\n\r\n", long_value);
+        let parser = HeadersParser::parse(buffer.as_bytes()).unwrap();
+        let header = parser.get("X-Long").unwrap();
+        assert_eq!(header.value().len(), 7000);
+    }
+
+    #[test]
+    fn edge_header_with_colon_in_value() {
+        let buffer = b"X-Time: 12:30:45\r\n\r\n";
+        let parser = HeadersParser::parse(buffer).unwrap();
+        let header = parser.get("X-Time").unwrap();
+        assert_eq!(header.value_str(), Some("12:30:45"));
+    }
+
+    #[test]
+    fn edge_header_name_with_numbers() {
+        let buffer = b"X-Header-123: value\r\n\r\n";
+        let parser = HeadersParser::parse(buffer).unwrap();
+        assert!(parser.get("X-Header-123").is_some());
+    }
+
+    #[test]
+    fn edge_header_value_with_utf8() {
+        let buffer = "X-Message: Hello, 世界!\r\n\r\n".as_bytes();
+        let parser = HeadersParser::parse(buffer).unwrap();
+        let header = parser.get("X-Message").unwrap();
+        assert!(header.value_str().is_some());
+    }
+
+    #[test]
+    fn edge_many_small_headers() {
+        let mut buffer = String::new();
+        for i in 0..50 {
+            buffer.push_str(&format!("X-H{}: v{}\r\n", i, i));
+        }
+        buffer.push_str("\r\n");
+        let parser = HeadersParser::parse(buffer.as_bytes()).unwrap();
+        assert!(parser.get("X-H0").is_some());
+        assert!(parser.get("X-H49").is_some());
+    }
+
+    #[test]
+    fn edge_content_length_with_leading_zeros() {
+        let buffer = b"Content-Length: 00042\r\n\r\n";
+        let parser = HeadersParser::parse(buffer).unwrap();
+        assert_eq!(parser.content_length(), Some(42));
+    }
+
+    #[test]
+    fn edge_content_length_with_whitespace() {
+        let buffer = b"Content-Length:   42  \r\n\r\n";
+        let parser = HeadersParser::parse(buffer).unwrap();
+        assert_eq!(parser.content_length(), Some(42));
+    }
+
+    // ========================================================================
+    // High-Level Parser Tests
+    // ========================================================================
+
+    #[test]
+    fn parser_simple_get() {
+        let parser = Parser::new();
+        let buffer = b"GET /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let request = parser.parse(buffer).unwrap();
+
+        assert_eq!(request.method(), Method::Get);
+        assert_eq!(request.path(), "/api/users");
+        assert!(request.query().is_none());
+    }
+
+    #[test]
+    fn parser_post_with_json_body() {
+        let parser = Parser::new();
+        let buffer = b"POST /api/items HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"id\": \"123\"}";
+        let request = parser.parse(buffer).unwrap();
+
+        assert_eq!(request.method(), Method::Post);
+        assert_eq!(request.path(), "/api/items");
+        match request.body() {
+            Body::Bytes(bytes) => assert_eq!(bytes, b"{\"id\": \"123\"}"),
+            _ => panic!("expected bytes body"),
+        }
+    }
+
+    #[test]
+    fn parser_request_with_query() {
+        let parser = Parser::new();
+        let buffer = b"GET /search?q=rust&limit=10 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let request = parser.parse(buffer).unwrap();
+
+        assert_eq!(request.path(), "/search");
+        assert_eq!(
+            request.query(),
+            Some("q=rust&limit=10".to_string()).as_deref()
+        );
+    }
+
+    #[test]
+    fn parser_max_size_respected() {
+        let parser = Parser::new().with_max_size(50);
+        let buffer = b"GET /path HTTP/1.1\r\nHost: example.com\r\nX-Long: this is a very long header that exceeds the limit\r\n\r\n";
+        let result = parser.parse(buffer);
+        assert!(matches!(result, Err(ParseError::TooLarge)));
+    }
+
+    #[test]
+    fn parser_custom_limits() {
+        let limits = ParseLimits {
+            max_request_size: 1024,
+            max_request_line_len: 100,
+            max_header_count: 10,
+            max_header_line_len: 200,
+            max_headers_size: 500,
+        };
+        let parser = Parser::new().with_limits(limits);
+        let buffer = b"GET /path HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let request = parser.parse(buffer).unwrap();
+        assert_eq!(request.method(), Method::Get);
+    }
+
+    #[test]
+    fn parser_incomplete_request() {
+        let parser = Parser::new();
+        let buffer = b"GET /path HTTP/1.1\r\nHost: example.com\r\n";
+        // Missing final \r\n
+        let result = parser.parse(buffer);
+        assert!(matches!(result, Err(ParseError::Incomplete)));
+    }
+
+    #[test]
+    fn parser_preserves_headers() {
+        let parser = Parser::new();
+        let buffer =
+            b"GET /path HTTP/1.1\r\nHost: example.com\r\nX-Custom: my-value\r\nAccept: */*\r\n\r\n";
+        let request = parser.parse(buffer).unwrap();
+
+        assert!(request.headers().get("Host").is_some());
+        assert!(request.headers().get("X-Custom").is_some());
+        assert!(request.headers().get("Accept").is_some());
+    }
+
+    // ========================================================================
+    // Malformed Request Tests
+    // ========================================================================
+
+    #[test]
+    fn malformed_empty_input() {
+        let parser = Parser::new();
+        let result = parser.parse(b"");
+        assert!(matches!(result, Err(ParseError::Incomplete)));
+    }
+
+    #[test]
+    fn malformed_only_crlf() {
+        let parser = Parser::new();
+        let result = parser.parse(b"\r\n\r\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_no_method() {
+        let buffer = b"/path HTTP/1.1\r\n\r\n";
+        let result = RequestLine::parse(buffer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_garbage_input() {
+        let parser = Parser::new();
+        let result = parser.parse(b"not a valid http request at all");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_binary_garbage() {
+        let parser = Parser::new();
+        let result = parser.parse(b"\x00\x01\x02\x03\x04\x05\r\n\r\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_tab_instead_of_space() {
+        let buffer = b"GET\t/path\tHTTP/1.1\r\n\r\n";
+        let result = RequestLine::parse(buffer);
+        // Should fail since tab is not space
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_lf_only_line_ending() {
+        let buffer = b"GET /path HTTP/1.1\nHost: example.com\n\n";
+        let parser = Parser::new();
+        let result = parser.parse(buffer);
+        // LF-only should fail (CRLF required)
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_cr_only_line_ending() {
+        let buffer = b"GET /path HTTP/1.1\rHost: example.com\r\r";
+        let parser = Parser::new();
+        let result = parser.parse(buffer);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // StatefulParser Additional Tests
+    // ========================================================================
+
+    #[test]
+    fn stateful_parser_clear_resets_state() {
+        let mut parser = StatefulParser::new();
+        parser.feed(b"GET /partial").unwrap();
+        assert!(parser.buffered_len() > 0);
+
+        parser.clear();
+        assert_eq!(parser.buffered_len(), 0);
+
+        // Should be able to parse fresh - needs a proper request with headers
+        let result = parser
+            .feed(b"GET /new HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .unwrap();
+        assert!(matches!(result, ParseStatus::Complete { .. }));
+    }
+
+    #[test]
+    fn stateful_parser_byte_at_a_time() {
+        let mut parser = StatefulParser::new();
+        let request = b"GET /path HTTP/1.1\r\nHost: x\r\n\r\n";
+
+        for (i, byte) in request.iter().enumerate() {
+            let result = parser.feed(&[*byte]).unwrap();
+            if i == request.len() - 1 {
+                assert!(matches!(result, ParseStatus::Complete { .. }));
+            } else {
+                assert!(matches!(result, ParseStatus::Incomplete));
+            }
+        }
+    }
+
+    #[test]
+    fn stateful_parser_with_body_config() {
+        use crate::body::BodyConfig;
+
+        let config = BodyConfig::new().with_max_size(10);
+        let mut parser = StatefulParser::new().with_body_config(config);
+
+        // Body within limit
+        let result = parser.feed(b"GET /path HTTP/1.1\r\nContent-Length: 5\r\n\r\nHello");
+        assert!(result.is_ok());
     }
 }

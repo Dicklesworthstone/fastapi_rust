@@ -5,6 +5,9 @@
 
 use asupersync::types::CancelReason;
 use asupersync::{Budget, Cx, Outcome, RegionId, TaskId};
+use std::sync::Arc;
+
+use crate::dependency::{DependencyCache, DependencyOverrides};
 
 /// Request context that wraps asupersync's capability context.
 ///
@@ -34,6 +37,10 @@ pub struct RequestContext {
     cx: Cx,
     /// Unique request identifier for tracing.
     request_id: u64,
+    /// Request-scoped dependency cache.
+    dependency_cache: Arc<DependencyCache>,
+    /// Dependency overrides (primarily for testing).
+    dependency_overrides: Arc<DependencyOverrides>,
 }
 
 impl RequestContext {
@@ -43,7 +50,23 @@ impl RequestContext {
     /// creating a new region for the request lifecycle.
     #[must_use]
     pub fn new(cx: Cx, request_id: u64) -> Self {
-        Self { cx, request_id }
+        Self {
+            cx,
+            request_id,
+            dependency_cache: Arc::new(DependencyCache::new()),
+            dependency_overrides: Arc::new(DependencyOverrides::new()),
+        }
+    }
+
+    /// Creates a new request context with shared dependency overrides.
+    #[must_use]
+    pub fn with_overrides(cx: Cx, request_id: u64, overrides: Arc<DependencyOverrides>) -> Self {
+        Self {
+            cx,
+            request_id,
+            dependency_cache: Arc::new(DependencyCache::new()),
+            dependency_overrides: overrides,
+        }
     }
 
     /// Returns the unique request identifier.
@@ -52,6 +75,18 @@ impl RequestContext {
     #[must_use]
     pub fn request_id(&self) -> u64 {
         self.request_id
+    }
+
+    /// Returns the dependency cache for this request.
+    #[must_use]
+    pub fn dependency_cache(&self) -> &DependencyCache {
+        &self.dependency_cache
+    }
+
+    /// Returns the dependency overrides registry.
+    #[must_use]
+    pub fn dependency_overrides(&self) -> &DependencyOverrides {
+        &self.dependency_overrides
     }
 
     /// Returns the underlying region ID from asupersync.

@@ -845,8 +845,8 @@ mod tests {
     #[test]
     fn log_entry_compact() {
         let ctx = test_context();
-        let entry = LogEntry::new(&ctx, LogLevel::Warn, "Something happened")
-            .field("error_code", "E001");
+        let entry =
+            LogEntry::new(&ctx, LogLevel::Warn, "Something happened").field("error_code", "E001");
 
         let compact = entry.to_compact();
         assert!(compact.starts_with("[W] req=12345"));

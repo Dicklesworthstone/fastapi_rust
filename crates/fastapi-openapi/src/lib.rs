@@ -27,5 +27,10 @@
 mod schema;
 mod spec;
 
-pub use schema::{JsonSchema, ObjectSchema, Schema};
-pub use spec::{Info, OpenApi, OpenApiBuilder, Operation, PathItem, Server};
+pub use schema::{
+    ArraySchema, JsonSchema, ObjectSchema, PrimitiveSchema, RefSchema, Schema, SchemaType,
+};
+pub use spec::{
+    Components, Example, HasParamMeta, Info, MediaType, OpenApi, OpenApiBuilder, Operation,
+    ParamMeta, Parameter, ParameterLocation, PathItem, RequestBody, Response, Server, Tag,
+};

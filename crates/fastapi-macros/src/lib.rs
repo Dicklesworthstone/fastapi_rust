@@ -20,6 +20,7 @@
 use proc_macro::TokenStream;
 
 mod openapi;
+mod param;
 mod route;
 mod validate;
 

@@ -63,22 +63,27 @@ pub use fastapi_router as router;
 
 // Re-export commonly used types
 pub use fastapi_core::{
-    FromRequest, HttpError, IntoResponse, Method, Request, Response, ResponseBody, StatusCode,
-    ValidationError, ValidationErrors,
+    App, AppBuilder, AppConfig, Cors, CorsConfig, DefaultConfig, DefaultDependencyConfig,
+    DependencyOverrides, DependencyScope, Depends, DependsConfig, FromDependency, FromRequest,
+    HttpError, IntoResponse, Method, NoCache, Request, RequestId, RequestIdConfig,
+    RequestIdMiddleware, Response, ResponseBody, StateContainer, StatusCode, ValidationError,
+    ValidationErrors,
 };
 
 // Re-export testing utilities
 pub use fastapi_core::{CookieJar, RequestBuilder, TestClient, TestResponse};
-pub use fastapi_macros::{delete, get, patch, post, put, JsonSchema, Validate};
+pub use fastapi_macros::{JsonSchema, Validate, delete, get, patch, post, put};
 pub use fastapi_openapi::{OpenApi, OpenApiBuilder};
 pub use fastapi_router::{Route, Router};
 
 /// Prelude module for convenient imports.
 pub mod prelude {
     pub use crate::{
-        delete, get, patch, post, put, FromRequest, HttpError, IntoResponse, JsonSchema, Method,
-        OpenApi, OpenApiBuilder, Request, Response, Route, Router, StatusCode, Validate,
-        ValidationError, ValidationErrors,
+        App, AppBuilder, AppConfig, Cors, CorsConfig, DefaultConfig, DefaultDependencyConfig,
+        DependencyOverrides, DependencyScope, Depends, DependsConfig, FromDependency, FromRequest,
+        HttpError, IntoResponse, JsonSchema, Method, NoCache, OpenApi, OpenApiBuilder, Request,
+        RequestId, RequestIdMiddleware, Response, Route, Router, StatusCode, Validate,
+        ValidationError, ValidationErrors, delete, get, patch, post, put,
     };
     pub use serde::{Deserialize, Serialize};
 }

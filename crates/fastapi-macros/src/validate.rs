@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput};
+use syn::{DeriveInput, parse_macro_input};
 
 pub fn derive_validate_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

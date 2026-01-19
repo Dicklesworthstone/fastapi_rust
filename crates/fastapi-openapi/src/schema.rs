@@ -1,4 +1,4 @@
-//! JSON Schema types.
+//! JSON Schema types for OpenAPI 3.1.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +19,82 @@ pub enum Schema {
     Primitive(PrimitiveSchema),
 }
 
+impl Schema {
+    /// Create a string schema.
+    pub fn string() -> Self {
+        Schema::Primitive(PrimitiveSchema::string())
+    }
+
+    /// Create an integer schema with optional format.
+    pub fn integer(format: Option<&str>) -> Self {
+        Schema::Primitive(PrimitiveSchema::integer(format))
+    }
+
+    /// Create a number schema with optional format.
+    pub fn number(format: Option<&str>) -> Self {
+        Schema::Primitive(PrimitiveSchema::number(format))
+    }
+
+    /// Create a boolean schema.
+    pub fn boolean() -> Self {
+        Schema::Primitive(PrimitiveSchema::boolean())
+    }
+
+    /// Create a reference schema.
+    pub fn reference(name: &str) -> Self {
+        Schema::Ref(RefSchema {
+            reference: format!("#/components/schemas/{name}"),
+        })
+    }
+
+    /// Create an array schema.
+    pub fn array(items: Schema) -> Self {
+        Schema::Array(ArraySchema {
+            items: Box::new(items),
+            min_items: None,
+            max_items: None,
+        })
+    }
+
+    /// Create an object schema with the given properties.
+    pub fn object(properties: HashMap<String, Schema>, required: Vec<String>) -> Self {
+        Schema::Object(ObjectSchema {
+            title: None,
+            description: None,
+            properties,
+            required,
+            additional_properties: None,
+        })
+    }
+
+    /// Set nullable on this schema (if primitive).
+    #[must_use]
+    pub fn nullable(mut self) -> Self {
+        if let Schema::Primitive(ref mut p) = self {
+            p.nullable = true;
+        }
+        self
+    }
+
+    /// Set title on this schema (if object).
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        if let Schema::Object(ref mut o) = self {
+            o.title = Some(title.into());
+        }
+        self
+    }
+
+    /// Set description on this schema (if object).
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        if let Schema::Object(ref mut o) = self {
+            o.description = Some(description.into());
+        }
+        self
+    }
+}
+
 /// Schema reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefSchema {
@@ -30,6 +106,12 @@ pub struct RefSchema {
 /// Object schema.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectSchema {
+    /// Schema title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Schema description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Object properties.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub properties: HashMap<String, Schema>,
@@ -68,6 +150,45 @@ pub struct PrimitiveSchema {
     pub nullable: bool,
 }
 
+impl PrimitiveSchema {
+    /// Create a string schema.
+    pub fn string() -> Self {
+        Self {
+            schema_type: SchemaType::String,
+            format: None,
+            nullable: false,
+        }
+    }
+
+    /// Create an integer schema with optional format.
+    pub fn integer(format: Option<&str>) -> Self {
+        Self {
+            schema_type: SchemaType::Integer,
+            format: format.map(String::from),
+            nullable: false,
+        }
+    }
+
+    /// Create a number schema with optional format.
+    pub fn number(format: Option<&str>) -> Self {
+        Self {
+            schema_type: SchemaType::Number,
+            format: format.map(String::from),
+            nullable: false,
+        }
+    }
+
+    /// Create a boolean schema.
+    pub fn boolean() -> Self {
+        Self {
+            schema_type: SchemaType::Boolean,
+            format: None,
+            nullable: false,
+        }
+    }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -94,6 +215,7 @@ pub trait JsonSchema {
     fn schema() -> Schema;
 
     /// Get the schema name for use in `#/components/schemas/`.
+    #[must_use]
     fn schema_name() -> Option<&'static str> {
         None
     }

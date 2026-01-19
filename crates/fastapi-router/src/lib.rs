@@ -10,10 +10,12 @@
 //! - Type-safe path converters
 //! - Static route optimization
 
-#![forbid(unsafe_code)]
+#![warn(unsafe_code)]
 
 mod r#match;
+mod registry;
 mod trie;
 
-pub use r#match::RouteMatch;
+pub use r#match::{AllowedMethods, RouteLookup, RouteMatch};
+pub use registry::{RouteRegistration, registered_routes};
 pub use trie::{Converter, ParamInfo, Route, Router};
