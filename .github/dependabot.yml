@@ -1,0 +1,48 @@
+version: 2
+updates:
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Rust dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    groups:
+      rust-deps:
+        patterns: ["*"]
+        exclude-patterns:
+          - "serde*"
+          - "tokio*"
+      serde:
+        patterns: ["serde*"]
+      tokio:
+        patterns: ["tokio*"]
+    ignore:
+      # Ignore patch updates for pre-1.0 crates to reduce noise
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+        # Re-enable patch updates for security-critical deps
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "rust"
+    open-pull-requests-limit: 10

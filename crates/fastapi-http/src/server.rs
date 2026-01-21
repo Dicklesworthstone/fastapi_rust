@@ -240,7 +240,8 @@ impl TcpServer {
         H: Fn(RequestContext, Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        let listener = TcpListener::bind(&self.config.bind_addr).await?;
+        let bind_addr = self.config.bind_addr.clone();
+        let listener = TcpListener::bind(bind_addr).await?;
         let local_addr = listener.local_addr()?;
 
         cx.trace(&format!("Server listening on {local_addr}"));
