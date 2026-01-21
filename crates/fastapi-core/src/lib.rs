@@ -51,6 +51,7 @@
 #![allow(clippy::elidable_lifetime_names)]
 #![allow(clippy::map_unwrap_or)]
 
+pub mod api_router;
 pub mod app;
 mod context;
 mod dependency;
@@ -100,6 +101,9 @@ pub use testing::{CookieJar, RequestBuilder, TestClient, TestResponse, json_cont
 
 // Re-export logging utilities
 pub use logging::{AutoSpan, LogConfig, LogEntry, LogLevel, Span};
+
+// Re-export api_router utilities
+pub use api_router::{APIRouter, ResponseDef, RouterDependency, RouterRoute};
 
 // Re-export app utilities
 pub use app::{

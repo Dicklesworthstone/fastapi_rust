@@ -103,6 +103,7 @@ pub fn is_agent_environment() -> bool {
 pub fn detect_environment() -> DetectionResult {
     // Check for explicit overrides first
     let override_mode = check_overrides();
+    let force_color = force_color_enabled();
 
     // Check agent env vars
     let (is_agent_var, detected_agent) = check_agent_vars();
@@ -120,7 +121,13 @@ pub fn detect_environment() -> DetectionResult {
     let is_agent = match override_mode {
         Some(OverrideMode::ForceAgent) => true,
         Some(OverrideMode::ForceHuman) => false,
-        None => is_agent_var || is_ci_var || no_color_set || !is_tty,
+        None => {
+            if force_color {
+                false
+            } else {
+                is_agent_var || is_ci_var || no_color_set || !is_tty
+            }
+        }
     };
 
     DetectionResult {
@@ -149,6 +156,13 @@ fn check_overrides() -> Option<OverrideMode> {
     } else {
         None
     }
+}
+
+/// Check for FORCE_COLOR override.
+fn force_color_enabled() -> bool {
+    env::var("FORCE_COLOR")
+        .map(|v| v != "0")
+        .unwrap_or(false)
 }
 
 /// Check for known agent environment variables.
@@ -186,15 +200,18 @@ pub fn detected_preference() -> OutputPreference {
 #[must_use]
 pub fn detection_diagnostics() -> String {
     let result = detect_environment();
+    let force_color = force_color_enabled();
     format!(
         "DetectionResult {{ is_agent: {}, detected_agent: {:?}, is_ci: {}, \
-         detected_ci: {:?}, is_tty: {}, no_color_set: {}, override_mode: {:?} }}",
+         detected_ci: {:?}, is_tty: {}, no_color_set: {}, force_color_set: {}, \
+         override_mode: {:?} }}",
         result.is_agent,
         result.detected_agent,
         result.is_ci,
         result.detected_ci,
         result.is_tty,
         result.no_color_set,
+        force_color,
         result.override_mode
     )
 }
@@ -223,6 +240,7 @@ mod tests {
                 env::remove_var(var);
             }
             env::remove_var("NO_COLOR");
+            env::remove_var("FORCE_COLOR");
             env::remove_var("FASTAPI_AGENT_MODE");
             env::remove_var("FASTAPI_HUMAN_MODE");
         }
@@ -413,6 +431,20 @@ mod tests {
                 result.no_color_set,
                 "Empty NO_COLOR should still be detected"
             );
+        });
+    }
+
+    // ========== FORCE_COLOR OVERRIDE TESTS ==========
+
+    #[test]
+    #[serial]
+    fn test_force_color_overrides_ci() {
+        with_clean_env(|| {
+            set_env("CI", "true");
+            set_env("FORCE_COLOR", "1");
+            let result = detect_environment();
+            eprintln!("[TEST] FORCE_COLOR override: {result:?}");
+            assert!(!result.is_agent, "FORCE_COLOR should prefer rich output");
         });
     }
 
