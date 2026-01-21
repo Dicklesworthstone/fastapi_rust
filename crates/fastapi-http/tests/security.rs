@@ -203,7 +203,10 @@ fn injection_null_byte_header_name() {
     let buffer = b"X-Test\x00Header: value\r\n\r\n";
     let result = HeadersParser::parse(buffer);
 
-    assert!(result.is_err(), "Null bytes in header name should be rejected");
+    assert!(
+        result.is_err(),
+        "Null bytes in header name should be rejected"
+    );
 }
 
 /// Null byte in header value
@@ -632,10 +635,7 @@ fn cve_host_header_injection() {
     let parser = HeadersParser::parse(buffer).unwrap();
 
     // Should be two separate headers
-    assert_eq!(
-        parser.get("Host").unwrap().value_str(),
-        Some("evil.com")
-    );
+    assert_eq!(parser.get("Host").unwrap().value_str(), Some("evil.com"));
     assert!(parser.get("X-Injected-Host").is_some());
 }
 

@@ -182,10 +182,13 @@ impl<H: Handler + 'static> TestClient<H> {
     /// let client = TestClient::new(my_handler);
     /// ```
     pub fn new(handler: H) -> Self {
+        let dependency_overrides = handler
+            .dependency_overrides()
+            .unwrap_or_else(|| Arc::new(DependencyOverrides::new()));
         Self {
             handler: Arc::new(handler),
             cookies: Arc::new(Mutex::new(CookieJar::new())),
-            dependency_overrides: Arc::new(DependencyOverrides::new()),
+            dependency_overrides,
             seed: None,
             request_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
@@ -202,10 +205,13 @@ impl<H: Handler + 'static> TestClient<H> {
     /// let client = TestClient::with_seed(my_handler, 42);
     /// ```
     pub fn with_seed(handler: H, seed: u64) -> Self {
+        let dependency_overrides = handler
+            .dependency_overrides()
+            .unwrap_or_else(|| Arc::new(DependencyOverrides::new()));
         Self {
             handler: Arc::new(handler),
             cookies: Arc::new(Mutex::new(CookieJar::new())),
-            dependency_overrides: Arc::new(DependencyOverrides::new()),
+            dependency_overrides,
             seed: Some(seed),
             request_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
@@ -1374,6 +1380,9 @@ macro_rules! assert_body_matches {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
+    use crate::dependency::{Depends, FromDependency};
+    use crate::error::HttpError;
     use crate::middleware::BoxFuture;
 
     // Simple test handler
@@ -1430,6 +1439,29 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct OverrideDep {
+        value: usize,
+    }
+
+    impl FromDependency for OverrideDep {
+        type Error = HttpError;
+
+        async fn from_dependency(
+            _ctx: &RequestContext,
+            _req: &mut Request,
+        ) -> Result<Self, Self::Error> {
+            Ok(Self { value: 1 })
+        }
+    }
+
+    async fn override_dep_handler(ctx: &RequestContext, req: &mut Request) -> Response {
+        let dep = Depends::<OverrideDep>::from_request(ctx, req)
+            .await
+            .expect("dependency extraction failed");
+        Response::ok().body(ResponseBody::Bytes(dep.value.to_string().into_bytes()))
+    }
+
     #[test]
     fn test_client_get() {
         let client = TestClient::new(EchoHandler);
@@ -1446,6 +1478,33 @@ mod tests {
 
         assert_eq!(response.status_code(), 200);
         assert!(response.text().contains("Method: Post"));
+    }
+
+    #[test]
+    fn test_app_dependency_override_used_by_test_client() {
+        let app = App::builder()
+            .route("/", Method::Get, override_dep_handler)
+            .build();
+
+        app.override_dependency_value(OverrideDep { value: 42 });
+
+        let client = TestClient::new(app);
+        let response = client.get("/").send();
+
+        assert_eq!(response.text(), "42");
+    }
+
+    #[test]
+    fn test_test_client_override_clear() {
+        let client = TestClient::new(override_dep_handler);
+
+        client.override_dependency_value(OverrideDep { value: 9 });
+        let response = client.get("/").send();
+        assert_eq!(response.text(), "9");
+
+        client.clear_dependency_overrides();
+        let response = client.get("/").send();
+        assert_eq!(response.text(), "1");
     }
 
     #[test]
