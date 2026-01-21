@@ -726,7 +726,9 @@ mod tests {
     #[test]
     fn conflict_different_converter_same_position() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/items/{id:int}")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/items/{id:int}"))
+            .unwrap();
 
         // Different converter but same structural position - conflicts
         let result = router.add(Route::new(Method::Get, "/items/{id:uuid}"));
@@ -760,7 +762,9 @@ mod tests {
         let mut router = Router::new();
         router.add(Route::new(Method::Get, "/users")).unwrap();
         router.add(Route::new(Method::Get, "/users/{id}")).unwrap();
-        router.add(Route::new(Method::Get, "/users/{id}/posts")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/users/{id}/posts"))
+            .unwrap();
 
         assert_eq!(router.routes().len(), 3);
     }
@@ -834,7 +838,9 @@ mod tests {
     #[test]
     fn unicode_in_param_value() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/users/{name}")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/users/{name}"))
+            .unwrap();
 
         let m = router.match_path("/users/田中", Method::Get);
         assert!(m.is_some());
@@ -845,7 +851,9 @@ mod tests {
     #[test]
     fn special_characters_in_param_value() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/files/{name}")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/files/{name}"))
+            .unwrap();
 
         // Hyphens and underscores
         let m = router.match_path("/files/my-file_v2", Method::Get);
@@ -861,7 +869,9 @@ mod tests {
     #[test]
     fn empty_param_value() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/users/{id}/posts")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/users/{id}/posts"))
+            .unwrap();
 
         // Empty segment won't match a param (filtered out during parsing)
         let m = router.match_path("/users//posts", Method::Get);
@@ -884,7 +894,9 @@ mod tests {
     fn many_routes_same_prefix() {
         let mut router = Router::new();
         for i in 0..100 {
-            router.add(Route::new(Method::Get, &format!("/api/v{}", i))).unwrap();
+            router
+                .add(Route::new(Method::Get, &format!("/api/v{}", i)))
+                .unwrap();
         }
 
         assert_eq!(router.routes().len(), 100);
@@ -948,7 +960,9 @@ mod tests {
     #[test]
     fn int_converter_edge_cases() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/items/{id:int}")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/items/{id:int}"))
+            .unwrap();
 
         // Zero
         let m = router.match_path("/items/0", Method::Get);
@@ -975,7 +989,9 @@ mod tests {
     #[test]
     fn float_converter_edge_cases() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/values/{val:float}")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/values/{val:float}"))
+            .unwrap();
 
         // Scientific notation
         let m = router.match_path("/values/1e10", Method::Get);
@@ -997,7 +1013,9 @@ mod tests {
     #[test]
     fn uuid_converter_case_sensitivity() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/objects/{id:uuid}")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/objects/{id:uuid}"))
+            .unwrap();
 
         // Lowercase
         let m = router.match_path("/objects/550e8400-e29b-41d4-a716-446655440000", Method::Get);
@@ -1015,17 +1033,38 @@ mod tests {
     #[test]
     fn uuid_converter_invalid_formats() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/objects/{id:uuid}")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/objects/{id:uuid}"))
+            .unwrap();
 
         // Wrong length
-        assert!(router.match_path("/objects/550e8400-e29b-41d4-a716-44665544000", Method::Get).is_none());
-        assert!(router.match_path("/objects/550e8400-e29b-41d4-a716-4466554400000", Method::Get).is_none());
+        assert!(
+            router
+                .match_path("/objects/550e8400-e29b-41d4-a716-44665544000", Method::Get)
+                .is_none()
+        );
+        assert!(
+            router
+                .match_path(
+                    "/objects/550e8400-e29b-41d4-a716-4466554400000",
+                    Method::Get
+                )
+                .is_none()
+        );
 
         // Missing hyphens
-        assert!(router.match_path("/objects/550e8400e29b41d4a716446655440000", Method::Get).is_none());
+        assert!(
+            router
+                .match_path("/objects/550e8400e29b41d4a716446655440000", Method::Get)
+                .is_none()
+        );
 
         // Invalid hex characters
-        assert!(router.match_path("/objects/550g8400-e29b-41d4-a716-446655440000", Method::Get).is_none());
+        assert!(
+            router
+                .match_path("/objects/550g8400-e29b-41d4-a716-446655440000", Method::Get)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1089,7 +1128,10 @@ mod tests {
     #[test]
     fn lookup_404_empty_router() {
         let router = Router::new();
-        assert!(matches!(router.lookup("/anything", Method::Get), RouteLookup::NotFound));
+        assert!(matches!(
+            router.lookup("/anything", Method::Get),
+            RouteLookup::NotFound
+        ));
     }
 
     #[test]
@@ -1098,18 +1140,32 @@ mod tests {
         router.add(Route::new(Method::Get, "/users")).unwrap();
         router.add(Route::new(Method::Get, "/items")).unwrap();
 
-        assert!(matches!(router.lookup("/other", Method::Get), RouteLookup::NotFound));
-        assert!(matches!(router.lookup("/user", Method::Get), RouteLookup::NotFound)); // Typo
+        assert!(matches!(
+            router.lookup("/other", Method::Get),
+            RouteLookup::NotFound
+        ));
+        assert!(matches!(
+            router.lookup("/user", Method::Get),
+            RouteLookup::NotFound
+        )); // Typo
     }
 
     #[test]
     fn lookup_404_partial_path_match() {
         let mut router = Router::new();
-        router.add(Route::new(Method::Get, "/api/v1/users")).unwrap();
+        router
+            .add(Route::new(Method::Get, "/api/v1/users"))
+            .unwrap();
 
         // Partial matches should be 404
-        assert!(matches!(router.lookup("/api", Method::Get), RouteLookup::NotFound));
-        assert!(matches!(router.lookup("/api/v1", Method::Get), RouteLookup::NotFound));
+        assert!(matches!(
+            router.lookup("/api", Method::Get),
+            RouteLookup::NotFound
+        ));
+        assert!(matches!(
+            router.lookup("/api/v1", Method::Get),
+            RouteLookup::NotFound
+        ));
     }
 
     #[test]
@@ -1118,7 +1174,10 @@ mod tests {
         router.add(Route::new(Method::Get, "/users")).unwrap();
 
         // Extra segments should be 404
-        assert!(matches!(router.lookup("/users/extra", Method::Get), RouteLookup::NotFound));
+        assert!(matches!(
+            router.lookup("/users/extra", Method::Get),
+            RouteLookup::NotFound
+        ));
     }
 
     #[test]
@@ -1143,7 +1202,9 @@ mod tests {
         router.add(Route::new(Method::Put, "/resource")).unwrap();
         router.add(Route::new(Method::Delete, "/resource")).unwrap();
         router.add(Route::new(Method::Patch, "/resource")).unwrap();
-        router.add(Route::new(Method::Options, "/resource")).unwrap();
+        router
+            .add(Route::new(Method::Options, "/resource"))
+            .unwrap();
 
         let result = router.lookup("/resource", Method::Trace);
         match result {
@@ -1186,7 +1247,11 @@ mod tests {
     fn allowed_methods_head_not_duplicated() {
         // If HEAD is already present, don't add it again
         let allowed = AllowedMethods::new(vec![Method::Get, Method::Head]);
-        let count = allowed.methods().iter().filter(|&&m| m == Method::Head).count();
+        let count = allowed
+            .methods()
+            .iter()
+            .filter(|&&m| m == Method::Head)
+            .count();
         assert_eq!(count, 1);
     }
 

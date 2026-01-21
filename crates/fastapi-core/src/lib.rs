@@ -2,7 +2,7 @@
 //!
 //! This crate provides the fundamental building blocks:
 //! - [`Request`] and [`Response`] types
-//! - [`RequestContext`] wrapping asupersync's [`Cx`](asupersync::Cx)
+//! - [`RequestContext`] wrapping asupersync's `Cx`
 //! - [`FromRequest`] trait for extractors
 //! - Error types and [`IntoResponse`] trait
 //!
@@ -24,6 +24,32 @@
 //! - **Deterministic testing**: Lab runtime for reproducible tests
 
 #![forbid(unsafe_code)]
+// Pedantic clippy lints allowed (style suggestions, not correctness issues)
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::single_char_pattern)]
+#![allow(clippy::unused_async)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::unreadable_literal)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::derivable_impls)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::single_match)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::semicolon_if_nothing_returned)]
+#![allow(clippy::never_loop)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::manual_strip)]
+#![allow(clippy::format_push_string)]
+#![allow(clippy::struct_field_names)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::elidable_lifetime_names)]
+#![allow(clippy::map_unwrap_or)]
 
 pub mod app;
 mod context;

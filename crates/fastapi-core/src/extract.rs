@@ -5297,8 +5297,7 @@ mod optional_tests {
             .insert("content-type", b"application/json".to_vec());
         req.set_body(Body::Bytes(b"{\"value\": 42}".to_vec()));
 
-        let result =
-            futures_executor::block_on(Option::<Json<Data>>::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(Option::<Json<Data>>::from_request(&ctx, &mut req));
         let Some(Json(data)) = result.unwrap() else {
             panic!("Expected Some");
         };
@@ -5321,8 +5320,7 @@ mod optional_tests {
             .insert("content-type", b"text/plain".to_vec());
         req.set_body(Body::Bytes(b"{\"value\": 42}".to_vec()));
 
-        let result =
-            futures_executor::block_on(Option::<Json<Data>>::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(Option::<Json<Data>>::from_request(&ctx, &mut req));
         assert!(result.unwrap().is_none());
     }
 
@@ -5342,8 +5340,7 @@ mod optional_tests {
             .insert("content-type", b"application/json".to_vec());
         // No body set, but content-type is present - will fail parsing
 
-        let result =
-            futures_executor::block_on(Option::<Json<Data>>::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(Option::<Json<Data>>::from_request(&ctx, &mut req));
         // Either None (if content-type check fails) or None from parse error
         assert!(result.unwrap().is_none());
     }
@@ -5364,8 +5361,7 @@ mod optional_tests {
             .insert("content-type", b"application/json".to_vec());
         req.set_body(Body::Bytes(b"{ not valid json }".to_vec()));
 
-        let result =
-            futures_executor::block_on(Option::<Json<Data>>::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(Option::<Json<Data>>::from_request(&ctx, &mut req));
         assert!(result.unwrap().is_none());
     }
 
@@ -5375,7 +5371,10 @@ mod optional_tests {
     fn optional_path_present_valid() {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/users/42");
-        req.insert_extension(PathParams::from_pairs(vec![("id".to_string(), "42".to_string())]));
+        req.insert_extension(PathParams::from_pairs(vec![(
+            "id".to_string(),
+            "42".to_string(),
+        )]));
 
         let result = futures_executor::block_on(Option::<Path<i64>>::from_request(&ctx, &mut req));
         let Some(Path(id)) = result.unwrap() else {
@@ -5398,7 +5397,10 @@ mod optional_tests {
     fn optional_path_invalid_type_returns_none() {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/users/abc");
-        req.insert_extension(PathParams::from_pairs(vec![("id".to_string(), "abc".to_string())]));
+        req.insert_extension(PathParams::from_pairs(vec![(
+            "id".to_string(),
+            "abc".to_string(),
+        )]));
 
         let result = futures_executor::block_on(Option::<Path<i64>>::from_request(&ctx, &mut req));
         assert!(result.unwrap().is_none());
@@ -5474,8 +5476,7 @@ mod optional_tests {
         let app_state = AppState::new().with(42i32);
         req.insert_extension(app_state);
 
-        let result =
-            futures_executor::block_on(Option::<State<i32>>::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(Option::<State<i32>>::from_request(&ctx, &mut req));
         let Some(State(val)) = result.unwrap() else {
             panic!("Expected Some");
         };
@@ -5488,8 +5489,7 @@ mod optional_tests {
         let mut req = Request::new(Method::Get, "/");
         // No AppState set
 
-        let result =
-            futures_executor::block_on(Option::<State<i32>>::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(Option::<State<i32>>::from_request(&ctx, &mut req));
         assert!(result.unwrap().is_none());
     }
 
@@ -5500,8 +5500,7 @@ mod optional_tests {
         let app_state = AppState::new().with("string".to_string()); // String, not i32
         req.insert_extension(app_state);
 
-        let result =
-            futures_executor::block_on(Option::<State<i32>>::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(Option::<State<i32>>::from_request(&ctx, &mut req));
         assert!(result.unwrap().is_none());
     }
 }
@@ -5531,7 +5530,10 @@ mod combination_tests {
 
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/users/42");
-        req.insert_extension(PathParams::from_pairs(vec![("id".to_string(), "42".to_string())]));
+        req.insert_extension(PathParams::from_pairs(vec![(
+            "id".to_string(),
+            "42".to_string(),
+        )]));
         req.set_query(Some("limit=10".to_string()));
 
         // Extract path
@@ -5560,7 +5562,10 @@ mod combination_tests {
         req.headers_mut()
             .insert("content-type", b"application/json".to_vec());
         req.set_body(Body::Bytes(b"{\"name\": \"Widget\"}".to_vec()));
-        req.insert_extension(PathParams::from_pairs(vec![("cat_id".to_string(), "5".to_string())]));
+        req.insert_extension(PathParams::from_pairs(vec![(
+            "cat_id".to_string(),
+            "5".to_string(),
+        )]));
 
         // Extract path first (doesn't consume body)
         let path_result = futures_executor::block_on(Path::<i64>::from_request(&ctx, &mut req));
@@ -5624,8 +5629,7 @@ mod combination_tests {
             ("comment_id".to_string(), "456".to_string()),
         ]));
 
-        let result =
-            futures_executor::block_on(Path::<CommentPath>::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(Path::<CommentPath>::from_request(&ctx, &mut req));
         let Path(path) = result.unwrap();
         assert_eq!(path.post_id, 123);
         assert_eq!(path.comment_id, 456);
@@ -5642,7 +5646,10 @@ mod combination_tests {
 
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/users/42");
-        req.insert_extension(PathParams::from_pairs(vec![("id".to_string(), "42".to_string())]));
+        req.insert_extension(PathParams::from_pairs(vec![(
+            "id".to_string(),
+            "42".to_string(),
+        )]));
 
         // Required path - should succeed
         let path_result = futures_executor::block_on(Path::<i64>::from_request(&ctx, &mut req));
@@ -5661,8 +5668,7 @@ mod combination_tests {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/");
 
-        let result =
-            futures_executor::block_on(RequestContext::from_request(&ctx, &mut req));
+        let result = futures_executor::block_on(RequestContext::from_request(&ctx, &mut req));
         let extracted_ctx = result.unwrap();
         assert_eq!(extracted_ctx.request_id(), ctx.request_id());
     }
@@ -5683,7 +5689,10 @@ mod combination_tests {
 
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/projects/99/tasks");
-        req.insert_extension(PathParams::from_pairs(vec![("project_id".to_string(), "99".to_string())]));
+        req.insert_extension(PathParams::from_pairs(vec![(
+            "project_id".to_string(),
+            "99".to_string(),
+        )]));
         req.set_query(Some("status=active".to_string()));
         let app_state = AppState::new().with(DbPool {
             connection_count: 10,
@@ -5759,7 +5768,9 @@ mod edge_case_tests {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/search");
         // "こんにちは" (hello in Japanese), percent-encoded
-        req.set_query(Some("q=%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF".to_string()));
+        req.set_query(Some(
+            "q=%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF".to_string(),
+        ));
 
         let result = futures_executor::block_on(Query::<Search>::from_request(&ctx, &mut req));
         let Query(search) = result.unwrap();
@@ -5770,7 +5781,10 @@ mod edge_case_tests {
     fn path_with_unicode() {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/users/用户123");
-        req.insert_extension(PathParams::from_pairs(vec![("name".to_string(), "用户123".to_string())]));
+        req.insert_extension(PathParams::from_pairs(vec![(
+            "name".to_string(),
+            "用户123".to_string(),
+        )]));
 
         let result = futures_executor::block_on(Path::<String>::from_request(&ctx, &mut req));
         let Path(name) = result.unwrap();
@@ -6000,7 +6014,10 @@ mod edge_case_tests {
     fn path_empty_string() {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/items//details");
-        req.insert_extension(PathParams::from_pairs(vec![("id".to_string(), String::new())]));
+        req.insert_extension(PathParams::from_pairs(vec![(
+            "id".to_string(),
+            String::new(),
+        )]));
 
         let result = futures_executor::block_on(Path::<String>::from_request(&ctx, &mut req));
         let Path(id) = result.unwrap();
@@ -6139,7 +6156,9 @@ mod security_tests {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/test");
         // SQL injection attempt - should be treated as literal string
-        req.set_query(Some("name=Robert%27%3B%20DROP%20TABLE%20users%3B--".to_string()));
+        req.set_query(Some(
+            "name=Robert%27%3B%20DROP%20TABLE%20users%3B--".to_string(),
+        ));
 
         let result = futures_executor::block_on(Query::<Params>::from_request(&ctx, &mut req));
         let Query(params) = result.unwrap();
@@ -6208,11 +6227,7 @@ mod security_tests {
             req.set_body(Body::Bytes(b"{\"value\": 42}".to_vec()));
 
             let result = futures_executor::block_on(Json::<Data>::from_request(&ctx, &mut req));
-            assert!(
-                result.is_ok(),
-                "Failed for content-type: {}",
-                content_type
-            );
+            assert!(result.is_ok(), "Failed for content-type: {}", content_type);
         }
     }
 

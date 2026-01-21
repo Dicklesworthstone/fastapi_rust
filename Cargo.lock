@@ -14,7 +14,6 @@ dependencies = [
 [[package]]
 name = "asupersync"
 version = "0.1.0"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git#dd247ab1a2dabec2199a881343db9291c1681d57"
 dependencies = [
  "bincode",
  "crossbeam-deque",

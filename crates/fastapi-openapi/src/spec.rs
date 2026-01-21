@@ -522,7 +522,10 @@ mod param_meta_tests {
             .example(serde_json::json!(1));
 
         assert_eq!(meta.title.as_deref(), Some("Page"));
-        assert_eq!(meta.description.as_deref(), Some("Page number for pagination"));
+        assert_eq!(
+            meta.description.as_deref(),
+            Some("Page number for pagination")
+        );
         assert_eq!(meta.ge, Some(1.0));
         assert_eq!(meta.le, Some(1000.0));
         assert_eq!(meta.example, Some(serde_json::json!(1)));
@@ -606,11 +609,7 @@ mod param_meta_tests {
 
     #[test]
     fn numeric_constraints_together() {
-        let meta = ParamMeta::new()
-            .gt(0.0)
-            .lt(100.0)
-            .ge(1.0)
-            .le(99.0);
+        let meta = ParamMeta::new().gt(0.0).lt(100.0).ge(1.0).le(99.0);
 
         assert_eq!(meta.gt, Some(0.0));
         assert_eq!(meta.lt, Some(100.0));

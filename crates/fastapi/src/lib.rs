@@ -52,7 +52,7 @@
 //! - [`fastapi_openapi`] — OpenAPI 3.1 types and generation
 
 #![forbid(unsafe_code)]
-#![doc = include_str!("../../../PROPOSED_RUST_ARCHITECTURE.md")]
+// Design doc at PROPOSED_RUST_ARCHITECTURE.md (not embedded - too many conceptual code examples)
 
 // Re-export crates
 pub use fastapi_core as core;

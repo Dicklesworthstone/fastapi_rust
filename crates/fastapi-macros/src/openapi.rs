@@ -6,7 +6,7 @@
 //! # Supported Types
 //!
 //! - Primitive types: String, &str, i8-i64, u8-u64, f32, f64, bool
-//! - Collections: Vec<T>, Option<T>, HashMap<K, V>
+//! - Collections: `Vec<T>`, `Option<T>`, `HashMap<K, V>`
 //! - Custom structs (with nested schema generation)
 //!
 //! # Attributes
@@ -282,10 +282,10 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
         || quote! { Some(#name_str.to_string()) },
         |t| quote! { Some(#t.to_string()) },
     );
-    let description = struct_attrs.description.as_ref().map_or_else(
-        || quote! { None },
-        |d| quote! { Some(#d.to_string()) },
-    );
+    let description = struct_attrs
+        .description
+        .as_ref()
+        .map_or_else(|| quote! { None }, |d| quote! { Some(#d.to_string()) });
 
     // Handle struct data
     let fields = match &input.data {

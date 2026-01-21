@@ -84,8 +84,10 @@ impl StartupHook {
     /// For async hooks, this returns the future to await.
     pub fn run(
         self,
-    ) -> Result<Option<Pin<Box<dyn Future<Output = Result<(), StartupHookError>> + Send>>>, StartupHookError>
-    {
+    ) -> Result<
+        Option<Pin<Box<dyn Future<Output = Result<(), StartupHookError>> + Send>>>,
+        StartupHookError,
+    > {
         match self {
             Self::Sync(f) => f().map(|()| None),
             Self::AsyncFactory(f) => Ok(Some(f())),
@@ -568,8 +570,7 @@ pub struct AppBuilder {
     exception_handlers: ExceptionHandlers,
     startup_hooks: Vec<StartupHook>,
     shutdown_hooks: Vec<Box<dyn FnOnce() + Send>>,
-    async_shutdown_hooks:
-        Vec<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+    async_shutdown_hooks: Vec<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
 }
 
 impl Default for AppBuilder {
@@ -793,8 +794,9 @@ impl AppBuilder {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), StartupHookError>> + Send + 'static,
     {
-        self.startup_hooks
-            .push(StartupHook::AsyncFactory(Box::new(move || Box::pin(hook()))));
+        self.startup_hooks.push(StartupHook::AsyncFactory(Box::new(
+            move || Box::pin(hook()),
+        )));
         self
     }
 
@@ -909,8 +911,9 @@ pub struct App {
     exception_handlers: Arc<ExceptionHandlers>,
     startup_hooks: parking_lot::Mutex<Vec<StartupHook>>,
     shutdown_hooks: parking_lot::Mutex<Vec<Box<dyn FnOnce() + Send>>>,
-    async_shutdown_hooks:
-        parking_lot::Mutex<Vec<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>>,
+    async_shutdown_hooks: parking_lot::Mutex<
+        Vec<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+    >,
 }
 
 impl App {
@@ -1781,18 +1784,14 @@ mod tests {
 
     #[test]
     fn app_builder_startup_hook_registration() {
-        let builder = App::builder()
-            .on_startup(|| Ok(()))
-            .on_startup(|| Ok(()));
+        let builder = App::builder().on_startup(|| Ok(())).on_startup(|| Ok(()));
 
         assert_eq!(builder.startup_hook_count(), 2);
     }
 
     #[test]
     fn app_builder_shutdown_hook_registration() {
-        let builder = App::builder()
-            .on_shutdown(|| {})
-            .on_shutdown(|| {});
+        let builder = App::builder().on_shutdown(|| {}).on_shutdown(|| {});
 
         assert_eq!(builder.shutdown_hook_count(), 2);
     }
@@ -2030,9 +2029,7 @@ mod tests {
 
     #[test]
     fn app_builder_debug_includes_hooks() {
-        let builder = App::builder()
-            .on_startup(|| Ok(()))
-            .on_shutdown(|| {});
+        let builder = App::builder().on_startup(|| Ok(())).on_shutdown(|| {});
 
         let debug = format!("{:?}", builder);
         assert!(debug.contains("startup_hooks"));

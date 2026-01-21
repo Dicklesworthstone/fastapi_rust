@@ -23,6 +23,16 @@
 //! ```
 
 #![forbid(unsafe_code)]
+// Pedantic clippy lints allowed (style suggestions, not correctness issues)
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::single_match)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::len_zero)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::trivially_copy_pass_by_ref)]
 
 mod schema;
 mod spec;

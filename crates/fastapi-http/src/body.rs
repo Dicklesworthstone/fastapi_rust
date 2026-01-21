@@ -13,13 +13,13 @@
 //!
 //! # Streaming
 //!
-//! Large bodies can be read incrementally via the [`BodyReader`] trait,
+//! Large bodies can be read incrementally via the body reader API,
 //! which supports async I/O integration with checkpoints.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use fastapi_http::body::{BodyConfig, BodyReader, ContentLengthReader};
+//! use fastapi_http::body::{BodyConfig, ContentLengthReader};
 //!
 //! let config = BodyConfig::default().with_max_size(1024 * 1024);
 //! let mut reader = ContentLengthReader::new(body_bytes, 100, &config)?;

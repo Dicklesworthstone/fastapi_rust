@@ -703,7 +703,7 @@ impl<'a> RequestLogger<'a> {
 /// Logs a message at the TRACE level with request context.
 ///
 /// Returns a [`LogEntry`] that can be emitted or inspected.
-/// For zero-overhead logging, use [`RequestLogger`] or [`emit_trace!`].
+/// For zero-overhead logging, use [`RequestLogger`].
 ///
 /// # Example
 ///
