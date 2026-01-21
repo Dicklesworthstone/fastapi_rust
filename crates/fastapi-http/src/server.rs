@@ -616,8 +616,7 @@ impl TcpServer {
             // Determine if we should keep the connection alive:
             // - Client must request keep-alive (or HTTP/1.1 default)
             // - We must not have exceeded max requests per connection
-            let at_max_requests =
-                max_requests > 0 && requests_on_connection >= max_requests;
+            let at_max_requests = max_requests > 0 && requests_on_connection >= max_requests;
             let server_will_keep_alive = client_wants_keep_alive && !at_max_requests;
 
             // Record start time for timeout detection
@@ -1159,7 +1158,8 @@ mod tests {
 
     #[test]
     fn config_drain_timeout_can_be_set() {
-        let config = ServerConfig::new("127.0.0.1:8080").with_drain_timeout(Duration::from_secs(60));
+        let config =
+            ServerConfig::new("127.0.0.1:8080").with_drain_timeout(Duration::from_secs(60));
         assert_eq!(config.drain_timeout, Duration::from_secs(60));
     }
 

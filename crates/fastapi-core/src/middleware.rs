@@ -1579,6 +1579,390 @@ impl Middleware for RequestIdMiddleware {
     }
 }
 
+// ============================================================================
+// Security Headers Middleware
+// ============================================================================
+
+/// X-Frame-Options header value.
+///
+/// Controls whether the page can be displayed in a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XFrameOptions {
+    /// Prevents any domain from framing the content.
+    Deny,
+    /// Allows the current site to frame the content.
+    SameOrigin,
+}
+
+impl XFrameOptions {
+    fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Deny => b"DENY",
+            Self::SameOrigin => b"SAMEORIGIN",
+        }
+    }
+}
+
+/// Referrer-Policy header value.
+///
+/// Controls how much referrer information should be included with requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferrerPolicy {
+    /// No referrer information is sent.
+    NoReferrer,
+    /// Only send origin when protocol security level stays the same.
+    NoReferrerWhenDowngrade,
+    /// Only send the origin (not the path).
+    Origin,
+    /// Only send origin for cross-origin requests.
+    OriginWhenCrossOrigin,
+    /// Send the origin, path, and query string for same-origin requests only.
+    SameOrigin,
+    /// Only send origin if protocol security level stays the same.
+    StrictOrigin,
+    /// Send full referrer for same-origin, origin only for cross-origin if secure.
+    StrictOriginWhenCrossOrigin,
+    /// Send the full referrer (not recommended).
+    UnsafeUrl,
+}
+
+impl ReferrerPolicy {
+    fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::NoReferrer => b"no-referrer",
+            Self::NoReferrerWhenDowngrade => b"no-referrer-when-downgrade",
+            Self::Origin => b"origin",
+            Self::OriginWhenCrossOrigin => b"origin-when-cross-origin",
+            Self::SameOrigin => b"same-origin",
+            Self::StrictOrigin => b"strict-origin",
+            Self::StrictOriginWhenCrossOrigin => b"strict-origin-when-cross-origin",
+            Self::UnsafeUrl => b"unsafe-url",
+        }
+    }
+}
+
+/// Configuration for the Security Headers middleware.
+///
+/// All headers are optional. Set a value to `Some(...)` to include the header,
+/// or `None` to skip it.
+///
+/// # Defaults
+///
+/// The default configuration provides secure defaults:
+/// - `X-Content-Type-Options: nosniff`
+/// - `X-Frame-Options: DENY`
+/// - `X-XSS-Protection: 0` (disabled as modern browsers have built-in protection)
+/// - `Referrer-Policy: strict-origin-when-cross-origin`
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::{SecurityHeadersConfig, XFrameOptions, ReferrerPolicy};
+///
+/// let config = SecurityHeadersConfig::default()
+///     .x_frame_options(XFrameOptions::SameOrigin)
+///     .content_security_policy("default-src 'self'")
+///     .hsts(31536000, true);  // 1 year, includeSubDomains
+/// ```
+#[derive(Debug, Clone)]
+pub struct SecurityHeadersConfig {
+    /// X-Content-Type-Options header.
+    /// Default: `Some("nosniff")`
+    pub x_content_type_options: Option<&'static str>,
+    /// X-Frame-Options header.
+    /// Default: `Some(XFrameOptions::Deny)`
+    pub x_frame_options: Option<XFrameOptions>,
+    /// X-XSS-Protection header.
+    /// Default: `Some("0")` (disabled - modern browsers have built-in protection)
+    ///
+    /// Note: This header is largely obsolete. Setting it to "0" is recommended
+    /// to prevent potential security issues in older browsers.
+    pub x_xss_protection: Option<&'static str>,
+    /// Content-Security-Policy header.
+    /// Default: `None` (should be configured based on your application)
+    pub content_security_policy: Option<String>,
+    /// Strict-Transport-Security (HSTS) header.
+    /// Tuple of (max_age_seconds, include_sub_domains, preload)
+    /// Default: `None` (only set this for HTTPS-only sites)
+    pub hsts: Option<(u64, bool, bool)>,
+    /// Referrer-Policy header.
+    /// Default: `Some(ReferrerPolicy::StrictOriginWhenCrossOrigin)`
+    pub referrer_policy: Option<ReferrerPolicy>,
+    /// Permissions-Policy header (formerly Feature-Policy).
+    /// Default: `None` (should be configured based on your application)
+    pub permissions_policy: Option<String>,
+}
+
+impl Default for SecurityHeadersConfig {
+    fn default() -> Self {
+        Self {
+            x_content_type_options: Some("nosniff"),
+            x_frame_options: Some(XFrameOptions::Deny),
+            x_xss_protection: Some("0"),
+            content_security_policy: None,
+            hsts: None,
+            referrer_policy: Some(ReferrerPolicy::StrictOriginWhenCrossOrigin),
+            permissions_policy: None,
+        }
+    }
+}
+
+impl SecurityHeadersConfig {
+    /// Creates a new configuration with secure defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates an empty configuration (no headers).
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            x_content_type_options: None,
+            x_frame_options: None,
+            x_xss_protection: None,
+            content_security_policy: None,
+            hsts: None,
+            referrer_policy: None,
+            permissions_policy: None,
+        }
+    }
+
+    /// Creates a strict configuration for high-security applications.
+    ///
+    /// Includes:
+    /// - All default headers
+    /// - HSTS with 1 year max-age and includeSubDomains
+    /// - A basic CSP that only allows same-origin resources
+    #[must_use]
+    pub fn strict() -> Self {
+        Self {
+            x_content_type_options: Some("nosniff"),
+            x_frame_options: Some(XFrameOptions::Deny),
+            x_xss_protection: Some("0"),
+            content_security_policy: Some("default-src 'self'".to_string()),
+            hsts: Some((31536000, true, false)), // 1 year, includeSubDomains
+            referrer_policy: Some(ReferrerPolicy::NoReferrer),
+            permissions_policy: Some("geolocation=(), camera=(), microphone=()".to_string()),
+        }
+    }
+
+    /// Sets the X-Content-Type-Options header.
+    #[must_use]
+    pub fn x_content_type_options(mut self, value: Option<&'static str>) -> Self {
+        self.x_content_type_options = value;
+        self
+    }
+
+    /// Sets the X-Frame-Options header.
+    #[must_use]
+    pub fn x_frame_options(mut self, value: Option<XFrameOptions>) -> Self {
+        self.x_frame_options = value;
+        self
+    }
+
+    /// Sets the X-XSS-Protection header.
+    #[must_use]
+    pub fn x_xss_protection(mut self, value: Option<&'static str>) -> Self {
+        self.x_xss_protection = value;
+        self
+    }
+
+    /// Sets the Content-Security-Policy header.
+    #[must_use]
+    pub fn content_security_policy(mut self, value: impl Into<String>) -> Self {
+        self.content_security_policy = Some(value.into());
+        self
+    }
+
+    /// Clears the Content-Security-Policy header.
+    #[must_use]
+    pub fn no_content_security_policy(mut self) -> Self {
+        self.content_security_policy = None;
+        self
+    }
+
+    /// Sets the Strict-Transport-Security (HSTS) header.
+    ///
+    /// # Arguments
+    ///
+    /// - `max_age`: Maximum time (in seconds) the browser should remember HTTPS
+    /// - `include_sub_domains`: Whether to apply to all subdomains
+    /// - `preload`: Whether to include in browser preload lists (use with caution)
+    ///
+    /// # Warning
+    ///
+    /// Only enable HSTS for sites that are HTTPS-only. Enabling HSTS incorrectly
+    /// can make your site inaccessible.
+    #[must_use]
+    pub fn hsts(mut self, max_age: u64, include_sub_domains: bool, preload: bool) -> Self {
+        self.hsts = Some((max_age, include_sub_domains, preload));
+        self
+    }
+
+    /// Clears the HSTS header.
+    #[must_use]
+    pub fn no_hsts(mut self) -> Self {
+        self.hsts = None;
+        self
+    }
+
+    /// Sets the Referrer-Policy header.
+    #[must_use]
+    pub fn referrer_policy(mut self, value: Option<ReferrerPolicy>) -> Self {
+        self.referrer_policy = value;
+        self
+    }
+
+    /// Sets the Permissions-Policy header.
+    #[must_use]
+    pub fn permissions_policy(mut self, value: impl Into<String>) -> Self {
+        self.permissions_policy = Some(value.into());
+        self
+    }
+
+    /// Clears the Permissions-Policy header.
+    #[must_use]
+    pub fn no_permissions_policy(mut self) -> Self {
+        self.permissions_policy = None;
+        self
+    }
+
+    /// Builds the HSTS header value.
+    fn build_hsts_value(&self) -> Option<String> {
+        self.hsts.map(|(max_age, include_sub, preload)| {
+            let mut value = format!("max-age={}", max_age);
+            if include_sub {
+                value.push_str("; includeSubDomains");
+            }
+            if preload {
+                value.push_str("; preload");
+            }
+            value
+        })
+    }
+}
+
+/// Middleware that adds security-related HTTP headers to responses.
+///
+/// This middleware helps protect against common web vulnerabilities by setting
+/// appropriate security headers. It's recommended for all web applications.
+///
+/// # Headers
+///
+/// - **X-Content-Type-Options**: Prevents MIME type sniffing
+/// - **X-Frame-Options**: Controls iframe embedding (clickjacking protection)
+/// - **X-XSS-Protection**: Legacy XSS filter control (disabled by default)
+/// - **Content-Security-Policy**: Controls resource loading
+/// - **Strict-Transport-Security**: Enforces HTTPS
+/// - **Referrer-Policy**: Controls referrer information
+/// - **Permissions-Policy**: Controls browser features
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::{SecurityHeaders, SecurityHeadersConfig};
+///
+/// // Use defaults
+/// let mw = SecurityHeaders::new();
+///
+/// // Custom configuration
+/// let config = SecurityHeadersConfig::default()
+///     .content_security_policy("default-src 'self'; img-src *")
+///     .hsts(86400, false, false);  // 1 day
+///
+/// let mw = SecurityHeaders::with_config(config);
+/// ```
+#[derive(Debug, Clone)]
+pub struct SecurityHeaders {
+    config: SecurityHeadersConfig,
+}
+
+impl Default for SecurityHeaders {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SecurityHeaders {
+    /// Creates a new middleware with default configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: SecurityHeadersConfig::default(),
+        }
+    }
+
+    /// Creates a new middleware with custom configuration.
+    #[must_use]
+    pub fn with_config(config: SecurityHeadersConfig) -> Self {
+        Self { config }
+    }
+
+    /// Creates a middleware with strict security settings.
+    #[must_use]
+    pub fn strict() -> Self {
+        Self {
+            config: SecurityHeadersConfig::strict(),
+        }
+    }
+}
+
+impl Middleware for SecurityHeaders {
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        _req: &'a Request,
+        response: Response,
+    ) -> BoxFuture<'a, Response> {
+        let config = self.config.clone();
+        Box::pin(async move {
+            let mut resp = response;
+
+            // X-Content-Type-Options
+            if let Some(value) = config.x_content_type_options {
+                resp = resp.header("X-Content-Type-Options", value.as_bytes().to_vec());
+            }
+
+            // X-Frame-Options
+            if let Some(value) = config.x_frame_options {
+                resp = resp.header("X-Frame-Options", value.as_bytes().to_vec());
+            }
+
+            // X-XSS-Protection
+            if let Some(value) = config.x_xss_protection {
+                resp = resp.header("X-XSS-Protection", value.as_bytes().to_vec());
+            }
+
+            // Content-Security-Policy
+            if let Some(ref value) = config.content_security_policy {
+                resp = resp.header("Content-Security-Policy", value.as_bytes().to_vec());
+            }
+
+            // Strict-Transport-Security
+            if let Some(ref hsts_value) = config.build_hsts_value() {
+                resp = resp.header("Strict-Transport-Security", hsts_value.as_bytes().to_vec());
+            }
+
+            // Referrer-Policy
+            if let Some(value) = config.referrer_policy {
+                resp = resp.header("Referrer-Policy", value.as_bytes().to_vec());
+            }
+
+            // Permissions-Policy
+            if let Some(ref value) = config.permissions_policy {
+                resp = resp.header("Permissions-Policy", value.as_bytes().to_vec());
+            }
+
+            resp
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "SecurityHeaders"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2847,5 +3231,183 @@ mod tests {
 
         let mw = MyCustomMiddleware;
         assert!(mw.name().contains("MyCustomMiddleware"));
+    }
+
+    // =========================================================================
+    // Security Headers Middleware Tests
+    // =========================================================================
+
+    #[test]
+    fn security_headers_default_config() {
+        let config = SecurityHeadersConfig::default();
+        assert_eq!(config.x_content_type_options, Some("nosniff"));
+        assert_eq!(config.x_frame_options, Some(XFrameOptions::Deny));
+        assert_eq!(config.x_xss_protection, Some("0"));
+        assert!(config.content_security_policy.is_none());
+        assert!(config.hsts.is_none());
+        assert_eq!(config.referrer_policy, Some(ReferrerPolicy::StrictOriginWhenCrossOrigin));
+        assert!(config.permissions_policy.is_none());
+    }
+
+    #[test]
+    fn security_headers_none_config() {
+        let config = SecurityHeadersConfig::none();
+        assert!(config.x_content_type_options.is_none());
+        assert!(config.x_frame_options.is_none());
+        assert!(config.x_xss_protection.is_none());
+        assert!(config.content_security_policy.is_none());
+        assert!(config.hsts.is_none());
+        assert!(config.referrer_policy.is_none());
+        assert!(config.permissions_policy.is_none());
+    }
+
+    #[test]
+    fn security_headers_strict_config() {
+        let config = SecurityHeadersConfig::strict();
+        assert_eq!(config.x_content_type_options, Some("nosniff"));
+        assert_eq!(config.x_frame_options, Some(XFrameOptions::Deny));
+        assert_eq!(config.content_security_policy, Some("default-src 'self'".to_string()));
+        assert_eq!(config.hsts, Some((31536000, true, false)));
+        assert_eq!(config.referrer_policy, Some(ReferrerPolicy::NoReferrer));
+        assert!(config.permissions_policy.is_some());
+    }
+
+    #[test]
+    fn security_headers_config_builder() {
+        let config = SecurityHeadersConfig::new()
+            .x_frame_options(Some(XFrameOptions::SameOrigin))
+            .content_security_policy("default-src 'self'")
+            .hsts(86400, false, false)
+            .referrer_policy(Some(ReferrerPolicy::Origin));
+
+        assert_eq!(config.x_frame_options, Some(XFrameOptions::SameOrigin));
+        assert_eq!(config.content_security_policy, Some("default-src 'self'".to_string()));
+        assert_eq!(config.hsts, Some((86400, false, false)));
+        assert_eq!(config.referrer_policy, Some(ReferrerPolicy::Origin));
+    }
+
+    #[test]
+    fn security_headers_hsts_value_format() {
+        // Basic HSTS
+        let config = SecurityHeadersConfig::none().hsts(3600, false, false);
+        assert_eq!(config.build_hsts_value(), Some("max-age=3600".to_string()));
+
+        // With includeSubDomains
+        let config = SecurityHeadersConfig::none().hsts(3600, true, false);
+        assert_eq!(config.build_hsts_value(), Some("max-age=3600; includeSubDomains".to_string()));
+
+        // With preload
+        let config = SecurityHeadersConfig::none().hsts(3600, false, true);
+        assert_eq!(config.build_hsts_value(), Some("max-age=3600; preload".to_string()));
+
+        // With both
+        let config = SecurityHeadersConfig::none().hsts(3600, true, true);
+        assert_eq!(config.build_hsts_value(), Some("max-age=3600; includeSubDomains; preload".to_string()));
+    }
+
+    #[test]
+    fn security_headers_middleware_adds_default_headers() {
+        let mw = SecurityHeaders::new();
+        let ctx = test_context();
+        let req = Request::new(crate::request::Method::Get, "/");
+        let response = Response::ok();
+
+        let result = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // Check that default headers are present
+        assert!(header_value(&result, "X-Content-Type-Options").is_some());
+        assert!(header_value(&result, "X-Frame-Options").is_some());
+        assert!(header_value(&result, "X-XSS-Protection").is_some());
+        assert!(header_value(&result, "Referrer-Policy").is_some());
+
+        // Check that optional headers are NOT present by default
+        assert!(header_value(&result, "Content-Security-Policy").is_none());
+        assert!(header_value(&result, "Strict-Transport-Security").is_none());
+        assert!(header_value(&result, "Permissions-Policy").is_none());
+    }
+
+    #[test]
+    fn security_headers_middleware_with_csp() {
+        let config = SecurityHeadersConfig::new()
+            .content_security_policy("default-src 'self'; script-src 'self' 'unsafe-inline'");
+        let mw = SecurityHeaders::with_config(config);
+        let ctx = test_context();
+        let req = Request::new(crate::request::Method::Get, "/");
+        let response = Response::ok();
+
+        let result = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        let csp = header_value(&result, "Content-Security-Policy");
+        assert!(csp.is_some());
+        assert_eq!(csp.unwrap(), "default-src 'self'; script-src 'self' 'unsafe-inline'");
+    }
+
+    #[test]
+    fn security_headers_middleware_with_hsts() {
+        let config = SecurityHeadersConfig::new().hsts(31536000, true, false);
+        let mw = SecurityHeaders::with_config(config);
+        let ctx = test_context();
+        let req = Request::new(crate::request::Method::Get, "/");
+        let response = Response::ok();
+
+        let result = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        let hsts = header_value(&result, "Strict-Transport-Security");
+        assert!(hsts.is_some());
+        assert_eq!(hsts.unwrap(), "max-age=31536000; includeSubDomains");
+    }
+
+    #[test]
+    fn security_headers_middleware_name() {
+        let mw = SecurityHeaders::new();
+        assert_eq!(mw.name(), "SecurityHeaders");
+    }
+
+    #[test]
+    fn x_frame_options_values() {
+        assert_eq!(XFrameOptions::Deny.as_bytes(), b"DENY");
+        assert_eq!(XFrameOptions::SameOrigin.as_bytes(), b"SAMEORIGIN");
+    }
+
+    #[test]
+    fn referrer_policy_values() {
+        assert_eq!(ReferrerPolicy::NoReferrer.as_bytes(), b"no-referrer");
+        assert_eq!(ReferrerPolicy::NoReferrerWhenDowngrade.as_bytes(), b"no-referrer-when-downgrade");
+        assert_eq!(ReferrerPolicy::Origin.as_bytes(), b"origin");
+        assert_eq!(ReferrerPolicy::OriginWhenCrossOrigin.as_bytes(), b"origin-when-cross-origin");
+        assert_eq!(ReferrerPolicy::SameOrigin.as_bytes(), b"same-origin");
+        assert_eq!(ReferrerPolicy::StrictOrigin.as_bytes(), b"strict-origin");
+        assert_eq!(ReferrerPolicy::StrictOriginWhenCrossOrigin.as_bytes(), b"strict-origin-when-cross-origin");
+        assert_eq!(ReferrerPolicy::UnsafeUrl.as_bytes(), b"unsafe-url");
+    }
+
+    #[test]
+    fn security_headers_strict_preset() {
+        let mw = SecurityHeaders::strict();
+        let ctx = test_context();
+        let req = Request::new(crate::request::Method::Get, "/");
+        let response = Response::ok();
+
+        let result = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // All headers should be present with strict config
+        assert!(header_value(&result, "X-Content-Type-Options").is_some());
+        assert!(header_value(&result, "X-Frame-Options").is_some());
+        assert!(header_value(&result, "Content-Security-Policy").is_some());
+        assert!(header_value(&result, "Strict-Transport-Security").is_some());
+        assert!(header_value(&result, "Referrer-Policy").is_some());
+        assert!(header_value(&result, "Permissions-Policy").is_some());
+    }
+
+    #[test]
+    fn security_headers_config_clearing_methods() {
+        let config = SecurityHeadersConfig::strict()
+            .no_content_security_policy()
+            .no_hsts()
+            .no_permissions_policy();
+
+        assert!(config.content_security_policy.is_none());
+        assert!(config.hsts.is_none());
+        assert!(config.permissions_policy.is_none());
     }
 }

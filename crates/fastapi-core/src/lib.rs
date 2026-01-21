@@ -79,8 +79,9 @@ pub use extract::{
 };
 pub use middleware::{
     AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, Handler, Layer, Layered,
-    Middleware, MiddlewareStack, NoopMiddleware, OriginPattern, PathPrefixFilter, RequestId,
-    RequestIdConfig, RequestIdMiddleware, RequestResponseLogger, RequireHeader,
+    Middleware, MiddlewareStack, NoopMiddleware, OriginPattern, PathPrefixFilter, ReferrerPolicy,
+    RequestId, RequestIdConfig, RequestIdMiddleware, RequestResponseLogger, RequireHeader,
+    SecurityHeaders, SecurityHeadersConfig, XFrameOptions,
 };
 pub use request::{Body, Headers, Method, Request};
 pub use response::{
@@ -103,7 +104,7 @@ pub use testing::{CookieJar, RequestBuilder, TestClient, TestResponse, json_cont
 pub use logging::{AutoSpan, LogConfig, LogEntry, LogLevel, Span};
 
 // Re-export api_router utilities
-pub use api_router::{APIRouter, ResponseDef, RouterDependency, RouterRoute};
+pub use api_router::{APIRouter, IncludeConfig, ResponseDef, RouterDependency, RouterRoute};
 
 // Re-export app utilities
 pub use app::{

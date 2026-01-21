@@ -2526,9 +2526,8 @@ impl MockServer {
 
         // Read the request
         let mut buffer = vec![0u8; 8192];
-        let bytes_read = match stream.read(&mut buffer) {
-            Ok(n) => n,
-            Err(_) => return,
+        let Ok(bytes_read) = stream.read(&mut buffer) else {
+            return;
         };
 
         if bytes_read == 0 {
@@ -2538,9 +2537,8 @@ impl MockServer {
         buffer.truncate(bytes_read);
 
         // Parse the request
-        let recorded = match Self::parse_request(&buffer) {
-            Some(req) => req,
-            None => return,
+        let Some(recorded) = Self::parse_request(&buffer) else {
+            return;
         };
 
         // Record the request

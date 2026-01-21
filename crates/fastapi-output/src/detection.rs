@@ -160,9 +160,7 @@ fn check_overrides() -> Option<OverrideMode> {
 
 /// Check for FORCE_COLOR override.
 fn force_color_enabled() -> bool {
-    env::var("FORCE_COLOR")
-        .map(|v| v != "0")
-        .unwrap_or(false)
+    env::var("FORCE_COLOR").map(|v| v != "0").unwrap_or(false)
 }
 
 /// Check for known agent environment variables.

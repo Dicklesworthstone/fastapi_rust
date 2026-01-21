@@ -34,6 +34,7 @@
 pub mod detection;
 pub mod facade;
 pub mod mode;
+pub mod testing;
 pub mod themes;
 
 // Re-exports for convenience
@@ -41,8 +42,13 @@ pub use detection::{
     DetectionResult, OutputPreference, OverrideMode, detect_environment, detected_preference,
     detection_diagnostics, is_agent_environment,
 };
-pub use facade::RichOutput;
+pub use facade::{RichOutput, RichOutputBuilder, StatusKind, get_global, set_global};
 pub use mode::OutputMode;
+pub use testing::{
+    OutputEntry, OutputLevel, TestOutput, assert_contains, assert_contains_in_order,
+    assert_has_ansi, assert_max_width, assert_no_ansi, assert_not_contains, capture, capture_both,
+    capture_with_width, debug_output, is_verbose, strip_ansi_codes,
+};
 pub use themes::{FastApiTheme, ThemePreset};
 
 /// Prelude module for convenient imports.
@@ -51,7 +57,12 @@ pub mod prelude {
         DetectionResult, OutputPreference, OverrideMode, detect_environment, detected_preference,
         is_agent_environment,
     };
-    pub use crate::facade::RichOutput;
+    pub use crate::facade::{RichOutput, RichOutputBuilder, StatusKind, get_global, set_global};
     pub use crate::mode::OutputMode;
+    pub use crate::testing::{
+        OutputEntry, OutputLevel, TestOutput, assert_contains, assert_contains_in_order,
+        assert_has_ansi, assert_max_width, assert_no_ansi, assert_not_contains, capture,
+        capture_both, capture_with_width, debug_output, is_verbose, strip_ansi_codes,
+    };
     pub use crate::themes::{FastApiTheme, ThemePreset};
 }

@@ -12,6 +12,8 @@ categories = ["command-line-interface", "development-tools"]
 [dependencies]
 # Core terminal detection (always needed)
 crossterm = "0.28"
+regex = "1"
+unicode-width = "0.2"
 
 # Rich output library (optional)
 rich_rust = { path = "/dp/rich_rust", optional = true }
@@ -23,6 +25,7 @@ rich = ["dep:rich_rust"]
 [dev-dependencies]
 # For testing
 serial_test = "3.2"
+proptest = "1"
 
 [lints]
 workspace = true

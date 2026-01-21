@@ -703,6 +703,43 @@ impl AppBuilder {
         self
     }
 
+    /// Includes routes from an [`APIRouter`](crate::api_router::APIRouter) with configuration.
+    ///
+    /// This allows applying additional configuration when including a router,
+    /// such as prepending a prefix, adding tags, or injecting dependencies.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::api_router::{APIRouter, IncludeConfig};
+    ///
+    /// let users_router = APIRouter::new()
+    ///     .prefix("/users")
+    ///     .get("", list_users);
+    ///
+    /// let config = IncludeConfig::new()
+    ///     .prefix("/api/v1")
+    ///     .tags(vec!["api"]);
+    ///
+    /// let app = App::builder()
+    ///     .include_router_with_config(users_router, config)
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn include_router_with_config(
+        mut self,
+        router: crate::api_router::APIRouter,
+        config: crate::api_router::IncludeConfig,
+    ) -> Self {
+        // Apply config to a temporary router, then include
+        let merged_router = crate::api_router::APIRouter::new()
+            .include_router_with_config(router, config);
+        for entry in merged_router.into_route_entries() {
+            self.routes.push(entry);
+        }
+        self
+    }
+
     /// Adds shared state to the application.
     ///
     /// State can be accessed by handlers through the `State<T>` extractor.

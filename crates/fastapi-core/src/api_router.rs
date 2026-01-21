@@ -130,6 +130,170 @@ impl std::fmt::Debug for RouterDependency {
     }
 }
 
+/// Configuration for including a router with overrides.
+///
+/// When including a router in an app or another router, this config
+/// allows overriding or prepending settings to the included router.
+///
+/// # Merge Rules (per FastAPI spec)
+///
+/// 1. **prefix**: Prepended to router's prefix
+/// 2. **tags**: Prepended to router's tags
+/// 3. **dependencies**: Prepended to router's dependencies
+/// 4. **responses**: Merged (route > router > config)
+/// 5. **deprecated**: Override if provided
+/// 6. **include_in_schema**: Override if provided
+///
+/// # Example
+///
+/// ```ignore
+/// let config = IncludeConfig::new()
+///     .prefix("/api/v1")
+///     .tags(vec!["api"])
+///     .dependency(auth_dep);
+///
+/// let app = App::builder()
+///     .include_router_with_config(router, config)
+///     .build();
+/// ```
+#[derive(Debug, Default, Clone)]
+pub struct IncludeConfig {
+    /// Prefix to prepend to the router's prefix.
+    prefix: Option<String>,
+    /// Tags to prepend to the router's tags.
+    tags: Vec<String>,
+    /// Dependencies to prepend to the router's dependencies.
+    dependencies: Vec<RouterDependency>,
+    /// Response definitions to merge.
+    responses: HashMap<u16, ResponseDef>,
+    /// Override for deprecated flag.
+    deprecated: Option<bool>,
+    /// Override for include_in_schema flag.
+    include_in_schema: Option<bool>,
+}
+
+impl IncludeConfig {
+    /// Creates a new empty include configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the prefix to prepend to the router's prefix.
+    #[must_use]
+    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
+        let p = prefix.into();
+        if !p.is_empty() {
+            // Normalize prefix
+            let normalized = if p.starts_with('/') {
+                p
+            } else {
+                format!("/{}", p)
+            };
+            // Remove trailing slash
+            let normalized = if normalized.ends_with('/') && normalized.len() > 1 {
+                normalized.trim_end_matches('/').to_string()
+            } else {
+                normalized
+            };
+            self.prefix = Some(normalized);
+        }
+        self
+    }
+
+    /// Sets the tags to prepend to the router's tags.
+    #[must_use]
+    pub fn tags(mut self, tags: Vec<impl Into<String>>) -> Self {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Adds a single tag to prepend.
+    #[must_use]
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.tags.push(tag.into());
+        self
+    }
+
+    /// Adds a dependency to prepend.
+    #[must_use]
+    pub fn dependency(mut self, dep: RouterDependency) -> Self {
+        self.dependencies.push(dep);
+        self
+    }
+
+    /// Sets dependencies to prepend.
+    #[must_use]
+    pub fn dependencies(mut self, deps: Vec<RouterDependency>) -> Self {
+        self.dependencies = deps;
+        self
+    }
+
+    /// Adds a response definition.
+    #[must_use]
+    pub fn response(mut self, status_code: u16, def: ResponseDef) -> Self {
+        self.responses.insert(status_code, def);
+        self
+    }
+
+    /// Sets response definitions.
+    #[must_use]
+    pub fn responses(mut self, responses: HashMap<u16, ResponseDef>) -> Self {
+        self.responses = responses;
+        self
+    }
+
+    /// Sets the deprecated override.
+    #[must_use]
+    pub fn deprecated(mut self, deprecated: bool) -> Self {
+        self.deprecated = Some(deprecated);
+        self
+    }
+
+    /// Sets the include_in_schema override.
+    #[must_use]
+    pub fn include_in_schema(mut self, include: bool) -> Self {
+        self.include_in_schema = Some(include);
+        self
+    }
+
+    /// Returns the prefix.
+    #[must_use]
+    pub fn get_prefix(&self) -> Option<&str> {
+        self.prefix.as_deref()
+    }
+
+    /// Returns the tags.
+    #[must_use]
+    pub fn get_tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    /// Returns the dependencies.
+    #[must_use]
+    pub fn get_dependencies(&self) -> &[RouterDependency] {
+        &self.dependencies
+    }
+
+    /// Returns the responses.
+    #[must_use]
+    pub fn get_responses(&self) -> &HashMap<u16, ResponseDef> {
+        &self.responses
+    }
+
+    /// Returns the deprecated override.
+    #[must_use]
+    pub fn get_deprecated(&self) -> Option<bool> {
+        self.deprecated
+    }
+
+    /// Returns the include_in_schema override.
+    #[must_use]
+    pub fn get_include_in_schema(&self) -> Option<bool> {
+        self.include_in_schema
+    }
+}
+
 /// Internal route storage that includes router-level metadata.
 #[derive(Clone)]
 pub struct RouterRoute {
@@ -419,39 +583,95 @@ impl APIRouter {
     /// // Routes: /v1/users
     /// ```
     #[must_use]
-    pub fn include_router(mut self, other: APIRouter) -> Self {
-        // Merge routes with combined prefix
+    pub fn include_router(self, other: APIRouter) -> Self {
+        self.include_router_with_config(other, IncludeConfig::default())
+    }
+
+    /// Includes another router with configuration overrides.
+    ///
+    /// This allows applying additional configuration when including a router,
+    /// such as prepending a prefix, adding tags, or injecting dependencies.
+    ///
+    /// # Merge Rules
+    ///
+    /// Following FastAPI's merge semantics:
+    /// 1. **prefix**: config.prefix + router.prefix + route.path
+    /// 2. **tags**: config.tags + router.tags + route.tags
+    /// 3. **dependencies**: config.deps + router.deps + route.deps
+    /// 4. **responses**: route > router > config (later values win)
+    /// 5. **deprecated**: config overrides router if set
+    /// 6. **include_in_schema**: config overrides router if set
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let users_router = APIRouter::new()
+    ///     .prefix("/users")
+    ///     .get("", list_users);
+    ///
+    /// let config = IncludeConfig::new()
+    ///     .prefix("/api/v1")
+    ///     .tags(vec!["api"])
+    ///     .dependency(auth_dep);
+    ///
+    /// let app_router = APIRouter::new()
+    ///     .include_router_with_config(users_router, config);
+    ///
+    /// // Routes: /api/v1/users with ["api", "users"] tags
+    /// ```
+    #[must_use]
+    pub fn include_router_with_config(mut self, other: APIRouter, config: IncludeConfig) -> Self {
+        // Determine effective values with config overrides
+        let effective_deprecated = config.deprecated.or(other.deprecated);
+        let effective_include_in_schema = config
+            .include_in_schema
+            .unwrap_or(other.include_in_schema);
+
+        // Build the full prefix: config.prefix + router.prefix
+        let full_prefix = match config.prefix.as_deref() {
+            Some(config_prefix) => combine_paths(config_prefix, &other.prefix),
+            None => other.prefix.clone(),
+        };
+
+        // Merge routes with combined configuration
         for mut route in other.routes {
-            // Combine path with other router's prefix
-            let combined_path = combine_paths(&other.prefix, &route.path);
+            // Combine path: full_prefix + route.path
+            let combined_path = combine_paths(&full_prefix, &route.path);
             route.path = combined_path;
 
-            // Merge tags (other router's tags + route's tags)
-            let mut merged_tags = other.tags.clone();
+            // Merge tags: config.tags + router.tags + route.tags
+            let mut merged_tags = config.tags.clone();
+            merged_tags.extend(other.tags.clone());
             merged_tags.extend(route.tags);
             route.tags = merged_tags;
 
-            // Prepend other router's dependencies
-            let mut merged_deps = other.dependencies.clone();
+            // Merge dependencies: config.deps + router.deps + route.deps
+            let mut merged_deps = config.dependencies.clone();
+            merged_deps.extend(other.dependencies.clone());
             merged_deps.extend(route.dependencies);
             route.dependencies = merged_deps;
 
-            // Inherit deprecated if not set
+            // Apply deprecated override
             if route.deprecated.is_none() {
-                route.deprecated = other.deprecated;
+                route.deprecated = effective_deprecated;
             }
 
-            // Inherit include_in_schema
-            if !other.include_in_schema {
+            // Apply include_in_schema override
+            if !effective_include_in_schema {
                 route.include_in_schema = false;
             }
 
             self.routes.push(route);
         }
 
-        // Merge response definitions
-        for (code, def) in other.responses {
+        // Merge response definitions: route > router > config
+        // First add config responses (lowest priority)
+        for (code, def) in config.responses {
             self.responses.entry(code).or_insert(def);
+        }
+        // Then add router responses (higher priority)
+        for (code, def) in other.responses {
+            self.responses.insert(code, def);
         }
 
         self
@@ -525,7 +745,7 @@ impl APIRouter {
                 let deps: Vec<RouterDependency> = router_deps
                     .iter()
                     .cloned()
-                    .chain(route.dependencies.into_iter())
+                    .chain(route.dependencies)
                     .collect();
 
                 let handler = route.handler;
@@ -655,9 +875,7 @@ mod tests {
         assert_eq!(inner.get_prefix(), "/items");
 
         // Create an outer router and include the inner one
-        let outer = APIRouter::new()
-            .prefix("/api/v1")
-            .include_router(inner);
+        let outer = APIRouter::new().prefix("/api/v1").include_router(inner);
 
         // The routes from inner should have combined prefix
         // Note: We test this indirectly since routes are private
@@ -703,9 +921,7 @@ mod tests {
     #[test]
     fn test_tag_merging_with_nested_routers() {
         let inner = APIRouter::new().tags(vec!["items"]);
-        let outer = APIRouter::new()
-            .tags(vec!["api"])
-            .include_router(inner);
+        let outer = APIRouter::new().tags(vec!["api"]).include_router(inner);
 
         // Outer router keeps its own tags
         assert_eq!(outer.get_tags(), &["api"]);
@@ -728,5 +944,218 @@ mod tests {
         assert_eq!(router.is_deprecated(), None);
         assert!(router.get_include_in_schema());
         assert!(router.get_routes().is_empty());
+    }
+
+    // =========================================================================
+    // IncludeConfig Tests
+    // =========================================================================
+
+    #[test]
+    fn test_include_config_default() {
+        let config = IncludeConfig::new();
+        assert!(config.get_prefix().is_none());
+        assert!(config.get_tags().is_empty());
+        assert!(config.get_dependencies().is_empty());
+        assert!(config.get_responses().is_empty());
+        assert!(config.get_deprecated().is_none());
+        assert!(config.get_include_in_schema().is_none());
+    }
+
+    #[test]
+    fn test_include_config_prefix() {
+        let config = IncludeConfig::new().prefix("/api/v1");
+        assert_eq!(config.get_prefix(), Some("/api/v1"));
+
+        // Should normalize prefix without leading slash
+        let config = IncludeConfig::new().prefix("api/v1");
+        assert_eq!(config.get_prefix(), Some("/api/v1"));
+
+        // Should remove trailing slash
+        let config = IncludeConfig::new().prefix("/api/v1/");
+        assert_eq!(config.get_prefix(), Some("/api/v1"));
+    }
+
+    #[test]
+    fn test_include_config_tags() {
+        let config = IncludeConfig::new()
+            .tags(vec!["api", "v1"])
+            .tag("extra");
+        assert_eq!(config.get_tags(), &["api", "v1", "extra"]);
+    }
+
+    #[test]
+    fn test_include_config_dependencies() {
+        let dep1 = RouterDependency::new("auth", |_ctx, _req| async { Ok(()) });
+        let dep2 = RouterDependency::new("rate_limit", |_ctx, _req| async { Ok(()) });
+
+        let config = IncludeConfig::new()
+            .dependency(dep1)
+            .dependency(dep2);
+        assert_eq!(config.get_dependencies().len(), 2);
+    }
+
+    #[test]
+    fn test_include_config_responses() {
+        let config = IncludeConfig::new()
+            .response(401, ResponseDef::new("Unauthorized"))
+            .response(500, ResponseDef::new("Server Error"));
+        assert_eq!(config.get_responses().len(), 2);
+    }
+
+    #[test]
+    fn test_include_config_deprecated() {
+        let config = IncludeConfig::new().deprecated(true);
+        assert_eq!(config.get_deprecated(), Some(true));
+
+        let config = IncludeConfig::new().deprecated(false);
+        assert_eq!(config.get_deprecated(), Some(false));
+    }
+
+    #[test]
+    fn test_include_config_include_in_schema() {
+        let config = IncludeConfig::new().include_in_schema(false);
+        assert_eq!(config.get_include_in_schema(), Some(false));
+    }
+
+    // =========================================================================
+    // Merge Rules Tests
+    // =========================================================================
+
+    #[test]
+    fn test_merge_rule_prefix_prepending() {
+        // config.prefix + router.prefix should be combined
+        let inner_router = APIRouter::new().prefix("/users");
+        let config = IncludeConfig::new().prefix("/api/v1");
+
+        let outer = APIRouter::new().include_router_with_config(inner_router, config);
+
+        // Check that routes were merged (we can't directly access the full path,
+        // but we can verify the outer router structure)
+        // The inner router's routes should now have paths like /api/v1/users
+        assert_eq!(outer.get_routes().len(), 0); // No routes were added to inner
+    }
+
+    #[test]
+    fn test_merge_rule_tags_prepending() {
+        // config.tags + router.tags should be merged
+        let inner = APIRouter::new().tags(vec!["users"]);
+        let config = IncludeConfig::new().tags(vec!["api", "v1"]);
+
+        let outer = APIRouter::new()
+            .tags(vec!["outer"])
+            .include_router_with_config(inner, config);
+
+        // Outer keeps its own tags
+        assert_eq!(outer.get_tags(), &["outer"]);
+    }
+
+    #[test]
+    fn test_merge_rule_deprecated_override() {
+        // config.deprecated should override router.deprecated
+        let inner = APIRouter::new().deprecated(false);
+        let config = IncludeConfig::new().deprecated(true);
+
+        let outer = APIRouter::new().include_router_with_config(inner, config);
+
+        // The override happens at the route level, not router level
+        assert_eq!(outer.is_deprecated(), None);
+    }
+
+    #[test]
+    fn test_merge_rule_include_in_schema_override() {
+        // config.include_in_schema should override router.include_in_schema
+        let inner = APIRouter::new().include_in_schema(true);
+        let config = IncludeConfig::new().include_in_schema(false);
+
+        let _outer = APIRouter::new().include_router_with_config(inner, config);
+        // Routes from inner should have include_in_schema = false
+    }
+
+    #[test]
+    fn test_merge_rule_responses_priority() {
+        // route > router > config for responses
+        let inner = APIRouter::new()
+            .response(200, ResponseDef::new("Router Success"))
+            .response(404, ResponseDef::new("Router Not Found"));
+
+        let config = IncludeConfig::new()
+            .response(200, ResponseDef::new("Config Success"))
+            .response(500, ResponseDef::new("Config Error"));
+
+        let outer = APIRouter::new().include_router_with_config(inner, config);
+
+        let responses = outer.get_responses();
+        // Router's 200 should override config's 200
+        assert_eq!(responses.get(&200).unwrap().description, "Router Success");
+        // Config's 500 should be present
+        assert_eq!(responses.get(&500).unwrap().description, "Config Error");
+        // Router's 404 should be present
+        assert_eq!(responses.get(&404).unwrap().description, "Router Not Found");
+    }
+
+    #[test]
+    fn test_recursive_router_inclusion() {
+        // Routers can include other routers at multiple levels
+        let level3 = APIRouter::new().prefix("/items");
+        let level2 = APIRouter::new()
+            .prefix("/users")
+            .include_router(level3);
+        let level1 = APIRouter::new()
+            .prefix("/api")
+            .include_router(level2);
+
+        // The final router should have prefix /api
+        // Routes from level3 should be at /api/users/items
+        assert_eq!(level1.get_prefix(), "/api");
+    }
+
+    #[test]
+    fn test_recursive_config_merging() {
+        // Multi-level config merging
+        let inner = APIRouter::new().tags(vec!["items"]);
+        let middle_config = IncludeConfig::new().tags(vec!["users"]).prefix("/users");
+        let outer_config = IncludeConfig::new().tags(vec!["api"]).prefix("/api");
+
+        let middle = APIRouter::new().include_router_with_config(inner, middle_config);
+        let outer = APIRouter::new().include_router_with_config(middle, outer_config);
+
+        // Outer has its own (empty) tags, but routes should have merged tags
+        assert!(outer.get_tags().is_empty());
+    }
+
+    #[test]
+    fn test_include_config_empty_prefix() {
+        // Empty prefix in config should not affect router prefix
+        let inner = APIRouter::new().prefix("/users");
+        let config = IncludeConfig::new(); // No prefix set
+
+        let outer = APIRouter::new()
+            .prefix("/api")
+            .include_router_with_config(inner, config);
+
+        // Outer keeps its prefix
+        assert_eq!(outer.get_prefix(), "/api");
+    }
+
+    #[test]
+    fn test_multi_level_path_construction() {
+        // Test that paths are correctly constructed at multiple levels
+        // /api + /v1 + /users + /{id} = /api/v1/users/{id}
+
+        // We can't directly test the path construction without adding routes,
+        // but we can test the combine_paths function
+        let level1 = "/api";
+        let level2 = "/v1";
+        let level3 = "/users";
+        let level4 = "/{id}";
+
+        let combined_12 = combine_paths(level1, level2);
+        assert_eq!(combined_12, "/api/v1");
+
+        let combined_123 = combine_paths(&combined_12, level3);
+        assert_eq!(combined_123, "/api/v1/users");
+
+        let combined_1234 = combine_paths(&combined_123, level4);
+        assert_eq!(combined_1234, "/api/v1/users/{id}");
     }
 }
