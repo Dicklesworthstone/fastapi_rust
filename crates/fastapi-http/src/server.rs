@@ -984,4 +984,73 @@ mod tests {
         let config = ServerConfig::new("127.0.0.1:8080").with_max_connections(100);
         assert_eq!(config.max_connections, 100);
     }
+
+    // ========================================================================
+    // Keep-alive configuration tests
+    // ========================================================================
+
+    #[test]
+    fn config_keep_alive_timeout_default() {
+        let config = ServerConfig::default();
+        assert_eq!(
+            config.keep_alive_timeout,
+            Duration::from_secs(DEFAULT_KEEP_ALIVE_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn config_keep_alive_timeout_can_be_set() {
+        let config =
+            ServerConfig::new("127.0.0.1:8080").with_keep_alive_timeout(Duration::from_secs(120));
+        assert_eq!(config.keep_alive_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn config_keep_alive_timeout_can_be_set_secs() {
+        let config = ServerConfig::new("127.0.0.1:8080").with_keep_alive_timeout_secs(90);
+        assert_eq!(config.keep_alive_timeout, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn config_max_requests_per_connection_default() {
+        let config = ServerConfig::default();
+        assert_eq!(
+            config.max_requests_per_connection,
+            DEFAULT_MAX_REQUESTS_PER_CONNECTION
+        );
+    }
+
+    #[test]
+    fn config_max_requests_per_connection_can_be_set() {
+        let config = ServerConfig::new("127.0.0.1:8080").with_max_requests_per_connection(50);
+        assert_eq!(config.max_requests_per_connection, 50);
+    }
+
+    #[test]
+    fn config_max_requests_per_connection_unlimited() {
+        let config = ServerConfig::new("127.0.0.1:8080").with_max_requests_per_connection(0);
+        assert_eq!(config.max_requests_per_connection, 0);
+    }
+
+    #[test]
+    fn response_with_keep_alive_header() {
+        let response = Response::ok().header("connection", b"keep-alive".to_vec());
+        let headers = response.headers();
+        let connection_header = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("connection"));
+        assert!(connection_header.is_some());
+        assert_eq!(connection_header.unwrap().1, b"keep-alive");
+    }
+
+    #[test]
+    fn response_with_close_header() {
+        let response = Response::ok().header("connection", b"close".to_vec());
+        let headers = response.headers();
+        let connection_header = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("connection"));
+        assert!(connection_header.is_some());
+        assert_eq!(connection_header.unwrap().1, b"close");
+    }
 }
