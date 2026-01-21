@@ -1473,12 +1473,22 @@ mod tests {
         }
     }
 
-    fn override_dep_route(ctx: &RequestContext, req: &mut Request) -> std::future::Ready<Response> {
-        let dep = futures_executor::block_on(Depends::<OverrideDep>::from_request(ctx, req))
-            .expect("dependency extraction failed");
-        std::future::ready(
-            Response::ok().body(ResponseBody::Bytes(dep.value.to_string().into_bytes())),
-        )
+    /// Route handler that uses dependency override - as a struct implementing Handler
+    struct OverrideDepRoute;
+
+    impl Handler for OverrideDepRoute {
+        fn call<'a>(
+            &'a self,
+            ctx: &'a RequestContext,
+            req: &'a mut Request,
+        ) -> BoxFuture<'a, Response> {
+            Box::pin(async move {
+                let dep = Depends::<OverrideDep>::from_request(ctx, req)
+                    .await
+                    .expect("dependency extraction failed");
+                Response::ok().body(ResponseBody::Bytes(dep.value.to_string().into_bytes()))
+            })
+        }
     }
 
     #[test]
@@ -2120,7 +2130,6 @@ mod tests {
     #[test]
     fn test_dependency_caching_across_handler() {
         // Test that dependencies are cached within a single request
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);

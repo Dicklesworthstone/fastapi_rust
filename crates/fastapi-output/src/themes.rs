@@ -539,6 +539,10 @@ impl std::error::Error for ThemePresetParseError {}
 mod tests {
     use super::*;
 
+    fn is_not_black(c: Color) -> bool {
+        c.r > 0 || c.g > 0 || c.b > 0
+    }
+
     // === Color Tests ===
 
     #[test]
@@ -605,11 +609,6 @@ mod tests {
     #[test]
     fn test_theme_default_has_all_colors() {
         let theme = FastApiTheme::default();
-
-        // Helper to check that a color is not black (at least one component > 0)
-        fn is_not_black(c: Color) -> bool {
-            c.r > 0 || c.g > 0 || c.b > 0
-        }
 
         // Brand colors
         assert!(is_not_black(theme.primary));

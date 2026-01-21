@@ -347,7 +347,7 @@ impl Router {
         for (start, end) in &ranges {
             segments.push(&path[*start..*end]);
         }
-        let last_end = ranges.last().map(|(_, end)| *end).unwrap_or(0);
+        let last_end = ranges.last().map_or(0, |(_, end)| *end);
         let mut params = Vec::new();
         let mut node = &self.root;
         let mut idx = 0;
@@ -369,7 +369,6 @@ impl Router {
                         let value = &path[start..last_end];
                         params.push((info.name.as_str(), value));
                         node = child;
-                        idx = segments.len();
                         break;
                     }
                     if info.converter.matches(segment) {

@@ -734,18 +734,23 @@ mod tests {
     // Test: ResolutionStack detects simple A -> B -> A cycle
     #[test]
     fn resolution_stack_detects_simple_cycle() {
+        // Create unique marker types for cycle detection
+        struct TypeA;
+        struct TypeB;
+
         let stack = ResolutionStack::new();
 
         // Simulate: A starts resolving
-        stack.push::<CounterDep>("TypeA");
-        assert!(stack.check_cycle::<CounterDep>("TypeA").is_none()); // A not on stack yet
+        // Before pushing, check that TypeA is not on stack
+        assert!(stack.check_cycle::<TypeA>("TypeA").is_none());
+        stack.push::<TypeA>("TypeA");
 
-        // Simulate: A resolves B
-        stack.push::<ErrorDep>("TypeB");
-        assert!(stack.check_cycle::<ErrorDep>("TypeB").is_none());
+        // Simulate: A resolves B (different type, should not detect cycle)
+        assert!(stack.check_cycle::<TypeB>("TypeB").is_none());
+        stack.push::<TypeB>("TypeB");
 
         // Simulate: B tries to resolve A (cycle!)
-        let cycle = stack.check_cycle::<CounterDep>("TypeA");
+        let cycle = stack.check_cycle::<TypeA>("TypeA");
         assert!(cycle.is_some(), "Should detect A -> B -> A cycle");
         let cycle_path = cycle.unwrap();
         assert_eq!(cycle_path.len(), 3); // TypeA, TypeB, TypeA
@@ -1207,7 +1212,7 @@ mod tests {
     }
 
     // Test: Error in nested dependency propagates correctly
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     struct DepThatDependsOnError;
 
     impl FromDependency for DepThatDependsOnError {

@@ -255,7 +255,7 @@ mod tests {
         with_clean_env(|| {
             set_env("CLAUDE_CODE", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Claude Code detection: {:?}", result);
+            eprintln!("[TEST] Claude Code detection: {result:?}");
             assert!(result.is_agent, "Should detect Claude Code as agent");
             assert_eq!(result.detected_agent, Some("CLAUDE_CODE".to_string()));
         });
@@ -267,7 +267,7 @@ mod tests {
         with_clean_env(|| {
             set_env("CODEX_CLI", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Codex CLI detection: {:?}", result);
+            eprintln!("[TEST] Codex CLI detection: {result:?}");
             assert!(result.is_agent, "Should detect Codex CLI as agent");
             assert_eq!(result.detected_agent, Some("CODEX_CLI".to_string()));
         });
@@ -279,7 +279,7 @@ mod tests {
         with_clean_env(|| {
             set_env("CURSOR_SESSION", "abc123");
             let result = detect_environment();
-            eprintln!("[TEST] Cursor detection: {:?}", result);
+            eprintln!("[TEST] Cursor detection: {result:?}");
             assert!(result.is_agent, "Should detect Cursor as agent");
             assert_eq!(result.detected_agent, Some("CURSOR_SESSION".to_string()));
         });
@@ -291,7 +291,7 @@ mod tests {
         with_clean_env(|| {
             set_env("AIDER_SESSION", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Aider detection: {:?}", result);
+            eprintln!("[TEST] Aider detection: {result:?}");
             assert!(result.is_agent, "Should detect Aider as agent");
         });
     }
@@ -302,7 +302,7 @@ mod tests {
         with_clean_env(|| {
             set_env("AGENT_MODE", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Generic AGENT_MODE detection: {:?}", result);
+            eprintln!("[TEST] Generic AGENT_MODE detection: {result:?}");
             assert!(result.is_agent, "Should detect AGENT_MODE");
         });
     }
@@ -313,7 +313,7 @@ mod tests {
         with_clean_env(|| {
             set_env("WINDSURF_SESSION", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Windsurf detection: {:?}", result);
+            eprintln!("[TEST] Windsurf detection: {result:?}");
             assert!(result.is_agent, "Should detect Windsurf");
         });
     }
@@ -324,7 +324,7 @@ mod tests {
         with_clean_env(|| {
             set_env("CLINE_SESSION", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Cline detection: {:?}", result);
+            eprintln!("[TEST] Cline detection: {result:?}");
             assert!(result.is_agent, "Should detect Cline");
         });
     }
@@ -335,7 +335,7 @@ mod tests {
         with_clean_env(|| {
             set_env("COPILOT_AGENT", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Copilot agent detection: {:?}", result);
+            eprintln!("[TEST] Copilot agent detection: {result:?}");
             assert!(result.is_agent, "Should detect Copilot agent");
         });
     }
@@ -348,7 +348,7 @@ mod tests {
         with_clean_env(|| {
             set_env("CI", "true");
             let result = detect_environment();
-            eprintln!("[TEST] Generic CI detection: {:?}", result);
+            eprintln!("[TEST] Generic CI detection: {result:?}");
             assert!(result.is_ci, "Should detect CI environment");
             assert!(result.is_agent, "CI should trigger agent mode");
         });
@@ -360,7 +360,7 @@ mod tests {
         with_clean_env(|| {
             set_env("GITHUB_ACTIONS", "true");
             let result = detect_environment();
-            eprintln!("[TEST] GitHub Actions detection: {:?}", result);
+            eprintln!("[TEST] GitHub Actions detection: {result:?}");
             assert!(result.is_ci);
             assert_eq!(result.detected_ci, Some("GITHUB_ACTIONS".to_string()));
         });
@@ -372,7 +372,7 @@ mod tests {
         with_clean_env(|| {
             set_env("GITLAB_CI", "true");
             let result = detect_environment();
-            eprintln!("[TEST] GitLab CI detection: {:?}", result);
+            eprintln!("[TEST] GitLab CI detection: {result:?}");
             assert!(result.is_ci);
         });
     }
@@ -383,7 +383,7 @@ mod tests {
         with_clean_env(|| {
             set_env("JENKINS_URL", "http://jenkins.example.com");
             let result = detect_environment();
-            eprintln!("[TEST] Jenkins detection: {:?}", result);
+            eprintln!("[TEST] Jenkins detection: {result:?}");
             assert!(result.is_ci);
         });
     }
@@ -396,7 +396,7 @@ mod tests {
         with_clean_env(|| {
             set_env("NO_COLOR", "1");
             let result = detect_environment();
-            eprintln!("[TEST] NO_COLOR detection: {:?}", result);
+            eprintln!("[TEST] NO_COLOR detection: {result:?}");
             assert!(result.no_color_set, "Should detect NO_COLOR");
             assert!(result.is_agent, "NO_COLOR should trigger plain mode");
         });
@@ -408,7 +408,7 @@ mod tests {
         with_clean_env(|| {
             set_env("NO_COLOR", ""); // Empty but set
             let result = detect_environment();
-            eprintln!("[TEST] NO_COLOR empty value: {:?}", result);
+            eprintln!("[TEST] NO_COLOR empty value: {result:?}");
             assert!(
                 result.no_color_set,
                 "Empty NO_COLOR should still be detected"
@@ -424,7 +424,7 @@ mod tests {
         with_clean_env(|| {
             set_env("FASTAPI_AGENT_MODE", "1");
             let result = detect_environment();
-            eprintln!("[TEST] FASTAPI_AGENT_MODE override: {:?}", result);
+            eprintln!("[TEST] FASTAPI_AGENT_MODE override: {result:?}");
             assert!(result.is_agent, "Override should force agent mode");
             assert_eq!(result.override_mode, Some(OverrideMode::ForceAgent));
         });
@@ -438,7 +438,7 @@ mod tests {
             set_env("CLAUDE_CODE", "1");
             set_env("FASTAPI_HUMAN_MODE", "1");
             let result = detect_environment();
-            eprintln!("[TEST] FASTAPI_HUMAN_MODE override: {:?}", result);
+            eprintln!("[TEST] FASTAPI_HUMAN_MODE override: {result:?}");
             assert!(!result.is_agent, "Override should force human mode");
             assert_eq!(result.override_mode, Some(OverrideMode::ForceHuman));
         });
@@ -452,7 +452,7 @@ mod tests {
             set_env("FASTAPI_AGENT_MODE", "1");
             set_env("FASTAPI_HUMAN_MODE", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Both overrides set: {:?}", result);
+            eprintln!("[TEST] Both overrides set: {result:?}");
             assert!(result.is_agent, "AGENT_MODE should take precedence");
         });
     }
@@ -465,7 +465,7 @@ mod tests {
         with_clean_env(|| {
             set_env("CLAUDE_CODE", "1");
             let pref = detected_preference();
-            eprintln!("[TEST] Preference for agent: {:?}", pref);
+            eprintln!("[TEST] Preference for agent: {pref:?}");
             assert_eq!(pref, OutputPreference::Plain);
         });
     }
@@ -477,7 +477,7 @@ mod tests {
             // Note: This test may fail if not run in a TTY
             // The detection will fall back based on is_tty
             let result = detect_environment();
-            eprintln!("[TEST] Clean env detection: {:?}", result);
+            eprintln!("[TEST] Clean env detection: {result:?}");
             // We cant guarantee TTY in CI, just log the result
         });
     }
@@ -490,7 +490,7 @@ mod tests {
         with_clean_env(|| {
             set_env("CLAUDE_CODE", "1");
             let diag = detection_diagnostics();
-            eprintln!("[TEST] Diagnostics output: {}", diag);
+            eprintln!("[TEST] Diagnostics output: {diag}");
             assert!(diag.contains("is_agent: true"));
             assert!(diag.contains("CLAUDE_CODE"));
         });
@@ -505,7 +505,7 @@ mod tests {
             set_env("CLAUDE_CODE", "1");
             set_env("CODEX_CLI", "1");
             let result = detect_environment();
-            eprintln!("[TEST] Multiple agents: {:?}", result);
+            eprintln!("[TEST] Multiple agents: {result:?}");
             assert!(result.is_agent);
             // First one in list wins
             assert_eq!(result.detected_agent, Some("CLAUDE_CODE".to_string()));
@@ -519,7 +519,7 @@ mod tests {
             set_env("CLAUDE_CODE", "1");
             set_env("CI", "true");
             let result = detect_environment();
-            eprintln!("[TEST] Agent + CI: {:?}", result);
+            eprintln!("[TEST] Agent + CI: {result:?}");
             assert!(result.is_agent);
             assert!(result.is_ci);
             assert!(result.detected_agent.is_some());
@@ -532,7 +532,7 @@ mod tests {
     fn test_clean_environment() {
         with_clean_env(|| {
             let result = detect_environment();
-            eprintln!("[TEST] Clean environment: {:?}", result);
+            eprintln!("[TEST] Clean environment: {result:?}");
             assert!(result.detected_agent.is_none());
             assert!(result.detected_ci.is_none());
             assert!(!result.no_color_set);

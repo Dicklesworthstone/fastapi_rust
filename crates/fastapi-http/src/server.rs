@@ -394,13 +394,13 @@ impl TcpServer {
             // Generate unique request ID for this request
             let request_id = self.next_request_id();
             let request_cx = Cx::for_testing(); // TODO: derive from connection region
-            let request_ctx = RequestContext::new(request_cx, request_id);
+            let ctx = RequestContext::new(request_cx, request_id);
 
             // Check if this is a keep-alive connection
             let keep_alive = should_keep_alive(&request);
 
             // Call the handler
-            let response = handler(request_ctx, request).await;
+            let response = handler(ctx, request).await;
 
             // Write the response
             let response_write = response_writer.write(response);

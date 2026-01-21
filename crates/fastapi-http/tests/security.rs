@@ -9,9 +9,9 @@
 //! - Known CVE patterns
 
 use fastapi_http::{
-    BodyLength, HeadersParser, ParseError, ParseLimits, ParseStatus, Parser, RequestLine,
-    StatefulParser,
+    HeadersParser, ParseError, ParseLimits, ParseStatus, Parser, RequestLine, StatefulParser,
 };
+use std::fmt::Write;
 
 // ============================================================================
 // 1. HTTP Request Smuggling Tests
@@ -130,14 +130,11 @@ fn injection_crlf_in_path() {
     let result = RequestLine::parse(buffer);
 
     // Path should not contain CRLF
-    match result {
-        Err(_) => {} // Good - rejected
-        Ok(line) => {
-            assert!(
-                !line.path().contains('\r') && !line.path().contains('\n'),
-                "Path should not contain CRLF characters"
-            );
-        }
+    if let Ok(line) = result {
+        assert!(
+            !line.path().contains('\r') && !line.path().contains('\n'),
+            "Path should not contain CRLF characters"
+        );
     }
 }
 
@@ -152,15 +149,12 @@ fn injection_crlf_url_encoded() {
     // Parser decodes percent-encoded CRLF which creates newlines in path
     // This is expected behavior - the key is that it doesn't create new headers
     // in the request struct. The path will contain the decoded characters.
-    match result {
-        Ok(request) => {
-            // The parser decoded the URL, so path contains decoded content
-            // What matters is that no headers were injected via the path
-            assert!(request.headers().get("X-Injected").is_none());
-        }
-        Err(_) => {
-            // Rejecting such paths is also acceptable
-        }
+    if let Ok(request) = result {
+        // The parser decoded the URL, so path contains decoded content
+        // What matters is that no headers were injected via the path
+        assert!(request.headers().get("X-Injected").is_none());
+    } else {
+        // Rejecting such paths is also acceptable
     }
 }
 
@@ -247,14 +241,11 @@ fn traversal_dot_dot_slash() {
 
     // Parser may either parse or reject traversal paths
     // Both behaviors are acceptable from a security perspective
-    match result {
-        Ok(request) => {
-            // If parsed, verify path contains the traversal
-            assert!(request.path().contains("..") || request.path().contains("etc"));
-        }
-        Err(_) => {
-            // Rejecting traversal paths is also acceptable
-        }
+    if let Ok(request) = result {
+        // If parsed, verify path contains the traversal
+        assert!(request.path().contains("..") || request.path().contains("etc"));
+    } else {
+        // Rejecting traversal paths is also acceptable
     }
 }
 
@@ -266,14 +257,11 @@ fn traversal_url_encoded() {
     let result = parser.parse(buffer);
 
     // Parser may either parse or reject URL-encoded traversal
-    match result {
-        Ok(request) => {
-            let path = request.path();
-            assert!(!path.is_empty());
-        }
-        Err(_) => {
-            // Rejecting URL-encoded traversal is also acceptable
-        }
+    if let Ok(request) = result {
+        let path = request.path();
+        assert!(!path.is_empty());
+    } else {
+        // Rejecting URL-encoded traversal is also acceptable
     }
 }
 
@@ -285,13 +273,10 @@ fn traversal_double_encoded() {
     let result = parser.parse(buffer);
 
     // Should either parse or reject safely
-    match result {
-        Ok(request) => {
-            assert!(!request.path().is_empty());
-        }
-        Err(_) => {
-            // Rejecting is also acceptable
-        }
+    if let Ok(request) = result {
+        assert!(!request.path().is_empty());
+    } else {
+        // Rejecting is also acceptable
     }
 }
 
@@ -303,14 +288,11 @@ fn traversal_backslash() {
     let result = parser.parse(buffer);
 
     // Parser may either parse or reject backslash paths
-    match result {
-        Ok(request) => {
-            // If parsed, path should contain the backslash pattern
-            assert!(request.path().contains("..\\") || request.path().contains("etc"));
-        }
-        Err(_) => {
-            // Rejecting is also acceptable (strict parsing)
-        }
+    if let Ok(request) = result {
+        // If parsed, path should contain the backslash pattern
+        assert!(request.path().contains("..\\") || request.path().contains("etc"));
+    } else {
+        // Rejecting is also acceptable (strict parsing)
     }
 }
 
@@ -342,11 +324,13 @@ fn traversal_overlong_utf8() {
 /// Extremely long request line
 #[test]
 fn exhaustion_long_request_line() {
-    let mut limits = ParseLimits::default();
-    limits.max_request_line_len = 100;
+    let limits = ParseLimits {
+        max_request_line_len: 100,
+        ..Default::default()
+    };
 
     let long_path = "a".repeat(200);
-    let buffer = format!("GET /{} HTTP/1.1\r\n\r\n", long_path);
+    let buffer = format!("GET /{long_path} HTTP/1.1\r\n\r\n");
 
     let mut parser = StatefulParser::new().with_limits(limits);
     let result = parser.feed(buffer.as_bytes());
@@ -360,12 +344,14 @@ fn exhaustion_long_request_line() {
 /// Too many headers
 #[test]
 fn exhaustion_too_many_headers() {
-    let mut limits = ParseLimits::default();
-    limits.max_header_count = 5;
+    let limits = ParseLimits {
+        max_header_count: 5,
+        ..Default::default()
+    };
 
     let mut buffer = String::new();
     for i in 0..10 {
-        buffer.push_str(&format!("X-Header-{}: value\r\n", i));
+        let _ = write!(buffer, "X-Header-{i}: value\r\n");
     }
     buffer.push_str("\r\n");
 
@@ -380,11 +366,13 @@ fn exhaustion_too_many_headers() {
 /// Extremely long header line
 #[test]
 fn exhaustion_long_header_line() {
-    let mut limits = ParseLimits::default();
-    limits.max_header_line_len = 100;
+    let limits = ParseLimits {
+        max_header_line_len: 100,
+        ..Default::default()
+    };
 
     let long_value = "x".repeat(200);
-    let buffer = format!("X-Long: {}\r\n\r\n", long_value);
+    let buffer = format!("X-Long: {long_value}\r\n\r\n");
 
     let result = HeadersParser::parse_with_limits(buffer.as_bytes(), &limits);
 
@@ -397,12 +385,14 @@ fn exhaustion_long_header_line() {
 /// Extremely large header block
 #[test]
 fn exhaustion_large_headers_block() {
-    let mut limits = ParseLimits::default();
-    limits.max_headers_size = 100;
+    let limits = ParseLimits {
+        max_headers_size: 100,
+        ..Default::default()
+    };
 
     let mut buffer = String::new();
     for i in 0..20 {
-        buffer.push_str(&format!("X-H{}: value{}\r\n", i, i));
+        let _ = write!(buffer, "X-H{i}: value{i}\r\n");
     }
     buffer.push_str("\r\n");
 
@@ -608,7 +598,7 @@ fn cve_apache_chunked_pattern() {
 fn cve_nginx_buffer_pattern() {
     // Very long URI that could cause buffer issues
     let long_path = "A".repeat(10000);
-    let buffer = format!("GET /{} HTTP/1.1\r\n\r\n", long_path);
+    let buffer = format!("GET /{long_path} HTTP/1.1\r\n\r\n");
     let parser = Parser::new();
 
     // Should handle without panic
@@ -660,13 +650,15 @@ fn combined_smuggling_traversal() {
 /// Combined: Injection + Exhaustion
 #[test]
 fn combined_injection_exhaustion() {
-    let mut limits = ParseLimits::default();
-    limits.max_header_count = 10;
+    let limits = ParseLimits {
+        max_header_count: 10,
+        ..Default::default()
+    };
 
     // Try to inject headers while approaching limit
     let mut buffer = String::new();
     for i in 0..15 {
-        buffer.push_str(&format!("X-H{}: \r\nX-Injected{}: evil\r\n", i, i));
+        let _ = write!(buffer, "X-H{i}: \r\nX-Injected{i}: evil\r\n");
     }
     buffer.push_str("\r\n");
 

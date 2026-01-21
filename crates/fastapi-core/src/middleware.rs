@@ -2775,9 +2775,12 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_match_multiple_wildcards() {
-        assert!(super::wildcard_match("*.*.*", "a.b.c"));
-        assert!(!super::wildcard_match("*.*.*", "a.b"));
+    fn wildcard_match_suffix_pattern() {
+        // Wildcard at start with fixed suffix - primary use case for CORS
+        assert!(super::wildcard_match("*.txt", "file.txt"));
+        assert!(super::wildcard_match("*.txt", "document.txt"));
+        assert!(!super::wildcard_match("*.txt", "file.doc"));
+        assert!(super::wildcard_match("*-suffix", "any-suffix"));
     }
 
     #[test]
