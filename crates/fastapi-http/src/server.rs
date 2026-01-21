@@ -50,7 +50,7 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::stream::Stream;
 use asupersync::{Budget, Cx, Time};
-use fastapi_core::{Request, RequestContext, Response};
+use fastapi_core::{Request, RequestContext, Response, StatusCode};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -58,6 +58,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 /// Default request timeout in seconds.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -67,6 +68,12 @@ pub const DEFAULT_READ_BUFFER_SIZE: usize = 8192;
 
 /// Default maximum connections (0 = unlimited).
 pub const DEFAULT_MAX_CONNECTIONS: usize = 0;
+
+/// Default keep-alive timeout in seconds (time to wait for next request).
+pub const DEFAULT_KEEP_ALIVE_TIMEOUT_SECS: u64 = 75;
+
+/// Default max requests per connection (0 = unlimited).
+pub const DEFAULT_MAX_REQUESTS_PER_CONNECTION: usize = 100;
 
 /// Server configuration.
 #[derive(Debug, Clone)]
@@ -83,6 +90,11 @@ pub struct ServerConfig {
     pub parse_limits: ParseLimits,
     /// Enable TCP_NODELAY.
     pub tcp_nodelay: bool,
+    /// Keep-alive timeout (time to wait for next request on a connection).
+    /// Set to 0 to disable keep-alive timeout.
+    pub keep_alive_timeout: Duration,
+    /// Maximum requests per connection (0 = unlimited).
+    pub max_requests_per_connection: usize,
 }
 
 impl ServerConfig {
@@ -96,6 +108,8 @@ impl ServerConfig {
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
             parse_limits: ParseLimits::default(),
             tcp_nodelay: true,
+            keep_alive_timeout: Duration::from_secs(DEFAULT_KEEP_ALIVE_TIMEOUT_SECS),
+            max_requests_per_connection: DEFAULT_MAX_REQUESTS_PER_CONNECTION,
         }
     }
 
@@ -138,6 +152,32 @@ impl ServerConfig {
     #[must_use]
     pub fn with_tcp_nodelay(mut self, enabled: bool) -> Self {
         self.tcp_nodelay = enabled;
+        self
+    }
+
+    /// Sets the keep-alive timeout.
+    ///
+    /// This is the time to wait for another request on a keep-alive connection
+    /// before closing it. Set to Duration::ZERO to disable keep-alive timeout.
+    #[must_use]
+    pub fn with_keep_alive_timeout(mut self, timeout: Duration) -> Self {
+        self.keep_alive_timeout = timeout;
+        self
+    }
+
+    /// Sets the keep-alive timeout in seconds.
+    #[must_use]
+    pub fn with_keep_alive_timeout_secs(mut self, secs: u64) -> Self {
+        self.keep_alive_timeout = Duration::from_secs(secs);
+        self
+    }
+
+    /// Sets the maximum requests per connection.
+    ///
+    /// Set to 0 for unlimited requests per connection.
+    #[must_use]
+    pub fn with_max_requests_per_connection(mut self, max: usize) -> Self {
+        self.max_requests_per_connection = max;
         self
     }
 }
@@ -203,6 +243,8 @@ impl From<ParseError> for ServerError {
 pub struct TcpServer {
     config: ServerConfig,
     request_counter: AtomicU64,
+    /// Current number of active connections.
+    connection_counter: AtomicU64,
 }
 
 impl TcpServer {
@@ -212,6 +254,7 @@ impl TcpServer {
         Self {
             config,
             request_counter: AtomicU64::new(0),
+            connection_counter: AtomicU64::new(0),
         }
     }
 
@@ -224,6 +267,47 @@ impl TcpServer {
     /// Generates a unique request ID.
     fn next_request_id(&self) -> u64 {
         self.request_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Returns the current number of active connections.
+    #[must_use]
+    pub fn current_connections(&self) -> u64 {
+        self.connection_counter.load(Ordering::Relaxed)
+    }
+
+    /// Attempts to acquire a connection slot.
+    ///
+    /// Returns true if a slot was acquired, false if the connection limit
+    /// has been reached. If max_connections is 0 (unlimited), always returns true.
+    fn try_acquire_connection(&self) -> bool {
+        let max = self.config.max_connections;
+        if max == 0 {
+            // Unlimited connections
+            self.connection_counter.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
+        // Try to increment if under limit
+        let mut current = self.connection_counter.load(Ordering::Relaxed);
+        loop {
+            if current >= max as u64 {
+                return false;
+            }
+            match self.connection_counter.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Releases a connection slot.
+    fn release_connection(&self) {
+        self.connection_counter.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Runs the server, accepting connections and handling requests.
@@ -290,7 +374,7 @@ impl TcpServer {
             }
 
             // Accept a connection.
-            let (stream, peer_addr) = match listener.accept().await {
+            let (mut stream, peer_addr) = match listener.accept().await {
                 Ok(conn) => conn,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     // Yield and retry.
@@ -307,12 +391,39 @@ impl TcpServer {
                 }
             };
 
+            // Check connection limit before processing
+            if !self.try_acquire_connection() {
+                cx.trace(&format!(
+                    "Connection limit reached ({}), rejecting {peer_addr}",
+                    self.config.max_connections
+                ));
+
+                // Send a 503 Service Unavailable response and close
+                let response = Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header("connection", b"close".to_vec())
+                    .body(fastapi_core::ResponseBody::Bytes(
+                        b"503 Service Unavailable: connection limit reached".to_vec(),
+                    ));
+                let mut writer = crate::response::ResponseWriter::new();
+                let response_bytes = writer.write(response);
+                let _ = write_response(&mut stream, response_bytes).await;
+                continue;
+            }
+
             // Configure the connection.
             if self.config.tcp_nodelay {
                 let _ = stream.set_nodelay(true);
             }
 
-            cx.trace(&format!("Accepted connection from {peer_addr}"));
+            cx.trace(&format!(
+                "Accepted connection from {peer_addr} ({}/{})",
+                self.current_connections(),
+                if self.config.max_connections == 0 {
+                    "∞".to_string()
+                } else {
+                    self.config.max_connections.to_string()
+                }
+            ));
 
             // Handle the connection.
             // In a full implementation, we would spawn this in a sub-region.
@@ -323,18 +434,23 @@ impl TcpServer {
             //     self.handle_connection(conn_cx, stream, peer_addr, handler.clone())
             // });
             let request_id = self.next_request_id();
-            let _request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
 
-            // Create a RequestContext for this request.
+            // Create a RequestContext for this request with the configured timeout budget.
             // In the full implementation, the Cx would be derived from the connection region.
-            let request_cx = Cx::for_testing(); // Placeholder until spawn works
+            // For now, we use for_testing_with_budget to apply the timeout.
+            let request_cx = Cx::for_testing_with_budget(request_budget);
             let ctx = RequestContext::new(request_cx, request_id);
 
-            // Handle the request.
-            if let Err(e) = self
+            // Handle the connection and release the slot when done.
+            let result = self
                 .handle_connection(&ctx, stream, peer_addr, &*handler)
-                .await
-            {
+                .await;
+
+            // Release connection slot (always, regardless of success/failure)
+            self.release_connection();
+
+            if let Err(e) = result {
                 cx.trace(&format!("Connection error from {peer_addr}: {e}"));
             }
         }
@@ -359,6 +475,8 @@ impl TcpServer {
         let mut parser = StatefulParser::new().with_limits(self.config.parse_limits.clone());
         let mut read_buffer = vec![0u8; self.config.read_buffer_size];
         let mut response_writer = ResponseWriter::new();
+        let mut requests_on_connection: usize = 0;
+        let max_requests = self.config.max_requests_per_connection;
 
         loop {
             // Check for cancellation
@@ -373,6 +491,8 @@ impl TcpServer {
                 ParseStatus::Complete { request, .. } => request,
                 ParseStatus::Incomplete => {
                     // Need more data - read from stream
+                    // TODO: Implement keep-alive timeout using async timeout
+                    // For now, this will block indefinitely waiting for data
                     let bytes_read = read_into_buffer(&mut stream, &mut read_buffer).await?;
 
                     if bytes_read == 0 {
@@ -391,23 +511,56 @@ impl TcpServer {
                 }
             };
 
-            // Generate unique request ID for this request
+            // Increment request counter
+            requests_on_connection += 1;
+
+            // Generate unique request ID for this request with timeout budget
             let request_id = self.next_request_id();
-            let request_cx = Cx::for_testing(); // TODO: derive from connection region
+            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_cx = Cx::for_testing_with_budget(request_budget);
             let ctx = RequestContext::new(request_cx, request_id);
 
             // Check if this is a keep-alive connection
-            let keep_alive = should_keep_alive(&request);
+            let client_wants_keep_alive = should_keep_alive(&request);
+
+            // Determine if we should keep the connection alive:
+            // - Client must request keep-alive (or HTTP/1.1 default)
+            // - We must not have exceeded max requests per connection
+            let at_max_requests =
+                max_requests > 0 && requests_on_connection >= max_requests;
+            let server_will_keep_alive = client_wants_keep_alive && !at_max_requests;
+
+            // Record start time for timeout detection
+            let request_start = Instant::now();
+            let timeout_duration = Duration::from_nanos(self.config.request_timeout.as_nanos());
 
             // Call the handler
             let response = handler(ctx, request).await;
+
+            // Check if request exceeded timeout and return 504 Gateway Timeout
+            let mut response = if request_start.elapsed() > timeout_duration {
+                Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
+                    fastapi_core::ResponseBody::Bytes(
+                        b"Gateway Timeout: request processing exceeded time limit".to_vec(),
+                    ),
+                )
+            } else {
+                response
+            };
+
+            // Add Connection header to response
+            response = if server_will_keep_alive {
+                response.header("connection", b"keep-alive".to_vec())
+            } else {
+                response.header("connection", b"close".to_vec())
+            };
 
             // Write the response
             let response_write = response_writer.write(response);
             write_response(&mut stream, response_write).await?;
 
             // If not keep-alive, close the connection
-            if !keep_alive {
+            if !server_will_keep_alive {
                 return Ok(());
             }
         }
@@ -670,5 +823,165 @@ mod tests {
             .headers_mut()
             .insert("Connection".to_string(), b"keep-alive, upgrade".to_vec());
         assert!(should_keep_alive(&request));
+    }
+
+    // ========================================================================
+    // Timeout behavior tests
+    // ========================================================================
+
+    #[test]
+    fn timeout_budget_created_with_config_deadline() {
+        let config = ServerConfig::new("127.0.0.1:8080").with_request_timeout_secs(45);
+        let budget = Budget::new().with_deadline(config.request_timeout);
+        assert_eq!(budget.deadline, Some(Time::from_secs(45)));
+    }
+
+    #[test]
+    fn timeout_duration_conversion_from_time() {
+        let timeout = Time::from_secs(30);
+        let duration = Duration::from_nanos(timeout.as_nanos());
+        assert_eq!(duration, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn timeout_duration_conversion_from_time_millis() {
+        let timeout = Time::from_millis(1500);
+        let duration = Duration::from_nanos(timeout.as_nanos());
+        assert_eq!(duration, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn gateway_timeout_response_has_correct_status() {
+        let response = Response::with_status(StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(response.status().as_u16(), 504);
+    }
+
+    #[test]
+    fn gateway_timeout_response_with_body() {
+        let response = Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
+            fastapi_core::ResponseBody::Bytes(b"Request timed out".to_vec()),
+        );
+        assert_eq!(response.status().as_u16(), 504);
+        // Verify body is set (not empty)
+        assert!(response.body_ref().len() > 0);
+    }
+
+    #[test]
+    fn elapsed_time_check_logic() {
+        // Test the timeout check logic in isolation
+        let start = Instant::now();
+        let timeout_duration = Duration::from_millis(10);
+
+        // Immediately after start, should not be timed out
+        assert!(start.elapsed() <= timeout_duration);
+
+        // Wait a bit longer than the timeout
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Now should be timed out
+        assert!(start.elapsed() > timeout_duration);
+    }
+
+    // ========================================================================
+    // Connection limit tests
+    // ========================================================================
+
+    #[test]
+    fn connection_counter_starts_at_zero() {
+        let server = TcpServer::default();
+        assert_eq!(server.current_connections(), 0);
+    }
+
+    #[test]
+    fn try_acquire_connection_unlimited() {
+        // With max_connections = 0 (unlimited), should always succeed
+        let server = TcpServer::default();
+        assert_eq!(server.config().max_connections, 0);
+
+        // Acquire several connections
+        for _ in 0..100 {
+            assert!(server.try_acquire_connection());
+        }
+        assert_eq!(server.current_connections(), 100);
+
+        // Release them all
+        for _ in 0..100 {
+            server.release_connection();
+        }
+        assert_eq!(server.current_connections(), 0);
+    }
+
+    #[test]
+    fn try_acquire_connection_with_limit() {
+        let config = ServerConfig::new("127.0.0.1:8080").with_max_connections(5);
+        let server = TcpServer::new(config);
+
+        // Acquire up to the limit
+        for i in 0..5 {
+            assert!(
+                server.try_acquire_connection(),
+                "Should acquire connection {i}"
+            );
+        }
+        assert_eq!(server.current_connections(), 5);
+
+        // Next one should fail
+        assert!(!server.try_acquire_connection());
+        assert_eq!(server.current_connections(), 5);
+
+        // Release one
+        server.release_connection();
+        assert_eq!(server.current_connections(), 4);
+
+        // Now we can acquire one more
+        assert!(server.try_acquire_connection());
+        assert_eq!(server.current_connections(), 5);
+    }
+
+    #[test]
+    fn try_acquire_connection_single_connection_limit() {
+        let config = ServerConfig::new("127.0.0.1:8080").with_max_connections(1);
+        let server = TcpServer::new(config);
+
+        // First acquire succeeds
+        assert!(server.try_acquire_connection());
+        assert_eq!(server.current_connections(), 1);
+
+        // Second fails
+        assert!(!server.try_acquire_connection());
+        assert_eq!(server.current_connections(), 1);
+
+        // After release, can acquire again
+        server.release_connection();
+        assert!(server.try_acquire_connection());
+    }
+
+    #[test]
+    fn service_unavailable_response_has_correct_status() {
+        let response = Response::with_status(StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status().as_u16(), 503);
+    }
+
+    #[test]
+    fn service_unavailable_response_with_body() {
+        let response = Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("connection", b"close".to_vec())
+            .body(fastapi_core::ResponseBody::Bytes(
+                b"503 Service Unavailable: connection limit reached".to_vec(),
+            ));
+        assert_eq!(response.status().as_u16(), 503);
+        assert!(response.body_ref().len() > 0);
+    }
+
+    #[test]
+    fn config_max_connections_default_is_zero() {
+        let config = ServerConfig::default();
+        assert_eq!(config.max_connections, 0);
+    }
+
+    #[test]
+    fn config_max_connections_can_be_set() {
+        let config = ServerConfig::new("127.0.0.1:8080").with_max_connections(100);
+        assert_eq!(config.max_connections, 100);
     }
 }
