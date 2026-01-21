@@ -149,10 +149,11 @@ impl CleanupStack {
         let mut completed = 0;
 
         for cleanup in cleanups {
-            // Run each cleanup, catching panics to ensure all cleanups run
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup));
+            // Call the cleanup function to get the future, catching panics
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (cleanup)()));
             match result {
                 Ok(future) => {
+                    // Now await the returned future
                     future.await;
                     completed += 1;
                 }
@@ -1580,5 +1581,330 @@ mod tests {
         // After guard drops, one item should be popped
         // Note: guard pops, but we still have CounterDep
         assert_eq!(stack.depth(), 1);
+    }
+
+    // ========================================================================
+    // CleanupStack Tests (fastapi_rust-9ps)
+    // ========================================================================
+
+    #[test]
+    fn cleanup_stack_basic() {
+        let stack = CleanupStack::new();
+        assert!(stack.is_empty());
+        assert_eq!(stack.len(), 0);
+
+        // Register a cleanup
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+        stack.push(Box::new(move || {
+            Box::pin(async move {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }));
+
+        assert!(!stack.is_empty());
+        assert_eq!(stack.len(), 1);
+
+        // Run cleanups
+        let completed = futures_executor::block_on(stack.run_cleanups());
+        assert_eq!(completed, 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // Stack should be empty after running
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn cleanup_stack_lifo_order() {
+        // Track cleanup execution order
+        let order = Arc::new(parking_lot::Mutex::new(Vec::<i32>::new()));
+
+        let stack = CleanupStack::new();
+
+        // Register cleanups: 1, 2, 3
+        for i in 1..=3 {
+            let order_clone = Arc::clone(&order);
+            stack.push(Box::new(move || {
+                Box::pin(async move {
+                    order_clone.lock().push(i);
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }));
+        }
+
+        // Run cleanups - should execute in LIFO order: 3, 2, 1
+        futures_executor::block_on(stack.run_cleanups());
+
+        let executed_order = order.lock().clone();
+        assert_eq!(executed_order, vec![3, 2, 1], "Cleanups should run in LIFO order");
+    }
+
+    #[test]
+    fn cleanup_stack_take_cleanups() {
+        let stack = CleanupStack::new();
+
+        // Register 3 cleanups
+        for _ in 0..3 {
+            stack.push(Box::new(|| {
+                Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }));
+        }
+
+        assert_eq!(stack.len(), 3);
+
+        // Take cleanups
+        let cleanups = stack.take_cleanups();
+        assert_eq!(cleanups.len(), 3);
+
+        // Stack should be empty
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn cleanup_stack_multiple_runs() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let stack = CleanupStack::new();
+
+        // First batch
+        let counter_clone = Arc::clone(&counter);
+        stack.push(Box::new(move || {
+            Box::pin(async move {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }));
+        futures_executor::block_on(stack.run_cleanups());
+
+        // Second batch
+        let counter_clone = Arc::clone(&counter);
+        stack.push(Box::new(move || {
+            Box::pin(async move {
+                counter_clone.fetch_add(10, Ordering::SeqCst);
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }));
+        futures_executor::block_on(stack.run_cleanups());
+
+        assert_eq!(counter.load(Ordering::SeqCst), 11);
+    }
+
+    // ========================================================================
+    // DependsCleanup Tests (fastapi_rust-9ps)
+    // ========================================================================
+
+    /// A dependency that tracks setup and cleanup
+    #[derive(Clone)]
+    struct TrackedResource {
+        id: u32,
+    }
+
+    impl FromDependencyWithCleanup for TrackedResource {
+        type Value = TrackedResource;
+        type Error = HttpError;
+
+        async fn setup(
+            ctx: &RequestContext,
+            _req: &mut Request,
+        ) -> Result<(Self::Value, Option<CleanupFn>), Self::Error> {
+            // Get or create a tracker in the dependency cache
+            let tracker = ctx
+                .dependency_cache()
+                .get::<Arc<parking_lot::Mutex<Vec<String>>>>()
+                .unwrap_or_else(|| {
+                    let t = Arc::new(parking_lot::Mutex::new(Vec::new()));
+                    ctx.dependency_cache().insert(Arc::clone(&t));
+                    t
+                });
+
+            tracker.lock().push("setup:resource".to_string());
+
+            let cleanup_tracker = Arc::clone(&tracker);
+            let cleanup = Box::new(move || {
+                Box::pin(async move {
+                    cleanup_tracker.lock().push("cleanup:resource".to_string());
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }) as CleanupFn;
+
+            Ok((TrackedResource { id: 42 }, Some(cleanup)))
+        }
+    }
+
+    #[test]
+    fn depends_cleanup_registers_cleanup() {
+        let ctx = test_context(None);
+        let mut req = empty_request();
+
+        // Resolve the dependency
+        let dep = futures_executor::block_on(DependsCleanup::<TrackedResource>::from_request(
+            &ctx, &mut req,
+        ))
+        .expect("cleanup dependency resolution failed");
+
+        assert_eq!(dep.id, 42);
+
+        // Cleanup should be registered
+        assert_eq!(ctx.cleanup_stack().len(), 1);
+
+        // Get tracker
+        let tracker = ctx
+            .dependency_cache()
+            .get::<Arc<parking_lot::Mutex<Vec<String>>>>()
+            .unwrap();
+
+        // Only setup should have run
+        let events = tracker.lock().clone();
+        assert_eq!(events, vec!["setup:resource"]);
+
+        // Run cleanups
+        futures_executor::block_on(ctx.cleanup_stack().run_cleanups());
+
+        // Now cleanup should have run too
+        let events = tracker.lock().clone();
+        assert_eq!(events, vec!["setup:resource", "cleanup:resource"]);
+    }
+
+    /// A dependency without cleanup
+    #[derive(Clone)]
+    struct NoCleanupResource {
+        value: String,
+    }
+
+    impl FromDependencyWithCleanup for NoCleanupResource {
+        type Value = NoCleanupResource;
+        type Error = HttpError;
+
+        async fn setup(
+            _ctx: &RequestContext,
+            _req: &mut Request,
+        ) -> Result<(Self::Value, Option<CleanupFn>), Self::Error> {
+            Ok((
+                NoCleanupResource {
+                    value: "no cleanup".to_string(),
+                },
+                None, // No cleanup needed
+            ))
+        }
+    }
+
+    #[test]
+    fn depends_cleanup_no_cleanup_fn() {
+        let ctx = test_context(None);
+        let mut req = empty_request();
+
+        let dep = futures_executor::block_on(DependsCleanup::<NoCleanupResource>::from_request(
+            &ctx, &mut req,
+        ))
+        .expect("no cleanup dependency resolution failed");
+
+        assert_eq!(dep.value, "no cleanup");
+
+        // No cleanup should be registered
+        assert!(ctx.cleanup_stack().is_empty());
+    }
+
+    /// Nested dependencies with cleanup
+    #[derive(Clone)]
+    struct OuterWithCleanup {
+        inner_id: u32,
+    }
+
+    impl FromDependencyWithCleanup for OuterWithCleanup {
+        type Value = OuterWithCleanup;
+        type Error = HttpError;
+
+        async fn setup(
+            ctx: &RequestContext,
+            req: &mut Request,
+        ) -> Result<(Self::Value, Option<CleanupFn>), Self::Error> {
+            // Resolve inner dependency first
+            let inner = DependsCleanup::<TrackedResource>::from_request(ctx, req).await?;
+
+            // Get tracker
+            let tracker = ctx
+                .dependency_cache()
+                .get::<Arc<parking_lot::Mutex<Vec<String>>>>()
+                .unwrap();
+
+            tracker.lock().push("setup:outer".to_string());
+
+            let cleanup_tracker = Arc::clone(&tracker);
+            let cleanup = Box::new(move || {
+                Box::pin(async move {
+                    cleanup_tracker.lock().push("cleanup:outer".to_string());
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }) as CleanupFn;
+
+            Ok((OuterWithCleanup { inner_id: inner.id }, Some(cleanup)))
+        }
+    }
+
+    #[test]
+    fn depends_cleanup_nested_lifo() {
+        let ctx = test_context(None);
+        let mut req = empty_request();
+
+        // Resolve outer (which resolves inner)
+        let dep = futures_executor::block_on(DependsCleanup::<OuterWithCleanup>::from_request(
+            &ctx, &mut req,
+        ))
+        .expect("nested cleanup dependency resolution failed");
+
+        assert_eq!(dep.inner_id, 42);
+
+        // Both cleanups should be registered
+        assert_eq!(ctx.cleanup_stack().len(), 2);
+
+        // Get tracker
+        let tracker = ctx
+            .dependency_cache()
+            .get::<Arc<parking_lot::Mutex<Vec<String>>>>()
+            .unwrap();
+
+        // Setup order: inner, then outer
+        let events_before = tracker.lock().clone();
+        assert_eq!(events_before, vec!["setup:resource", "setup:outer"]);
+
+        // Run cleanups - LIFO order: outer first, then inner
+        futures_executor::block_on(ctx.cleanup_stack().run_cleanups());
+
+        let events_after = tracker.lock().clone();
+        assert_eq!(
+            events_after,
+            vec![
+                "setup:resource",
+                "setup:outer",
+                "cleanup:outer",
+                "cleanup:resource"
+            ],
+            "Cleanups should run in LIFO order"
+        );
+    }
+
+    #[test]
+    fn depends_cleanup_caching() {
+        let ctx = test_context(None);
+        let mut req = empty_request();
+
+        // First resolution
+        let _dep1 = futures_executor::block_on(DependsCleanup::<TrackedResource>::from_request(
+            &ctx, &mut req,
+        ))
+        .unwrap();
+
+        // Second resolution - should use cache
+        let _dep2 = futures_executor::block_on(DependsCleanup::<TrackedResource>::from_request(
+            &ctx, &mut req,
+        ))
+        .unwrap();
+
+        // Only one cleanup should be registered (due to caching)
+        assert_eq!(ctx.cleanup_stack().len(), 1);
+
+        // Get tracker
+        let tracker = ctx
+            .dependency_cache()
+            .get::<Arc<parking_lot::Mutex<Vec<String>>>>()
+            .unwrap();
+
+        // Setup should only run once
+        let events = tracker.lock().clone();
+        assert_eq!(events, vec!["setup:resource"]);
     }
 }
