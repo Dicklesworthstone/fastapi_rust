@@ -14,3 +14,6 @@ Thumbs.db
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# BV lock file (ephemeral)
+.beads/.bv.lock
