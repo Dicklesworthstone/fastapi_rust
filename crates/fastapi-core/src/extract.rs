@@ -3975,7 +3975,292 @@ impl Cookie {
 
         parts.join("; ")
     }
+
+    // =========================================================================
+    // Secure Cookie Configuration Helpers
+    // =========================================================================
+
+    /// Create a session cookie with secure defaults.
+    ///
+    /// Session cookies are:
+    /// - HttpOnly (not accessible to JavaScript)
+    /// - Secure (HTTPS only, unless `production` is false)
+    /// - SameSite=Lax (sent with top-level navigations)
+    /// - Path=/ (accessible site-wide)
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Cookie name
+    /// * `value` - Cookie value
+    /// * `production` - If true, sets Secure flag; if false, omits it for local development
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::extract::Cookie;
+    ///
+    /// // Production session cookie
+    /// let cookie = Cookie::session("session_id", "abc123", true);
+    ///
+    /// // Development session cookie (no Secure flag)
+    /// let cookie = Cookie::session("session_id", "abc123", false);
+    /// ```
+    #[must_use]
+    pub fn session(name: impl Into<String>, value: impl Into<String>, production: bool) -> Self {
+        Self::new(name, value)
+            .http_only(true)
+            .secure(production)
+            .same_site(SameSite::Lax)
+            .path("/")
+    }
+
+    /// Create an authentication cookie with strict security.
+    ///
+    /// Auth cookies are:
+    /// - HttpOnly (not accessible to JavaScript)
+    /// - Secure (HTTPS only, unless `production` is false)
+    /// - SameSite=Strict (only sent in first-party context)
+    /// - Path=/ (accessible site-wide)
+    ///
+    /// Use this for authentication tokens that should never be sent in cross-site requests.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Cookie name
+    /// * `value` - Cookie value
+    /// * `production` - If true, sets Secure flag; if false, omits it for local development
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::extract::Cookie;
+    ///
+    /// let cookie = Cookie::auth("auth_token", "jwt_here", true)
+    ///     .max_age(86400); // 1 day
+    /// ```
+    #[must_use]
+    pub fn auth(name: impl Into<String>, value: impl Into<String>, production: bool) -> Self {
+        Self::new(name, value)
+            .http_only(true)
+            .secure(production)
+            .same_site(SameSite::Strict)
+            .path("/")
+    }
+
+    /// Create a CSRF token cookie.
+    ///
+    /// CSRF cookies are:
+    /// - NOT HttpOnly (must be readable by JavaScript to include in requests)
+    /// - Secure (HTTPS only, unless `production` is false)
+    /// - SameSite=Strict (only sent in first-party context)
+    /// - Path=/ (accessible site-wide)
+    ///
+    /// The CSRF token must be accessible to JavaScript so it can be included in
+    /// request headers or form data for validation.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Cookie name (commonly "csrf_token" or "_csrf")
+    /// * `value` - The CSRF token value
+    /// * `production` - If true, sets Secure flag; if false, omits it for local development
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::extract::Cookie;
+    ///
+    /// let cookie = Cookie::csrf("csrf_token", "random_token_here", true);
+    /// ```
+    #[must_use]
+    pub fn csrf(name: impl Into<String>, value: impl Into<String>, production: bool) -> Self {
+        Self::new(name, value)
+            .http_only(false)
+            .secure(production)
+            .same_site(SameSite::Strict)
+            .path("/")
+    }
+
+    /// Create a cookie with the `__Host-` prefix.
+    ///
+    /// The `__Host-` prefix enforces that the cookie:
+    /// - MUST have the Secure flag
+    /// - MUST NOT have a Domain attribute
+    /// - MUST have Path=/
+    ///
+    /// This provides the strongest cookie security by preventing the cookie from
+    /// being set by subdomains or accessed across different paths.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Cookie name (without the `__Host-` prefix - it will be added)
+    /// * `value` - Cookie value
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::extract::Cookie;
+    ///
+    /// // Creates cookie named "__Host-session"
+    /// let cookie = Cookie::host_prefixed("session", "abc123")
+    ///     .http_only(true)
+    ///     .same_site(SameSite::Strict);
+    /// ```
+    #[must_use]
+    pub fn host_prefixed(name: impl Into<String>, value: impl Into<String>) -> Self {
+        let prefixed_name = format!("__Host-{}", name.into());
+        Self::new(prefixed_name, value)
+            .secure(true)
+            .path("/")
+    }
+
+    /// Create a cookie with the `__Secure-` prefix.
+    ///
+    /// The `__Secure-` prefix enforces that the cookie:
+    /// - MUST have the Secure flag
+    ///
+    /// Unlike `__Host-`, this allows Domain and Path attributes.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Cookie name (without the `__Secure-` prefix - it will be added)
+    /// * `value` - Cookie value
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::extract::Cookie;
+    ///
+    /// // Creates cookie named "__Secure-token"
+    /// let cookie = Cookie::secure_prefixed("token", "abc123")
+    ///     .domain(".example.com")
+    ///     .http_only(true);
+    /// ```
+    #[must_use]
+    pub fn secure_prefixed(name: impl Into<String>, value: impl Into<String>) -> Self {
+        let prefixed_name = format!("__Secure-{}", name.into());
+        Self::new(prefixed_name, value)
+            .secure(true)
+    }
+
+    /// Validate that the cookie meets its prefix requirements.
+    ///
+    /// Returns `Ok(())` if valid, or `Err` with a description of the violation.
+    ///
+    /// # Cookie Prefix Rules
+    ///
+    /// - `__Host-`: Must have Secure=true, Path="/", and no Domain
+    /// - `__Secure-`: Must have Secure=true
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::extract::Cookie;
+    ///
+    /// let cookie = Cookie::host_prefixed("session", "abc123");
+    /// assert!(cookie.validate_prefix().is_ok());
+    ///
+    /// // This would fail validation
+    /// let invalid = Cookie::new("__Host-session", "abc123")
+    ///     .domain("example.com"); // __Host- cannot have Domain
+    /// assert!(invalid.validate_prefix().is_err());
+    /// ```
+    pub fn validate_prefix(&self) -> Result<(), CookiePrefixError> {
+        if self.name.starts_with("__Host-") {
+            if !self.secure {
+                return Err(CookiePrefixError::HostRequiresSecure);
+            }
+            if self.domain.is_some() {
+                return Err(CookiePrefixError::HostCannotHaveDomain);
+            }
+            if self.path.as_deref() != Some("/") {
+                return Err(CookiePrefixError::HostRequiresRootPath);
+            }
+        } else if self.name.starts_with("__Secure-") && !self.secure {
+            return Err(CookiePrefixError::SecureRequiresSecure);
+        }
+        Ok(())
+    }
+
+    /// Check if this cookie has a security prefix.
+    #[must_use]
+    pub fn has_security_prefix(&self) -> bool {
+        self.name.starts_with("__Host-") || self.name.starts_with("__Secure-")
+    }
+
+    /// Get the security prefix type, if any.
+    #[must_use]
+    pub fn prefix(&self) -> Option<CookiePrefix> {
+        if self.name.starts_with("__Host-") {
+            Some(CookiePrefix::Host)
+        } else if self.name.starts_with("__Secure-") {
+            Some(CookiePrefix::Secure)
+        } else {
+            None
+        }
+    }
 }
+
+/// Cookie security prefix types.
+///
+/// Modern browsers support cookie prefixes that enforce security requirements:
+/// - `__Host-`: Strongest protection, locks cookie to a single origin
+/// - `__Secure-`: Requires HTTPS, but allows subdomain/path configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookiePrefix {
+    /// The `__Host-` prefix.
+    ///
+    /// Requires: Secure=true, Path="/", no Domain attribute.
+    Host,
+    /// The `__Secure-` prefix.
+    ///
+    /// Requires: Secure=true only.
+    Secure,
+}
+
+impl CookiePrefix {
+    /// Get the string representation of the prefix.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Host => "__Host-",
+            Self::Secure => "__Secure-",
+        }
+    }
+}
+
+/// Errors that can occur when validating cookie prefixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CookiePrefixError {
+    /// `__Host-` prefix requires Secure flag.
+    HostRequiresSecure,
+    /// `__Host-` prefix cannot have a Domain attribute.
+    HostCannotHaveDomain,
+    /// `__Host-` prefix requires Path="/".
+    HostRequiresRootPath,
+    /// `__Secure-` prefix requires Secure flag.
+    SecureRequiresSecure,
+}
+
+impl std::fmt::Display for CookiePrefixError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostRequiresSecure => {
+                write!(f, "__Host- prefix requires Secure flag to be true")
+            }
+            Self::HostCannotHaveDomain => {
+                write!(f, "__Host- prefix cannot have a Domain attribute")
+            }
+            Self::HostRequiresRootPath => {
+                write!(f, "__Host- prefix requires Path=\"/\"")
+            }
+            Self::SecureRequiresSecure => {
+                write!(f, "__Secure- prefix requires Secure flag to be true")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CookiePrefixError {}
 
 /// SameSite cookie attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4397,6 +4682,177 @@ mod special_extractor_tests {
         let mutations = result.unwrap();
         assert!(mutations.headers.is_empty());
         assert!(mutations.cookies.is_empty());
+    }
+
+    // =========================================================================
+    // Secure Cookie Configuration Helper Tests
+    // =========================================================================
+
+    #[test]
+    fn session_cookie_production() {
+        let cookie = Cookie::session("session_id", "abc123", true);
+        assert_eq!(cookie.name, "session_id");
+        assert_eq!(cookie.value, "abc123");
+        assert!(cookie.http_only);
+        assert!(cookie.secure);
+        assert_eq!(cookie.same_site, Some(SameSite::Lax));
+        assert_eq!(cookie.path, Some("/".to_string()));
+    }
+
+    #[test]
+    fn session_cookie_development() {
+        let cookie = Cookie::session("session_id", "abc123", false);
+        assert!(cookie.http_only);
+        assert!(!cookie.secure); // No Secure flag in development
+        assert_eq!(cookie.same_site, Some(SameSite::Lax));
+    }
+
+    #[test]
+    fn auth_cookie_production() {
+        let cookie = Cookie::auth("auth_token", "jwt_token", true);
+        assert_eq!(cookie.name, "auth_token");
+        assert!(cookie.http_only);
+        assert!(cookie.secure);
+        assert_eq!(cookie.same_site, Some(SameSite::Strict)); // Stricter than session
+        assert_eq!(cookie.path, Some("/".to_string()));
+    }
+
+    #[test]
+    fn csrf_cookie_is_readable_by_js() {
+        let cookie = Cookie::csrf("csrf_token", "random_value", true);
+        assert_eq!(cookie.name, "csrf_token");
+        assert!(!cookie.http_only); // Must be readable by JS
+        assert!(cookie.secure);
+        assert_eq!(cookie.same_site, Some(SameSite::Strict));
+    }
+
+    #[test]
+    fn host_prefixed_cookie() {
+        let cookie = Cookie::host_prefixed("session", "abc123");
+        assert_eq!(cookie.name, "__Host-session");
+        assert!(cookie.secure);
+        assert_eq!(cookie.path, Some("/".to_string()));
+        assert!(cookie.domain.is_none());
+        assert!(cookie.validate_prefix().is_ok());
+    }
+
+    #[test]
+    fn host_prefixed_cookie_validation_fails_without_secure() {
+        let cookie = Cookie::new("__Host-session", "abc123")
+            .path("/")
+            .secure(false);
+        assert_eq!(
+            cookie.validate_prefix(),
+            Err(CookiePrefixError::HostRequiresSecure)
+        );
+    }
+
+    #[test]
+    fn host_prefixed_cookie_validation_fails_with_domain() {
+        let cookie = Cookie::new("__Host-session", "abc123")
+            .path("/")
+            .secure(true)
+            .domain("example.com");
+        assert_eq!(
+            cookie.validate_prefix(),
+            Err(CookiePrefixError::HostCannotHaveDomain)
+        );
+    }
+
+    #[test]
+    fn host_prefixed_cookie_validation_fails_without_root_path() {
+        let cookie = Cookie::new("__Host-session", "abc123")
+            .path("/api")
+            .secure(true);
+        assert_eq!(
+            cookie.validate_prefix(),
+            Err(CookiePrefixError::HostRequiresRootPath)
+        );
+    }
+
+    #[test]
+    fn secure_prefixed_cookie() {
+        let cookie = Cookie::secure_prefixed("token", "abc123");
+        assert_eq!(cookie.name, "__Secure-token");
+        assert!(cookie.secure);
+        // __Secure- allows Domain and Path
+        let cookie = cookie.domain("example.com").path("/api");
+        assert!(cookie.validate_prefix().is_ok());
+    }
+
+    #[test]
+    fn secure_prefixed_cookie_validation_fails_without_secure() {
+        let cookie = Cookie::new("__Secure-token", "abc123")
+            .secure(false);
+        assert_eq!(
+            cookie.validate_prefix(),
+            Err(CookiePrefixError::SecureRequiresSecure)
+        );
+    }
+
+    #[test]
+    fn cookie_prefix_detection() {
+        let host_cookie = Cookie::host_prefixed("session", "abc");
+        assert!(host_cookie.has_security_prefix());
+        assert_eq!(host_cookie.prefix(), Some(CookiePrefix::Host));
+
+        let secure_cookie = Cookie::secure_prefixed("token", "abc");
+        assert!(secure_cookie.has_security_prefix());
+        assert_eq!(secure_cookie.prefix(), Some(CookiePrefix::Secure));
+
+        let normal_cookie = Cookie::new("regular", "abc");
+        assert!(!normal_cookie.has_security_prefix());
+        assert_eq!(normal_cookie.prefix(), None);
+    }
+
+    #[test]
+    fn cookie_prefix_as_str() {
+        assert_eq!(CookiePrefix::Host.as_str(), "__Host-");
+        assert_eq!(CookiePrefix::Secure.as_str(), "__Secure-");
+    }
+
+    #[test]
+    fn cookie_prefix_error_display() {
+        assert_eq!(
+            CookiePrefixError::HostRequiresSecure.to_string(),
+            "__Host- prefix requires Secure flag to be true"
+        );
+        assert_eq!(
+            CookiePrefixError::HostCannotHaveDomain.to_string(),
+            "__Host- prefix cannot have a Domain attribute"
+        );
+        assert_eq!(
+            CookiePrefixError::HostRequiresRootPath.to_string(),
+            "__Host- prefix requires Path=\"/\""
+        );
+        assert_eq!(
+            CookiePrefixError::SecureRequiresSecure.to_string(),
+            "__Secure- prefix requires Secure flag to be true"
+        );
+    }
+
+    #[test]
+    fn session_cookie_header_format() {
+        let cookie = Cookie::session("sid", "abc", true);
+        let header = cookie.to_header_value();
+        assert!(header.contains("sid=abc"));
+        assert!(header.contains("HttpOnly"));
+        assert!(header.contains("Secure"));
+        assert!(header.contains("SameSite=Lax"));
+        assert!(header.contains("Path=/"));
+    }
+
+    #[test]
+    fn host_prefixed_cookie_header_format() {
+        let cookie = Cookie::host_prefixed("session", "abc")
+            .http_only(true)
+            .same_site(SameSite::Strict);
+        let header = cookie.to_header_value();
+        assert!(header.contains("__Host-session=abc"));
+        assert!(header.contains("Secure"));
+        assert!(header.contains("Path=/"));
+        assert!(header.contains("HttpOnly"));
+        assert!(header.contains("SameSite=Strict"));
     }
 }
 
