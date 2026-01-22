@@ -5510,6 +5510,207 @@ impl FromRequest for OAuth2PasswordBearer {
     }
 }
 
+// ============================================================================
+// HTTP Bearer Token Extractor
+// ============================================================================
+
+/// Simple HTTP bearer token extractor.
+///
+/// Extracts a bearer token from the `Authorization` header. This is a simpler
+/// alternative to [`OAuth2PasswordBearer`] when you don't need OAuth2-specific
+/// functionality like token URLs and scopes.
+///
+/// This corresponds to FastAPI's `HTTPBearer` security scheme, which generates
+/// an OpenAPI security scheme with `type: "http"` and `scheme: "bearer"`.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::BearerToken;
+///
+/// async fn protected_route(token: BearerToken) -> impl IntoResponse {
+///     // Validate the token
+///     if verify_token(&token) {
+///         format!("Token valid: {}", token.token())
+///     } else {
+///         // Return error response
+///     }
+/// }
+/// ```
+///
+/// # Error Handling
+///
+/// When the token is missing or invalid, a 401 Unauthorized response is returned
+/// with a `WWW-Authenticate: Bearer` header, following RFC 6750.
+///
+/// # Optional Extraction
+///
+/// Wrap in `Option` to make the token optional:
+///
+/// ```ignore
+/// async fn maybe_auth(token: Option<BearerToken>) -> impl IntoResponse {
+///     match token {
+///         Some(t) => format!("Authenticated with: {}", t.token()),
+///         None => "Anonymous access".to_string(),
+///     }
+/// }
+/// ```
+///
+/// # OpenAPI
+///
+/// This extractor generates the following OpenAPI security scheme:
+/// ```yaml
+/// securitySchemes:
+///   BearerToken:
+///     type: http
+///     scheme: bearer
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BearerToken {
+    /// The extracted bearer token (without the "Bearer " prefix).
+    token: String,
+}
+
+impl BearerToken {
+    /// Create a new BearerToken with the given token value.
+    #[must_use]
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+        }
+    }
+
+    /// Get the token value.
+    #[must_use]
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Consume self and return the token string.
+    #[must_use]
+    pub fn into_token(self) -> String {
+        self.token
+    }
+}
+
+impl Deref for BearerToken {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.token
+    }
+}
+
+impl AsRef<str> for BearerToken {
+    fn as_ref(&self) -> &str {
+        &self.token
+    }
+}
+
+/// Error when bearer token extraction fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BearerTokenError {
+    /// The Authorization header is missing.
+    MissingHeader,
+    /// The Authorization header doesn't use the Bearer scheme.
+    InvalidScheme,
+    /// The token is empty after the "Bearer " prefix.
+    EmptyToken,
+}
+
+impl BearerTokenError {
+    /// Create a missing header error.
+    #[must_use]
+    pub fn missing_header() -> Self {
+        Self::MissingHeader
+    }
+
+    /// Create an invalid scheme error.
+    #[must_use]
+    pub fn invalid_scheme() -> Self {
+        Self::InvalidScheme
+    }
+
+    /// Create an empty token error.
+    #[must_use]
+    pub fn empty_token() -> Self {
+        Self::EmptyToken
+    }
+
+    /// Get a human-readable description of this error.
+    #[must_use]
+    pub fn detail(&self) -> &'static str {
+        match self {
+            Self::MissingHeader => "Not authenticated",
+            Self::InvalidScheme => "Invalid authentication credentials",
+            Self::EmptyToken => "Invalid authentication credentials",
+        }
+    }
+}
+
+impl fmt::Display for BearerTokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingHeader => write!(f, "Missing Authorization header"),
+            Self::InvalidScheme => write!(f, "Authorization header must use Bearer scheme"),
+            Self::EmptyToken => write!(f, "Bearer token is empty"),
+        }
+    }
+}
+
+impl std::error::Error for BearerTokenError {}
+
+impl IntoResponse for BearerTokenError {
+    fn into_response(self) -> crate::response::Response {
+        use crate::response::{Response, ResponseBody, StatusCode};
+
+        let body = serde_json::json!({
+            "detail": self.detail()
+        });
+
+        Response::with_status(StatusCode::UNAUTHORIZED)
+            .header("www-authenticate", b"Bearer".to_vec())
+            .header("content-type", b"application/json".to_vec())
+            .body(ResponseBody::Bytes(body.to_string().into_bytes()))
+    }
+}
+
+impl FromRequest for BearerToken {
+    type Error = BearerTokenError;
+
+    async fn from_request(_ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
+        // Get the Authorization header
+        let auth_header = req
+            .headers()
+            .get("authorization")
+            .ok_or(BearerTokenError::MissingHeader)?;
+
+        // Convert to string (invalid UTF-8 is treated as invalid scheme)
+        let auth_str =
+            std::str::from_utf8(auth_header).map_err(|_| BearerTokenError::InvalidScheme)?;
+
+        // Check for "Bearer " prefix (case-sensitive per RFC 6750, but we allow lowercase)
+        const BEARER_PREFIX: &str = "Bearer ";
+        const BEARER_PREFIX_LOWER: &str = "bearer ";
+
+        let token = if auth_str.starts_with(BEARER_PREFIX) {
+            &auth_str[BEARER_PREFIX.len()..]
+        } else if auth_str.starts_with(BEARER_PREFIX_LOWER) {
+            &auth_str[BEARER_PREFIX_LOWER.len()..]
+        } else {
+            return Err(BearerTokenError::InvalidScheme);
+        };
+
+        // Trim whitespace and check for empty token
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(BearerTokenError::EmptyToken);
+        }
+
+        Ok(BearerToken::new(token))
+    }
+}
+
 /// Multiple header values extractor.
 ///
 /// Extracts all values for a header that may appear multiple times.
@@ -6128,6 +6329,337 @@ mod oauth2_tests {
                 });
             assert!(has_www_auth, "All OAuth2 errors should have WWW-Authenticate: Bearer");
         }
+    }
+}
+
+#[cfg(test)]
+mod bearer_token_tests {
+    use super::*;
+    use crate::request::Method;
+    use crate::response::IntoResponse;
+
+    fn test_context() -> RequestContext {
+        let cx = asupersync::Cx::for_testing();
+        RequestContext::new(cx, 12345)
+    }
+
+    #[test]
+    fn bearer_token_extract_valid_token() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("authorization", b"Bearer mytoken123".to_vec());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let token = result.unwrap();
+        assert_eq!(token.token(), "mytoken123");
+        assert_eq!(&*token, "mytoken123"); // Test Deref
+        assert_eq!(token.as_ref(), "mytoken123"); // Test AsRef
+    }
+
+    #[test]
+    fn bearer_token_extract_lowercase_bearer() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("authorization", b"bearer lowercase_token".to_vec());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let token = result.unwrap();
+        assert_eq!(token.token(), "lowercase_token");
+    }
+
+    #[test]
+    fn bearer_token_missing_header() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // No authorization header
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let err = result.unwrap_err();
+        assert_eq!(err, BearerTokenError::MissingHeader);
+    }
+
+    #[test]
+    fn bearer_token_wrong_scheme() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("authorization", b"Basic dXNlcjpwYXNz".to_vec());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let err = result.unwrap_err();
+        assert_eq!(err, BearerTokenError::InvalidScheme);
+    }
+
+    #[test]
+    fn bearer_token_empty_token() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("authorization", b"Bearer ".to_vec());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let err = result.unwrap_err();
+        assert_eq!(err, BearerTokenError::EmptyToken);
+    }
+
+    #[test]
+    fn bearer_token_whitespace_only_token() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("authorization", b"Bearer    ".to_vec());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let err = result.unwrap_err();
+        assert_eq!(err, BearerTokenError::EmptyToken);
+    }
+
+    #[test]
+    fn bearer_token_with_spaces_trimmed() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("authorization", b"Bearer   spaced_token   ".to_vec());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let token = result.unwrap();
+        assert_eq!(token.token(), "spaced_token");
+    }
+
+    #[test]
+    fn bearer_token_optional_some() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("authorization", b"Bearer optional_token".to_vec());
+
+        let result = futures_executor::block_on(Option::<BearerToken>::from_request(&ctx, &mut req));
+        let maybe_token = result.unwrap();
+        assert!(maybe_token.is_some());
+        assert_eq!(maybe_token.unwrap().token(), "optional_token");
+    }
+
+    #[test]
+    fn bearer_token_optional_none() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // No authorization header
+
+        let result = futures_executor::block_on(Option::<BearerToken>::from_request(&ctx, &mut req));
+        let maybe_token = result.unwrap();
+        assert!(maybe_token.is_none());
+    }
+
+    #[test]
+    fn bearer_token_error_response_401() {
+        let err = BearerTokenError::missing_header();
+        let response = err.into_response();
+        assert_eq!(response.status().as_u16(), 401);
+    }
+
+    #[test]
+    fn bearer_token_error_has_www_authenticate() {
+        let err = BearerTokenError::missing_header();
+        let response = err.into_response();
+
+        let has_www_auth = response
+            .headers()
+            .iter()
+            .any(|(name, value)| name == "www-authenticate" && value == b"Bearer");
+        assert!(has_www_auth);
+    }
+
+    #[test]
+    fn bearer_token_error_display() {
+        assert_eq!(
+            BearerTokenError::missing_header().to_string(),
+            "Missing Authorization header"
+        );
+        assert_eq!(
+            BearerTokenError::invalid_scheme().to_string(),
+            "Authorization header must use Bearer scheme"
+        );
+        assert_eq!(
+            BearerTokenError::empty_token().to_string(),
+            "Bearer token is empty"
+        );
+    }
+
+    #[test]
+    fn bearer_token_error_detail() {
+        assert_eq!(BearerTokenError::MissingHeader.detail(), "Not authenticated");
+        assert_eq!(
+            BearerTokenError::InvalidScheme.detail(),
+            "Invalid authentication credentials"
+        );
+        assert_eq!(
+            BearerTokenError::EmptyToken.detail(),
+            "Invalid authentication credentials"
+        );
+    }
+
+    #[test]
+    fn bearer_token_new_and_accessors() {
+        let token = BearerToken::new("test_token");
+        assert_eq!(token.token(), "test_token");
+        assert_eq!(token.clone().into_token(), "test_token");
+    }
+
+    #[test]
+    fn bearer_token_error_response_json_body() {
+        let err = BearerTokenError::missing_header();
+        let response = err.into_response();
+
+        let body_str = match response.body_ref() {
+            crate::response::ResponseBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("Expected Bytes body"),
+        };
+        let body: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+
+        assert_eq!(body["detail"], "Not authenticated");
+    }
+
+    #[test]
+    fn bearer_token_error_content_type_json() {
+        let err = BearerTokenError::missing_header();
+        let response = err.into_response();
+
+        let has_json_content_type = response
+            .headers()
+            .iter()
+            .any(|(name, value)| name == "content-type" && value == b"application/json");
+        assert!(has_json_content_type);
+    }
+
+    #[test]
+    fn bearer_token_special_characters() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        let special_token = "abc123!@#$%^&*()_+-=[]{}|;':\",./<>?";
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {}", special_token).into_bytes());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let token = result.unwrap();
+        assert_eq!(token.token(), special_token);
+    }
+
+    #[test]
+    fn bearer_token_very_long_token() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        let long_token = "a".repeat(10000);
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {}", long_token).into_bytes());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let token = result.unwrap();
+        assert_eq!(token.token(), long_token);
+    }
+
+    #[test]
+    fn bearer_token_invalid_utf8() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // Invalid UTF-8 sequence
+        req.headers_mut()
+            .insert("authorization", vec![0x42, 0x65, 0x61, 0x72, 0x65, 0x72, 0x20, 0xFF, 0xFE]);
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let err = result.unwrap_err();
+        assert_eq!(err, BearerTokenError::InvalidScheme);
+    }
+
+    #[test]
+    fn bearer_token_only_bearer_no_space() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // "Bearer" without trailing space and token
+        req.headers_mut()
+            .insert("authorization", b"Bearer".to_vec());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let err = result.unwrap_err();
+        assert_eq!(err, BearerTokenError::InvalidScheme);
+    }
+
+    #[test]
+    fn bearer_token_mixed_case_bearer() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // Mixed case should fail (we only support "Bearer" and "bearer")
+        req.headers_mut()
+            .insert("authorization", b"BEARER token".to_vec());
+
+        let result = futures_executor::block_on(BearerToken::from_request(&ctx, &mut req));
+        let err = result.unwrap_err();
+        assert_eq!(err, BearerTokenError::InvalidScheme);
+    }
+
+    #[test]
+    fn bearer_token_all_errors_are_401() {
+        let errors = vec![
+            BearerTokenError::missing_header(),
+            BearerTokenError::invalid_scheme(),
+            BearerTokenError::empty_token(),
+        ];
+
+        for err in errors {
+            let response = err.into_response();
+            assert_eq!(response.status().as_u16(), 401, "All BearerToken errors should be 401");
+        }
+    }
+
+    #[test]
+    fn bearer_token_all_errors_have_www_authenticate() {
+        let errors = vec![
+            BearerTokenError::missing_header(),
+            BearerTokenError::invalid_scheme(),
+            BearerTokenError::empty_token(),
+        ];
+
+        for err in errors {
+            let response = err.into_response();
+            let has_www_auth = response
+                .headers()
+                .iter()
+                .any(|(name, value)| name == "www-authenticate" && value == b"Bearer");
+            assert!(has_www_auth, "All BearerToken errors should have WWW-Authenticate: Bearer");
+        }
+    }
+
+    #[test]
+    fn bearer_token_equality() {
+        let token1 = BearerToken::new("same_token");
+        let token2 = BearerToken::new("same_token");
+        let token3 = BearerToken::new("different_token");
+
+        assert_eq!(token1, token2);
+        assert_ne!(token1, token3);
+    }
+
+    #[test]
+    fn bearer_token_error_equality() {
+        assert_eq!(BearerTokenError::MissingHeader, BearerTokenError::MissingHeader);
+        assert_eq!(BearerTokenError::InvalidScheme, BearerTokenError::InvalidScheme);
+        assert_eq!(BearerTokenError::EmptyToken, BearerTokenError::EmptyToken);
+        assert_ne!(BearerTokenError::MissingHeader, BearerTokenError::InvalidScheme);
+    }
+
+    #[test]
+    fn bearer_token_debug() {
+        let token = BearerToken::new("debug_token");
+        let debug_str = format!("{:?}", token);
+        assert!(debug_str.contains("debug_token"));
+    }
+
+    #[test]
+    fn bearer_token_clone() {
+        let token = BearerToken::new("cloneable");
+        let cloned = token.clone();
+        assert_eq!(token, cloned);
     }
 }
 

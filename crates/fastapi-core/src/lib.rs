@@ -73,13 +73,13 @@ pub use dependency::{
 };
 pub use error::{HttpError, LocItem, ValidationError, ValidationErrors};
 pub use extract::{
-    Accept, AppState, Authorization, BackgroundTasks, BackgroundTasksInner, ContentType, Cookie,
-    CookiePrefix, CookiePrefixError, DEFAULT_JSON_LIMIT, FromHeaderValue, FromRequest, Header,
-    HeaderExtractError, HeaderName, HeaderValues, Host, Json, JsonConfig, JsonExtractError,
-    NamedHeader, OAuth2BearerError, OAuth2BearerErrorKind, OAuth2PasswordBearer,
-    OAuth2PasswordBearerConfig, Path, PathExtractError, PathParams, Query, QueryExtractError,
-    QueryParams, RequestRef, ResponseMut, ResponseMutations, SameSite, State, StateExtractError,
-    UserAgent, XRequestId, snake_to_header_case,
+    Accept, AppState, Authorization, BackgroundTasks, BackgroundTasksInner, BearerToken,
+    BearerTokenError, ContentType, Cookie, CookiePrefix, CookiePrefixError, DEFAULT_JSON_LIMIT,
+    FromHeaderValue, FromRequest, Header, HeaderExtractError, HeaderName, HeaderValues, Host, Json,
+    JsonConfig, JsonExtractError, NamedHeader, OAuth2BearerError, OAuth2BearerErrorKind,
+    OAuth2PasswordBearer, OAuth2PasswordBearerConfig, Path, PathExtractError, PathParams, Query,
+    QueryExtractError, QueryParams, RequestRef, ResponseMut, ResponseMutations, SameSite, State,
+    StateExtractError, UserAgent, XRequestId, snake_to_header_case,
 };
 pub use middleware::{
     AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, Handler, Layer, Layered,
