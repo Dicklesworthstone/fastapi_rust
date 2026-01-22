@@ -45,9 +45,7 @@ use fastapi::core::{
 /// and mutable Request, and return a Response. They can be sync or async.
 fn hello_handler(_ctx: &RequestContext, _req: &mut Request) -> std::future::Ready<Response> {
     // Create a 200 OK response with a plain text body
-    std::future::ready(
-        Response::ok().body(ResponseBody::Bytes(b"Hello, World!".to_vec())),
-    )
+    std::future::ready(Response::ok().body(ResponseBody::Bytes(b"Hello, World!".to_vec())))
 }
 
 fn main() {
@@ -86,7 +84,11 @@ fn main() {
     let response = client.get("/").send();
 
     // Check the response
-    println!("GET / -> {} {}", response.status().as_u16(), response.status().canonical_reason());
+    println!(
+        "GET / -> {} {}",
+        response.status().as_u16(),
+        response.status().canonical_reason()
+    );
     println!("Response: {}\n", response.text());
 
     // Verify success
@@ -96,7 +98,11 @@ fn main() {
     // Try a path that doesn't exist - should get 404
     println!("Making request: GET /not-found");
     let response = client.get("/not-found").send();
-    println!("GET /not-found -> {} {}", response.status().as_u16(), response.status().canonical_reason());
+    println!(
+        "GET /not-found -> {} {}",
+        response.status().as_u16(),
+        response.status().canonical_reason()
+    );
     assert_eq!(response.status().as_u16(), 404);
 
     println!("\nAll assertions passed!");

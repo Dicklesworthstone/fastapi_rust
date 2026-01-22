@@ -76,9 +76,10 @@ pub use extract::{
     Accept, AppState, Authorization, BackgroundTasks, BackgroundTasksInner, ContentType, Cookie,
     DEFAULT_JSON_LIMIT, FromHeaderValue, FromRequest, Header, HeaderExtractError, HeaderName,
     HeaderValues, Host, Json, JsonConfig, JsonExtractError, NamedHeader, OAuth2BearerError,
-    OAuth2BearerErrorKind, OAuth2PasswordBearer, OAuth2PasswordBearerConfig, Path, PathExtractError,
-    PathParams, Query, QueryExtractError, QueryParams, RequestRef, ResponseMut, ResponseMutations,
-    SameSite, State, StateExtractError, UserAgent, XRequestId, snake_to_header_case,
+    OAuth2BearerErrorKind, OAuth2PasswordBearer, OAuth2PasswordBearerConfig, Path,
+    PathExtractError, PathParams, Query, QueryExtractError, QueryParams, RequestRef, ResponseMut,
+    ResponseMutations, SameSite, State, StateExtractError, UserAgent, XRequestId,
+    snake_to_header_case,
 };
 pub use middleware::{
     AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, Handler, Layer, Layered,
@@ -97,9 +98,8 @@ pub use asupersync::{Budget, Cx, Outcome, RegionId, TaskId};
 
 // Re-export testing utilities
 pub use testing::{
-    CapturedLog, CookieJar, E2ECapture, E2EReport, E2EScenario, E2EStep, E2EStepResult,
-    LogCapture, RequestBuilder, ResponseDiff, TestClient, TestLogger, TestResponse, TestTimings,
-    json_contains,
+    CapturedLog, CookieJar, E2ECapture, E2EReport, E2EScenario, E2EStep, E2EStepResult, LogCapture,
+    RequestBuilder, ResponseDiff, TestClient, TestLogger, TestResponse, TestTimings, json_contains,
 };
 // Note: e2e_test!, assert_with_logs!, assert_eq_with_logs! macros are automatically exported
 // at crate root via #[macro_export]
@@ -117,8 +117,8 @@ pub use api_router::{APIRouter, IncludeConfig, ResponseDef, RouterDependency, Ro
 
 // Re-export app utilities
 pub use app::{
-    App, AppBuilder, AppConfig, ExceptionHandlers, RouteEntry, StartupHook, StartupHookError,
-    StartupOutcome, StateContainer,
+    App, AppBuilder, AppConfig, ConfigError, ExceptionHandlers, RouteEntry, StartupHook,
+    StartupHookError, StartupOutcome, StateContainer,
 };
 
 // Re-export shutdown utilities
@@ -130,5 +130,5 @@ pub use shutdown::{
 
 // Re-export routing utilities
 pub use routing::{
-    Converter, ParamInfo, PathSegment, RoutePattern, RouteLookup, RouteTable, format_allow_header,
+    Converter, ParamInfo, PathSegment, RouteLookup, RoutePattern, RouteTable, format_allow_header,
 };

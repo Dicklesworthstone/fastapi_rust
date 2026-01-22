@@ -5,6 +5,7 @@
 
 use crate::mode::OutputMode;
 use crate::themes::FastApiTheme;
+use std::fmt::Write;
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
@@ -243,15 +244,12 @@ impl RouteDisplay {
             );
 
             if self.config.show_tags && !route.tags.is_empty() {
-                line.push_str(&format!(
-                    " {muted}[{}]{ANSI_RESET}",
-                    route.tags.join(", ")
-                ));
+                let _ = write!(line, " {muted}[{}]{ANSI_RESET}", route.tags.join(", "));
             }
 
             if route.deprecated {
                 let warning = self.theme.warning.to_ansi_fg();
-                line.push_str(&format!(" {warning}(deprecated){ANSI_RESET}"));
+                let _ = write!(line, " {warning}(deprecated){ANSI_RESET}");
             }
 
             lines.push(line);
@@ -270,20 +268,26 @@ impl RouteDisplay {
     fn render_rich(&self, routes: &[RouteEntry]) -> String {
         let mut lines = Vec::new();
         let muted = self.theme.muted.to_ansi_fg();
-        let accent = self.theme.accent.to_ansi_fg();
         let border = self.theme.border.to_ansi_fg();
         let header_color = self.theme.header.to_ansi_fg();
 
         // Calculate widths
-        let method_width = routes.iter().map(|r| r.method.len()).max().unwrap_or(6).max(7);
-        let path_width = routes.iter().map(|r| r.path.len()).max().unwrap_or(10).max(20);
+        let method_width = routes
+            .iter()
+            .map(|r| r.method.len())
+            .max()
+            .unwrap_or(6)
+            .max(7);
+        let path_width = routes
+            .iter()
+            .map(|r| r.path.len())
+            .max()
+            .unwrap_or(10)
+            .max(20);
 
         // Top border
         let table_width = method_width + path_width + 10;
-        lines.push(format!(
-            "{border}┌{}┐{ANSI_RESET}",
-            "─".repeat(table_width)
-        ));
+        lines.push(format!("{border}┌{}┐{ANSI_RESET}", "─".repeat(table_width)));
 
         // Title
         if let Some(title) = &self.config.title {
@@ -294,10 +298,7 @@ impl RouteDisplay {
                 title,
                 " ".repeat(table_width - title_pad - title.len())
             ));
-            lines.push(format!(
-                "{border}├{}┤{ANSI_RESET}",
-                "─".repeat(table_width)
-            ));
+            lines.push(format!("{border}├{}┤{ANSI_RESET}", "─".repeat(table_width)));
         }
 
         // Header row
@@ -309,14 +310,10 @@ impl RouteDisplay {
             pwidth = path_width + 4
         ));
 
-        lines.push(format!(
-            "{border}├{}┤{ANSI_RESET}",
-            "─".repeat(table_width)
-        ));
+        lines.push(format!("{border}├{}┤{ANSI_RESET}", "─".repeat(table_width)));
 
         // Routes
         for route in routes {
-            let method_color = self.method_color(&route.method).to_ansi_fg();
             let method_bg = self.method_color(&route.method).to_ansi_bg();
 
             // Format path with tags
@@ -349,10 +346,7 @@ impl RouteDisplay {
         }
 
         // Bottom border
-        lines.push(format!(
-            "{border}└{}┘{ANSI_RESET}",
-            "─".repeat(table_width)
-        ));
+        lines.push(format!("{border}└{}┘{ANSI_RESET}", "─".repeat(table_width)));
 
         // Summary
         let success = self.theme.success.to_ansi_fg();

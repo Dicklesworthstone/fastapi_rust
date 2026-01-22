@@ -35,7 +35,7 @@ pub enum HttpMethod {
 impl HttpMethod {
     /// Get the method name as a string.
     #[must_use]
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
@@ -50,7 +50,7 @@ impl HttpMethod {
     }
 
     /// Get the color for this method from the theme.
-    fn color(&self, theme: &FastApiTheme) -> crate::themes::Color {
+    fn color(self, theme: &FastApiTheme) -> crate::themes::Color {
         match self {
             Self::Get => theme.http_get,
             Self::Post => theme.http_post,
@@ -63,21 +63,23 @@ impl HttpMethod {
             Self::Trace | Self::Connect => theme.muted,
         }
     }
+}
 
-    /// Parse from a string.
-    #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for HttpMethod {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
-            "GET" => Some(Self::Get),
-            "POST" => Some(Self::Post),
-            "PUT" => Some(Self::Put),
-            "DELETE" => Some(Self::Delete),
-            "PATCH" => Some(Self::Patch),
-            "OPTIONS" => Some(Self::Options),
-            "HEAD" => Some(Self::Head),
-            "TRACE" => Some(Self::Trace),
-            "CONNECT" => Some(Self::Connect),
-            _ => None,
+            "GET" => Ok(Self::Get),
+            "POST" => Ok(Self::Post),
+            "PUT" => Ok(Self::Put),
+            "DELETE" => Ok(Self::Delete),
+            "PATCH" => Ok(Self::Patch),
+            "OPTIONS" => Ok(Self::Options),
+            "HEAD" => Ok(Self::Head),
+            "TRACE" => Ok(Self::Trace),
+            "CONNECT" => Ok(Self::Connect),
+            _ => Err(()),
         }
     }
 }
@@ -101,11 +103,15 @@ impl ResponseTiming {
     pub fn format(&self) -> String {
         let micros = self.total.as_micros();
         if micros < 1000 {
-            format!("{}µs", micros)
+            format!("{micros}µs")
         } else if micros < 1_000_000 {
-            format!("{:.2}ms", micros as f64 / 1000.0)
+            let whole = micros / 1000;
+            let frac = (micros % 1000) / 10;
+            format!("{whole}.{frac:02}ms")
         } else {
-            format!("{:.2}s", micros as f64 / 1_000_000.0)
+            let whole = micros / 1_000_000;
+            let frac = (micros % 1_000_000) / 10_000;
+            format!("{whole}.{frac:02}s")
         }
     }
 }
@@ -244,14 +250,14 @@ impl RequestLogger {
         // Client IP
         if self.show_client_ip {
             if let Some(ip) = &entry.client_ip {
-                parts.push(format!("[{}]", ip));
+                parts.push(format!("[{ip}]"));
             }
         }
 
         // Request ID
         if self.show_request_id {
             if let Some(id) = &entry.request_id {
-                parts.push(format!("({})", id));
+                parts.push(format!("({id})"));
             }
         }
 
@@ -294,7 +300,6 @@ impl RequestLogger {
     }
 
     fn format_rich(&self, entry: &LogEntry) -> String {
-        let method_color = entry.method.color(&self.theme).to_ansi_fg();
         let status_color = self.status_color(entry.status).to_ansi_fg();
         let muted = self.theme.muted.to_ansi_fg();
 
@@ -321,7 +326,7 @@ impl RequestLogger {
         }
 
         // Status code with icon
-        let status_icon = self.status_icon(entry.status);
+        let status_icon = Self::status_icon(entry.status);
         parts.push(format!(
             "{status_color}{status_icon} {}{ANSI_RESET}",
             entry.status
@@ -360,7 +365,7 @@ impl RequestLogger {
         }
     }
 
-    fn status_icon(&self, status: u16) -> &'static str {
+    fn status_icon(status: u16) -> &'static str {
         match status {
             100..=199 => "ℹ",
             200..=299 => "✓",
@@ -385,9 +390,9 @@ mod tests {
 
     #[test]
     fn test_http_method_from_str() {
-        assert_eq!(HttpMethod::from_str("get"), Some(HttpMethod::Get));
-        assert_eq!(HttpMethod::from_str("POST"), Some(HttpMethod::Post));
-        assert_eq!(HttpMethod::from_str("invalid"), None);
+        assert_eq!("get".parse::<HttpMethod>().ok(), Some(HttpMethod::Get));
+        assert_eq!("POST".parse::<HttpMethod>().ok(), Some(HttpMethod::Post));
+        assert!("invalid".parse::<HttpMethod>().is_err());
     }
 
     #[test]
@@ -437,8 +442,7 @@ mod tests {
     #[test]
     fn test_logger_plain_with_query() {
         let logger = RequestLogger::new(OutputMode::Plain);
-        let entry = LogEntry::new(HttpMethod::Get, "/api/users", 200)
-            .query("page=1&limit=10");
+        let entry = LogEntry::new(HttpMethod::Get, "/api/users", 200).query("page=1&limit=10");
 
         let output = logger.format(&entry);
 
@@ -460,8 +464,7 @@ mod tests {
         let mut logger = RequestLogger::new(OutputMode::Plain);
         logger.show_client_ip = true;
 
-        let entry = LogEntry::new(HttpMethod::Get, "/", 200)
-            .client_ip("192.168.1.1");
+        let entry = LogEntry::new(HttpMethod::Get, "/", 200).client_ip("192.168.1.1");
 
         let output = logger.format(&entry);
 
@@ -473,8 +476,7 @@ mod tests {
         let mut logger = RequestLogger::new(OutputMode::Plain);
         logger.show_request_id = true;
 
-        let entry = LogEntry::new(HttpMethod::Get, "/", 200)
-            .request_id("abc-123");
+        let entry = LogEntry::new(HttpMethod::Get, "/", 200).request_id("abc-123");
 
         let output = logger.format(&entry);
 

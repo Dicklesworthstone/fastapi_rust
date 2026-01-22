@@ -3334,40 +3334,40 @@ impl E2EReport {
         let status_class = if self.failed > 0 { "failed" } else { "passed" };
 
         use std::fmt::Write;
-        let steps_html = self
-            .steps
-            .iter()
-            .enumerate()
-            .fold(String::new(), |mut output, (i, step)| {
-                let (status, class) = match &step.result {
-                    E2EStepResult::Passed => ("✓", "pass"),
-                    E2EStepResult::Failed(_) => ("✗", "fail"),
-                    E2EStepResult::Skipped => ("○", "skip"),
-                };
-                let error_html = match &step.result {
-                    E2EStepResult::Failed(msg) => {
-                        format!(r#"<div class="error">{}</div>"#, escape_html(msg))
-                    }
-                    _ => String::new(),
-                };
-                let _ = write!(
-                    output,
-                    r#"    <tr class="{}">
+        let steps_html =
+            self.steps
+                .iter()
+                .enumerate()
+                .fold(String::new(), |mut output, (i, step)| {
+                    let (status, class) = match &step.result {
+                        E2EStepResult::Passed => ("✓", "pass"),
+                        E2EStepResult::Failed(_) => ("✗", "fail"),
+                        E2EStepResult::Skipped => ("○", "skip"),
+                    };
+                    let error_html = match &step.result {
+                        E2EStepResult::Failed(msg) => {
+                            format!(r#"<div class="error">{}</div>"#, escape_html(msg))
+                        }
+                        _ => String::new(),
+                    };
+                    let _ = write!(
+                        output,
+                        r#"    <tr class="{}">
       <td>{}</td>
       <td><span class="status">{}</span></td>
       <td>{}</td>
       <td>{:?}</td>
     </tr>
     {}"#,
-                    class,
-                    i + 1,
-                    status,
-                    escape_html(&step.name),
-                    step.duration,
-                    error_html
-                );
-                output
-            });
+                        class,
+                        i + 1,
+                        status,
+                        escape_html(&step.name),
+                        step.duration,
+                        error_html
+                    );
+                    output
+                });
 
         format!(
             r#"<!DOCTYPE html>
@@ -4373,16 +4373,15 @@ mod e2e_tests {
     use super::*;
 
     // Create a simple test handler for E2E testing
-    fn test_handler(
-        _ctx: &RequestContext,
-        req: &mut Request,
-    ) -> std::future::Ready<Response> {
+    fn test_handler(_ctx: &RequestContext, req: &mut Request) -> std::future::Ready<Response> {
         let path = req.path();
         let response = match path {
             "/" => Response::ok().body(ResponseBody::Bytes(b"Home".to_vec())),
             "/login" => Response::ok().body(ResponseBody::Bytes(b"Login Page".to_vec())),
             "/dashboard" => Response::ok().body(ResponseBody::Bytes(b"Dashboard".to_vec())),
-            "/api/users" => Response::ok().body(ResponseBody::Bytes(b"[\"Alice\",\"Bob\"]".to_vec())),
+            "/api/users" => {
+                Response::ok().body(ResponseBody::Bytes(b"[\"Alice\",\"Bob\"]".to_vec()))
+            }
             "/fail" => Response::with_status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(ResponseBody::Bytes(b"Error".to_vec())),
             _ => Response::with_status(StatusCode::NOT_FOUND)
@@ -4415,8 +4414,7 @@ mod e2e_tests {
     #[test]
     fn e2e_scenario_step_failure() {
         let client = TestClient::new(test_handler);
-        let mut scenario = E2EScenario::new("Failure Test", client)
-            .stop_on_failure(true);
+        let mut scenario = E2EScenario::new("Failure Test", client).stop_on_failure(true);
 
         scenario.step("First step passes", |client| {
             let response = client.get("/").send();
@@ -4442,8 +4440,7 @@ mod e2e_tests {
     #[test]
     fn e2e_scenario_continue_on_failure() {
         let client = TestClient::new(test_handler);
-        let mut scenario = E2EScenario::new("Continue Test", client)
-            .stop_on_failure(false);
+        let mut scenario = E2EScenario::new("Continue Test", client).stop_on_failure(false);
 
         scenario.step("First step fails", |_client| {
             panic!("First failure");
@@ -4464,8 +4461,8 @@ mod e2e_tests {
     #[test]
     fn e2e_report_text_format() {
         let client = TestClient::new(test_handler);
-        let mut scenario = E2EScenario::new("Report Test", client)
-            .description("Tests report generation");
+        let mut scenario =
+            E2EScenario::new("Report Test", client).description("Tests report generation");
 
         scenario.step("Step 1", |client| {
             let _ = client.get("/").send();
@@ -4538,9 +4535,24 @@ mod e2e_tests {
         scenario.log("Manual log entry");
         scenario.step("Logged step", |_client| {});
 
-        assert!(scenario.logs().iter().any(|l| l.contains("Manual log entry")));
-        assert!(scenario.logs().iter().any(|l| l.contains("[START] Logged step")));
-        assert!(scenario.logs().iter().any(|l| l.contains("[PASS] Logged step")));
+        assert!(
+            scenario
+                .logs()
+                .iter()
+                .any(|l| l.contains("Manual log entry"))
+        );
+        assert!(
+            scenario
+                .logs()
+                .iter()
+                .any(|l| l.contains("[START] Logged step"))
+        );
+        assert!(
+            scenario
+                .logs()
+                .iter()
+                .any(|l| l.contains("[PASS] Logged step"))
+        );
     }
 
     #[test]

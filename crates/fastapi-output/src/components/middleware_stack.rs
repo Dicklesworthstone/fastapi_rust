@@ -41,6 +41,13 @@ impl MiddlewareInfo {
         self
     }
 
+    /// Set a type name different from the display name.
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: &str) -> Self {
+        self.type_name = type_name.to_string();
+        self
+    }
+
     /// Mark this middleware as short-circuiting.
     #[must_use]
     pub fn short_circuits(mut self) -> Self {
@@ -108,22 +115,33 @@ impl MiddlewareStackDisplay {
         lines.push(format!("Middleware Stack ({total_layers} layers):"));
 
         for mw in &self.middlewares {
-            let sc = if mw.can_short_circuit { " [short-circuit]" } else { "" };
+            let sc = if mw.can_short_circuit {
+                " [short-circuit]"
+            } else {
+                ""
+            };
             lines.push(format!("  {}. {}{}", mw.order, mw.name, sc));
+
+            if mw.type_name != mw.name {
+                lines.push(format!("     type: {}", mw.type_name));
+            }
 
             if self.show_config {
                 if let Some(config) = &mw.config_summary {
-                    lines.push(format!("     config: {}", config));
+                    lines.push(format!("     config: {config}"));
                 }
             }
         }
 
-        lines.push(format!("  {}. [Handler]", total_layers));
+        lines.push(format!("  {total_layers}. [Handler]"));
 
         if self.show_flow && !self.middlewares.is_empty() {
-            let flow: Vec<String> = (1..=total_layers).rev().map(|n| n.to_string()).collect();
+            let request_flow: Vec<String> = (1..=total_layers).map(|n| n.to_string()).collect();
+            let response_flow: Vec<String> =
+                (1..=total_layers).rev().map(|n| n.to_string()).collect();
             lines.push(String::new());
-            lines.push(format!("Response flow: {}", flow.join(" -> ")));
+            lines.push(format!("Request flow: {}", request_flow.join(" -> ")));
+            lines.push(format!("Response flow: {}", response_flow.join(" -> ")));
         }
 
         lines
@@ -176,7 +194,7 @@ mod tests {
             display.render(&output);
         });
 
-        assert_contains(&captured, "3 layers");
+        assert_contains(&captured, "4 layers");
         assert_contains(&captured, "1. Logger");
         assert_contains(&captured, "2. Cors");
         assert_contains(&captured, "3. Auth");
@@ -194,6 +212,8 @@ mod tests {
             display.render(&output);
         });
 
+        assert_contains(&captured, "Request flow:");
+        assert_contains(&captured, "1 -> 2 -> 3");
         assert_contains(&captured, "Response flow:");
         assert_contains(&captured, "3 -> 2 -> 1");
     }
@@ -246,7 +266,7 @@ mod tests {
         let display = MiddlewareStackDisplay::new(middlewares);
         let text = display.as_plain_text();
 
-        assert!(text.contains("2 layers"));
+        assert!(text.contains("3 layers"));
         assert!(text.contains("Logger"));
         assert!(text.contains("[short-circuit]"));
     }
@@ -263,7 +283,7 @@ mod tests {
             display.render(&output);
         });
 
-        assert_contains(&captured, "10 layers");
+        assert_contains(&captured, "11 layers");
         assert_contains(&captured, "Middleware10");
     }
 

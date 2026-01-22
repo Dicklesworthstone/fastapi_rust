@@ -54,19 +54,35 @@ pub use themes::{FastApiTheme, ThemePreset};
 
 // Re-export component types
 pub use components::banner::{Banner, BannerConfig, ServerInfo};
-pub use components::errors::{ErrorFormatter, FormattedError, HttpErrorInfo, LocItem, ValidationErrorDetail};
+pub use components::dependency_tree::{DependencyNode, DependencyTreeDisplay};
+pub use components::errors::{
+    ErrorFormatter, FormattedError, HttpErrorInfo, LocItem, ValidationErrorDetail,
+};
 pub use components::logging::{HttpMethod, LogEntry, RequestLogger, ResponseTiming};
+pub use components::middleware_stack::{MiddlewareInfo, MiddlewareStackDisplay};
 pub use components::routes::{RouteDisplay, RouteEntry, RouteTableConfig};
+pub use components::shutdown_progress::{ShutdownPhase, ShutdownProgress, ShutdownProgressDisplay};
+pub use components::test_results::{
+    TestCaseResult, TestModuleResult, TestReport, TestReportDisplay, TestStatus,
+};
 
 /// Prelude module for convenient imports.
 pub mod prelude {
     // Components
     pub use crate::components::banner::{Banner, BannerConfig, ServerInfo};
+    pub use crate::components::dependency_tree::{DependencyNode, DependencyTreeDisplay};
     pub use crate::components::errors::{
         ErrorFormatter, FormattedError, HttpErrorInfo, LocItem, ValidationErrorDetail,
     };
     pub use crate::components::logging::{HttpMethod, LogEntry, RequestLogger, ResponseTiming};
+    pub use crate::components::middleware_stack::{MiddlewareInfo, MiddlewareStackDisplay};
     pub use crate::components::routes::{RouteDisplay, RouteEntry, RouteTableConfig};
+    pub use crate::components::shutdown_progress::{
+        ShutdownPhase, ShutdownProgress, ShutdownProgressDisplay,
+    };
+    pub use crate::components::test_results::{
+        TestCaseResult, TestModuleResult, TestReport, TestReportDisplay, TestStatus,
+    };
 
     // Core types
     pub use crate::detection::{

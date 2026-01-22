@@ -1635,7 +1635,11 @@ mod tests {
         futures_executor::block_on(stack.run_cleanups());
 
         let executed_order = order.lock().clone();
-        assert_eq!(executed_order, vec![3, 2, 1], "Cleanups should run in LIFO order");
+        assert_eq!(
+            executed_order,
+            vec![3, 2, 1],
+            "Cleanups should run in LIFO order"
+        );
     }
 
     #[test]

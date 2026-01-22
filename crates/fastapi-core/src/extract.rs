@@ -4077,7 +4077,8 @@ impl FromRequest for ResponseMutations {
 use std::sync::Arc;
 
 /// Type alias for a boxed async task function.
-pub type BackgroundTask = Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
+pub type BackgroundTask =
+    Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
 
 /// Internal storage for background tasks (thread-safe).
 ///
@@ -4276,7 +4277,8 @@ mod special_extractor_tests {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/users/42");
         req.set_query(Some("page=1".to_string()));
-        req.headers_mut().insert("content-type", b"application/json".to_vec());
+        req.headers_mut()
+            .insert("content-type", b"application/json".to_vec());
 
         let result = futures_executor::block_on(RequestRef::from_request(&ctx, &mut req));
         let req_ref = result.unwrap();
@@ -4284,14 +4286,18 @@ mod special_extractor_tests {
         assert_eq!(req_ref.method(), Method::Get);
         assert_eq!(req_ref.path(), "/users/42");
         assert_eq!(req_ref.query(), Some("page=1"));
-        assert_eq!(req_ref.header("content-type"), Some(b"application/json".as_slice()));
+        assert_eq!(
+            req_ref.header("content-type"),
+            Some(b"application/json".as_slice())
+        );
     }
 
     #[test]
     fn request_ref_header_case_insensitive() {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("X-Custom-Header", b"value".to_vec());
+        req.headers_mut()
+            .insert("X-Custom-Header", b"value".to_vec());
 
         let result = futures_executor::block_on(RequestRef::from_request(&ctx, &mut req));
         let req_ref = result.unwrap();
@@ -4334,8 +4340,16 @@ mod special_extractor_tests {
         let response = mutations.apply(response);
 
         let headers = response.headers();
-        assert!(headers.iter().any(|(n, v)| n == "X-Custom" && v == b"value"));
-        assert!(headers.iter().any(|(n, v)| n == "X-Another" && v == b"other"));
+        assert!(
+            headers
+                .iter()
+                .any(|(n, v)| n == "X-Custom" && v == b"value")
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(n, v)| n == "X-Another" && v == b"other")
+        );
     }
 
     #[test]
@@ -5429,6 +5443,235 @@ mod oauth2_tests {
         let bearer = OAuth2PasswordBearer::new("test_token");
         assert_eq!(bearer.token(), "test_token");
         assert_eq!(bearer.into_token(), "test_token");
+    }
+
+    // ============================================================================
+    // Additional Security Tests for fastapi_rust-3mg
+    // ============================================================================
+
+    #[test]
+    fn oauth2_error_response_json_body_format() {
+        let err = OAuth2BearerError::missing_header();
+        let response = err.into_response();
+
+        // Verify the body is valid JSON with "detail" field
+        let body = match response.body_ref() {
+            crate::response::ResponseBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("Expected Bytes body"),
+        };
+
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Body should be valid JSON");
+        assert!(json.get("detail").is_some(), "Response should have 'detail' field");
+        assert_eq!(json["detail"], "Not authenticated");
+    }
+
+    #[test]
+    fn oauth2_error_invalid_scheme_json_body() {
+        let err = OAuth2BearerError::invalid_scheme();
+        let response = err.into_response();
+
+        let body = match response.body_ref() {
+            crate::response::ResponseBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("Expected Bytes body"),
+        };
+
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Body should be valid JSON");
+        assert_eq!(json["detail"], "Invalid authentication credentials");
+    }
+
+    #[test]
+    fn oauth2_error_empty_token_json_body() {
+        let err = OAuth2BearerError::empty_token();
+        let response = err.into_response();
+
+        let body = match response.body_ref() {
+            crate::response::ResponseBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("Expected Bytes body"),
+        };
+
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Body should be valid JSON");
+        assert_eq!(json["detail"], "Invalid authentication credentials");
+    }
+
+    #[test]
+    fn oauth2_error_response_content_type_json() {
+        let err = OAuth2BearerError::missing_header();
+        let response = err.into_response();
+
+        let content_type = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name == "content-type")
+            .map(|(_, value)| String::from_utf8_lossy(value).to_string());
+
+        assert_eq!(content_type, Some("application/json".to_string()));
+    }
+
+    #[test]
+    fn oauth2_extract_token_with_special_characters() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // JWT-like token with special characters
+        req.headers_mut()
+            .insert("authorization", b"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U".to_vec());
+
+        let result = futures_executor::block_on(OAuth2PasswordBearer::from_request(&ctx, &mut req));
+        let bearer = result.unwrap();
+        assert!(bearer.token().contains("eyJ"));
+        assert!(bearer.token().contains("."));
+    }
+
+    #[test]
+    fn oauth2_extract_token_with_unicode() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // Token with unicode characters (unusual but should work)
+        req.headers_mut()
+            .insert("authorization", "Bearer tökën_with_ünïcödë".as_bytes().to_vec());
+
+        let result = futures_executor::block_on(OAuth2PasswordBearer::from_request(&ctx, &mut req));
+        let bearer = result.unwrap();
+        assert_eq!(bearer.token(), "tökën_with_ünïcödë");
+    }
+
+    #[test]
+    fn oauth2_invalid_utf8_in_token() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // Invalid UTF-8 sequence
+        req.headers_mut()
+            .insert("authorization", vec![66, 101, 97, 114, 101, 114, 32, 0xFF, 0xFE]);
+
+        let result = futures_executor::block_on(OAuth2PasswordBearer::from_request(&ctx, &mut req));
+        // Should return InvalidScheme because it can't be parsed as valid UTF-8
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind, OAuth2BearerErrorKind::InvalidScheme);
+    }
+
+    #[test]
+    fn oauth2_only_bearer_prefix_no_space() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // "Bearer" without space or token - should be invalid scheme
+        req.headers_mut()
+            .insert("authorization", b"Bearertoken".to_vec());
+
+        let result = futures_executor::block_on(OAuth2PasswordBearer::from_request(&ctx, &mut req));
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, OAuth2BearerErrorKind::InvalidScheme);
+    }
+
+    #[test]
+    fn oauth2_mixed_case_bearer() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // "BEARER" all caps - should fail (only "Bearer" and "bearer" supported)
+        req.headers_mut()
+            .insert("authorization", b"BEARER uppercase_token".to_vec());
+
+        let result = futures_executor::block_on(OAuth2PasswordBearer::from_request(&ctx, &mut req));
+        // Currently the implementation only supports "Bearer " and "bearer " prefixes
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, OAuth2BearerErrorKind::InvalidScheme);
+    }
+
+    #[test]
+    fn oauth2_extract_very_long_token() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // Very long token (4KB)
+        let long_token = "x".repeat(4096);
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {long_token}").into_bytes());
+
+        let result = futures_executor::block_on(OAuth2PasswordBearer::from_request(&ctx, &mut req));
+        let bearer = result.unwrap();
+        assert_eq!(bearer.token().len(), 4096);
+    }
+
+    #[test]
+    fn oauth2_config_default_values() {
+        let config = OAuth2PasswordBearerConfig::default();
+
+        assert_eq!(config.token_url, "/token");
+        assert!(config.refresh_url.is_none());
+        assert!(config.scopes.is_empty());
+        assert!(config.scheme_name.is_none());
+        assert!(config.description.is_none());
+        assert!(config.auto_error); // Default should be true
+    }
+
+    #[test]
+    fn oauth2_error_kind_equality() {
+        // Verify error kinds implement PartialEq correctly
+        assert_eq!(OAuth2BearerErrorKind::MissingHeader, OAuth2BearerErrorKind::MissingHeader);
+        assert_eq!(OAuth2BearerErrorKind::InvalidScheme, OAuth2BearerErrorKind::InvalidScheme);
+        assert_eq!(OAuth2BearerErrorKind::EmptyToken, OAuth2BearerErrorKind::EmptyToken);
+        assert_ne!(OAuth2BearerErrorKind::MissingHeader, OAuth2BearerErrorKind::InvalidScheme);
+    }
+
+    #[test]
+    fn oauth2_error_debug_format() {
+        // Verify error types implement Debug
+        let err = OAuth2BearerError::missing_header();
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("MissingHeader"));
+    }
+
+    #[test]
+    fn oauth2_bearer_clone() {
+        let bearer = OAuth2PasswordBearer::new("cloneable_token");
+        let cloned = bearer.clone();
+        assert_eq!(bearer.token(), cloned.token());
+    }
+
+    #[test]
+    fn oauth2_config_clone() {
+        let config = OAuth2PasswordBearerConfig::new("/auth/token")
+            .with_scope("admin", "Admin access");
+        let cloned = config.clone();
+        assert_eq!(config.token_url, cloned.token_url);
+        assert_eq!(config.scopes.len(), cloned.scopes.len());
+    }
+
+    #[test]
+    fn oauth2_all_error_responses_are_401() {
+        // All OAuth2 bearer errors should result in 401 Unauthorized
+        let errors = [
+            OAuth2BearerError::missing_header(),
+            OAuth2BearerError::invalid_scheme(),
+            OAuth2BearerError::empty_token(),
+        ];
+
+        for err in errors {
+            let response = err.into_response();
+            assert_eq!(
+                response.status().as_u16(),
+                401,
+                "All OAuth2 errors should be 401"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth2_all_error_responses_have_www_authenticate() {
+        // All OAuth2 bearer errors should include WWW-Authenticate header
+        let errors = [
+            OAuth2BearerError::missing_header(),
+            OAuth2BearerError::invalid_scheme(),
+            OAuth2BearerError::empty_token(),
+        ];
+
+        for err in errors {
+            let response = err.into_response();
+            let has_www_auth = response
+                .headers()
+                .iter()
+                .any(|(name, value)| {
+                    name == "www-authenticate" && value == b"Bearer"
+                });
+            assert!(has_www_auth, "All OAuth2 errors should have WWW-Authenticate: Bearer");
+        }
     }
 }
 

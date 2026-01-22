@@ -3245,7 +3245,10 @@ mod tests {
         assert_eq!(config.x_xss_protection, Some("0"));
         assert!(config.content_security_policy.is_none());
         assert!(config.hsts.is_none());
-        assert_eq!(config.referrer_policy, Some(ReferrerPolicy::StrictOriginWhenCrossOrigin));
+        assert_eq!(
+            config.referrer_policy,
+            Some(ReferrerPolicy::StrictOriginWhenCrossOrigin)
+        );
         assert!(config.permissions_policy.is_none());
     }
 
@@ -3266,7 +3269,10 @@ mod tests {
         let config = SecurityHeadersConfig::strict();
         assert_eq!(config.x_content_type_options, Some("nosniff"));
         assert_eq!(config.x_frame_options, Some(XFrameOptions::Deny));
-        assert_eq!(config.content_security_policy, Some("default-src 'self'".to_string()));
+        assert_eq!(
+            config.content_security_policy,
+            Some("default-src 'self'".to_string())
+        );
         assert_eq!(config.hsts, Some((31536000, true, false)));
         assert_eq!(config.referrer_policy, Some(ReferrerPolicy::NoReferrer));
         assert!(config.permissions_policy.is_some());
@@ -3281,7 +3287,10 @@ mod tests {
             .referrer_policy(Some(ReferrerPolicy::Origin));
 
         assert_eq!(config.x_frame_options, Some(XFrameOptions::SameOrigin));
-        assert_eq!(config.content_security_policy, Some("default-src 'self'".to_string()));
+        assert_eq!(
+            config.content_security_policy,
+            Some("default-src 'self'".to_string())
+        );
         assert_eq!(config.hsts, Some((86400, false, false)));
         assert_eq!(config.referrer_policy, Some(ReferrerPolicy::Origin));
     }
@@ -3294,15 +3303,24 @@ mod tests {
 
         // With includeSubDomains
         let config = SecurityHeadersConfig::none().hsts(3600, true, false);
-        assert_eq!(config.build_hsts_value(), Some("max-age=3600; includeSubDomains".to_string()));
+        assert_eq!(
+            config.build_hsts_value(),
+            Some("max-age=3600; includeSubDomains".to_string())
+        );
 
         // With preload
         let config = SecurityHeadersConfig::none().hsts(3600, false, true);
-        assert_eq!(config.build_hsts_value(), Some("max-age=3600; preload".to_string()));
+        assert_eq!(
+            config.build_hsts_value(),
+            Some("max-age=3600; preload".to_string())
+        );
 
         // With both
         let config = SecurityHeadersConfig::none().hsts(3600, true, true);
-        assert_eq!(config.build_hsts_value(), Some("max-age=3600; includeSubDomains; preload".to_string()));
+        assert_eq!(
+            config.build_hsts_value(),
+            Some("max-age=3600; includeSubDomains; preload".to_string())
+        );
     }
 
     #[test]
@@ -3339,7 +3357,10 @@ mod tests {
 
         let csp = header_value(&result, "Content-Security-Policy");
         assert!(csp.is_some());
-        assert_eq!(csp.unwrap(), "default-src 'self'; script-src 'self' 'unsafe-inline'");
+        assert_eq!(
+            csp.unwrap(),
+            "default-src 'self'; script-src 'self' 'unsafe-inline'"
+        );
     }
 
     #[test]
@@ -3372,12 +3393,21 @@ mod tests {
     #[test]
     fn referrer_policy_values() {
         assert_eq!(ReferrerPolicy::NoReferrer.as_bytes(), b"no-referrer");
-        assert_eq!(ReferrerPolicy::NoReferrerWhenDowngrade.as_bytes(), b"no-referrer-when-downgrade");
+        assert_eq!(
+            ReferrerPolicy::NoReferrerWhenDowngrade.as_bytes(),
+            b"no-referrer-when-downgrade"
+        );
         assert_eq!(ReferrerPolicy::Origin.as_bytes(), b"origin");
-        assert_eq!(ReferrerPolicy::OriginWhenCrossOrigin.as_bytes(), b"origin-when-cross-origin");
+        assert_eq!(
+            ReferrerPolicy::OriginWhenCrossOrigin.as_bytes(),
+            b"origin-when-cross-origin"
+        );
         assert_eq!(ReferrerPolicy::SameOrigin.as_bytes(), b"same-origin");
         assert_eq!(ReferrerPolicy::StrictOrigin.as_bytes(), b"strict-origin");
-        assert_eq!(ReferrerPolicy::StrictOriginWhenCrossOrigin.as_bytes(), b"strict-origin-when-cross-origin");
+        assert_eq!(
+            ReferrerPolicy::StrictOriginWhenCrossOrigin.as_bytes(),
+            b"strict-origin-when-cross-origin"
+        );
         assert_eq!(ReferrerPolicy::UnsafeUrl.as_bytes(), b"unsafe-url");
     }
 

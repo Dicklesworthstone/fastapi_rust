@@ -1201,8 +1201,10 @@ mod tests {
 
         assert_eq!(cookie_headers.len(), 2);
         assert!(cookie_headers.iter().any(|h| h.contains("new_session=xyz")));
-        assert!(cookie_headers
-            .iter()
-            .any(|h| h.contains("old_session=") && h.contains("Max-Age=0")));
+        assert!(
+            cookie_headers
+                .iter()
+                .any(|h| h.contains("old_session=") && h.contains("Max-Age=0"))
+        );
     }
 }

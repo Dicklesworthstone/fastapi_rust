@@ -623,9 +623,8 @@ impl APIRouter {
     pub fn include_router_with_config(mut self, other: APIRouter, config: IncludeConfig) -> Self {
         // Determine effective values with config overrides
         let effective_deprecated = config.deprecated.or(other.deprecated);
-        let effective_include_in_schema = config
-            .include_in_schema
-            .unwrap_or(other.include_in_schema);
+        let effective_include_in_schema =
+            config.include_in_schema.unwrap_or(other.include_in_schema);
 
         // Build the full prefix: config.prefix + router.prefix
         let full_prefix = match config.prefix.as_deref() {
@@ -977,9 +976,7 @@ mod tests {
 
     #[test]
     fn test_include_config_tags() {
-        let config = IncludeConfig::new()
-            .tags(vec!["api", "v1"])
-            .tag("extra");
+        let config = IncludeConfig::new().tags(vec!["api", "v1"]).tag("extra");
         assert_eq!(config.get_tags(), &["api", "v1", "extra"]);
     }
 
@@ -988,9 +985,7 @@ mod tests {
         let dep1 = RouterDependency::new("auth", |_ctx, _req| async { Ok(()) });
         let dep2 = RouterDependency::new("rate_limit", |_ctx, _req| async { Ok(()) });
 
-        let config = IncludeConfig::new()
-            .dependency(dep1)
-            .dependency(dep2);
+        let config = IncludeConfig::new().dependency(dep1).dependency(dep2);
         assert_eq!(config.get_dependencies().len(), 2);
     }
 
@@ -1097,12 +1092,8 @@ mod tests {
     fn test_recursive_router_inclusion() {
         // Routers can include other routers at multiple levels
         let level3 = APIRouter::new().prefix("/items");
-        let level2 = APIRouter::new()
-            .prefix("/users")
-            .include_router(level3);
-        let level1 = APIRouter::new()
-            .prefix("/api")
-            .include_router(level2);
+        let level2 = APIRouter::new().prefix("/users").include_router(level3);
+        let level1 = APIRouter::new().prefix("/api").include_router(level2);
 
         // The final router should have prefix /api
         // Routes from level3 should be at /api/users/items

@@ -5,6 +5,7 @@
 
 use crate::mode::OutputMode;
 use crate::themes::FastApiTheme;
+use std::fmt::Write;
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
@@ -36,7 +37,7 @@ impl LocItem {
     pub fn format(&self) -> String {
         match self {
             Self::Field(name) => name.clone(),
-            Self::Index(idx) => format!("[{}]", idx),
+            Self::Index(idx) => format!("[{idx}]"),
         }
     }
 }
@@ -80,7 +81,7 @@ impl ValidationErrorDetail {
                     result.push_str(name);
                 }
                 LocItem::Index(idx) => {
-                    result.push_str(&format!("[{}]", idx));
+                    let _ = write!(result, "[{idx}]");
                 }
             }
         }
@@ -221,19 +222,25 @@ impl ErrorFormatter {
     fn format_validation_plain(&self, errors: &[ValidationErrorDetail]) -> String {
         let mut lines = Vec::new();
 
-        lines.push(format!("Validation Error ({} error(s)):", errors.len()));
+        lines.push(format!(
+            "Validation Error ({count} error(s)):",
+            count = errors.len()
+        ));
         lines.push(String::new());
 
         for error in errors {
             let loc = error.format_loc();
             if loc.is_empty() {
-                lines.push(format!("  - {}", error.msg));
+                lines.push(format!("  - {msg}", msg = error.msg));
             } else {
-                lines.push(format!("  - {}: {}", loc, error.msg));
+                lines.push(format!("  - {loc}: {msg}", msg = error.msg));
             }
 
             if self.show_codes {
-                lines.push(format!("    [type: {}]", error.error_type));
+                lines.push(format!(
+                    "    [type: {error_type}]",
+                    error_type = error.error_type
+                ));
             }
         }
 
@@ -249,8 +256,8 @@ impl ErrorFormatter {
 
         // Header
         lines.push(format!(
-            "{error_color}{ANSI_BOLD}✗ Validation Error{ANSI_RESET} {muted}({} error(s)){ANSI_RESET}",
-            errors.len()
+            "{error_color}{ANSI_BOLD}✗ Validation Error{ANSI_RESET} {muted}({count} error(s)){ANSI_RESET}",
+            count = errors.len()
         ));
         lines.push(String::new());
 
@@ -259,23 +266,19 @@ impl ErrorFormatter {
 
             // Error line with location
             if loc.is_empty() {
-                lines.push(format!(
-                    "  {warning}●{ANSI_RESET} {}",
-                    error.msg
-                ));
+                lines.push(format!("  {warning}●{ANSI_RESET} {msg}", msg = error.msg));
             } else {
                 lines.push(format!(
-                    "  {warning}●{ANSI_RESET} {accent}{}{ANSI_RESET}: {}",
-                    loc,
-                    error.msg
+                    "  {warning}●{ANSI_RESET} {accent}{loc}{ANSI_RESET}: {msg}",
+                    msg = error.msg
                 ));
             }
 
             // Error type
             if self.show_codes {
                 lines.push(format!(
-                    "    {muted}[type: {}]{ANSI_RESET}",
-                    error.error_type
+                    "    {muted}[type: {error_type}]{ANSI_RESET}",
+                    error_type = error.error_type
                 ));
             }
         }
@@ -307,25 +310,25 @@ impl ErrorFormatter {
 
         // Status line
         lines.push(format!(
-            "HTTP {} {}",
-            error.status,
-            error.status_category()
+            "HTTP {status} {category}",
+            status = error.status,
+            category = error.status_category()
         ));
 
         // Detail
-        lines.push(format!("Detail: {}", error.detail));
+        lines.push(format!("Detail: {detail}", detail = error.detail));
 
         // Code
         if self.show_codes {
             if let Some(code) = &error.code {
-                lines.push(format!("Code: {}", code));
+                lines.push(format!("Code: {code}"));
             }
         }
 
         // Context
         if self.show_context {
             if let (Some(method), Some(path)) = (&error.method, &error.path) {
-                lines.push(format!("Request: {} {}", method, path));
+                lines.push(format!("Request: {method} {path}"));
             }
         }
 
@@ -341,13 +344,13 @@ impl ErrorFormatter {
         // Status line with color
         let icon = if error.status >= 500 { "✗" } else { "⚠" };
         lines.push(format!(
-            "{status_color}{ANSI_BOLD}{icon} HTTP {}{ANSI_RESET} {muted}{}{ANSI_RESET}",
-            error.status,
-            error.status_category()
+            "{status_color}{ANSI_BOLD}{icon} HTTP {status}{ANSI_RESET} {muted}{category}{ANSI_RESET}",
+            status = error.status,
+            category = error.status_category()
         ));
 
         // Detail
-        lines.push(format!("  {}", error.detail));
+        lines.push(format!("  {detail}", detail = error.detail));
 
         // Code
         if self.show_codes {
@@ -360,8 +363,7 @@ impl ErrorFormatter {
         if self.show_context {
             if let (Some(method), Some(path)) = (&error.method, &error.path) {
                 lines.push(format!(
-                    "  {muted}Request: {accent}{} {}{ANSI_RESET}",
-                    method, path
+                    "  {muted}Request: {accent}{method} {path}{ANSI_RESET}"
                 ));
             }
         }
@@ -380,7 +382,7 @@ impl ErrorFormatter {
     /// Format a simple error message.
     #[must_use]
     pub fn format_simple(&self, message: &str) -> FormattedError {
-        let plain = format!("Error: {}", message);
+        let plain = format!("Error: {message}");
 
         let rich = match self.mode {
             OutputMode::Plain => plain.clone(),
@@ -447,7 +449,10 @@ mod tests {
             HttpErrorInfo::new(500, "").status_category(),
             "Internal Server Error"
         );
-        assert_eq!(HttpErrorInfo::new(418, "").status_category(), "Client Error");
+        assert_eq!(
+            HttpErrorInfo::new(418, "").status_category(),
+            "Client Error"
+        );
     }
 
     #[test]

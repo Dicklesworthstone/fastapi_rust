@@ -63,11 +63,11 @@ pub use fastapi_router as router;
 
 // Re-export commonly used types
 pub use fastapi_core::{
-    App, AppBuilder, AppConfig, Cors, CorsConfig, DefaultConfig, DefaultDependencyConfig,
-    DependencyOverrides, DependencyScope, Depends, DependsConfig, FromDependency, FromRequest,
-    HttpError, IntoResponse, Method, NoCache, Request, RequestId, RequestIdConfig,
-    RequestIdMiddleware, Response, ResponseBody, StateContainer, StatusCode, ValidationError,
-    ValidationErrors,
+    App, AppBuilder, AppConfig, ConfigError, Cors, CorsConfig, DefaultConfig,
+    DefaultDependencyConfig, DependencyOverrides, DependencyScope, Depends, DependsConfig,
+    FromDependency, FromRequest, HttpError, IntoResponse, Method, NoCache, Request, RequestId,
+    RequestIdConfig, RequestIdMiddleware, Response, ResponseBody, StateContainer, StatusCode,
+    ValidationError, ValidationErrors,
 };
 
 // Re-export testing utilities
@@ -79,11 +79,11 @@ pub use fastapi_router::{Route, Router};
 /// Prelude module for convenient imports.
 pub mod prelude {
     pub use crate::{
-        App, AppBuilder, AppConfig, Cors, CorsConfig, DefaultConfig, DefaultDependencyConfig,
-        DependencyOverrides, DependencyScope, Depends, DependsConfig, FromDependency, FromRequest,
-        HttpError, IntoResponse, JsonSchema, Method, NoCache, OpenApi, OpenApiBuilder, Request,
-        RequestId, RequestIdMiddleware, Response, Route, Router, StatusCode, Validate,
-        ValidationError, ValidationErrors, delete, get, patch, post, put,
+        App, AppBuilder, AppConfig, ConfigError, Cors, CorsConfig, DefaultConfig,
+        DefaultDependencyConfig, DependencyOverrides, DependencyScope, Depends, DependsConfig,
+        FromDependency, FromRequest, HttpError, IntoResponse, JsonSchema, Method, NoCache, OpenApi,
+        OpenApiBuilder, Request, RequestId, RequestIdMiddleware, Response, Route, Router,
+        StatusCode, Validate, ValidationError, ValidationErrors, delete, get, patch, post, put,
     };
     pub use serde::{Deserialize, Serialize};
 }

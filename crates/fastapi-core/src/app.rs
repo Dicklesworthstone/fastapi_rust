@@ -34,9 +34,12 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::env;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::{fs, io};
 
 use crate::context::RequestContext;
 use crate::dependency::{DependencyOverrides, FromDependency};
@@ -46,6 +49,7 @@ use crate::request::{Method, Request};
 use crate::response::{Response, StatusCode};
 use crate::routing::{RouteLookup, RouteTable, format_allow_header};
 use crate::shutdown::ShutdownController;
+use serde::Deserialize;
 
 // ============================================================================
 // Lifecycle Hook Types
@@ -311,8 +315,7 @@ pub type BoxExceptionHandler = Box<
 /// The handler receives the RequestContext (if available) and panic info string,
 /// and returns a Response. This is called by the HTTP server layer when a panic
 /// is caught via `catch_unwind`.
-pub type BoxPanicHandler =
-    Box<dyn Fn(Option<&RequestContext>, &str) -> Response + Send + Sync>;
+pub type BoxPanicHandler = Box<dyn Fn(Option<&RequestContext>, &str) -> Response + Send + Sync>;
 
 /// Registry for custom exception handlers.
 ///
@@ -600,6 +603,77 @@ pub struct AppConfig {
     pub request_timeout_ms: u64,
 }
 
+/// Configuration loading errors.
+#[derive(Debug)]
+pub enum ConfigError {
+    /// Failed to read configuration file.
+    Io(io::Error),
+    /// Failed to parse JSON configuration.
+    Json(serde_json::Error),
+    /// Unsupported configuration format.
+    UnsupportedFormat { path: PathBuf },
+    /// Invalid environment variable value.
+    InvalidEnvVar {
+        /// Environment variable name.
+        key: String,
+        /// Raw value.
+        value: String,
+        /// Expected format.
+        expected: String,
+    },
+    /// Validation failure.
+    Validation(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "config I/O error: {err}"),
+            Self::Json(err) => write!(f, "config JSON error: {err}"),
+            Self::UnsupportedFormat { path } => {
+                write!(f, "unsupported config format: {}", path.display())
+            }
+            Self::InvalidEnvVar {
+                key,
+                value,
+                expected,
+            } => write!(f, "invalid env var {key}='{value}' (expected {expected})"),
+            Self::Validation(message) => write!(f, "invalid config: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Json(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for ConfigError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<serde_json::Error> for ConfigError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(err)
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AppConfigFile {
+    name: Option<String>,
+    version: Option<String>,
+    debug: Option<bool>,
+    max_body_size: Option<usize>,
+    request_timeout_ms: Option<u64>,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -613,6 +687,13 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    const DEFAULT_ENV_PREFIX: &'static str = "FASTAPI_";
+    const ENV_NAME: &'static str = "NAME";
+    const ENV_VERSION: &'static str = "VERSION";
+    const ENV_DEBUG: &'static str = "DEBUG";
+    const ENV_MAX_BODY_SIZE: &'static str = "MAX_BODY_SIZE";
+    const ENV_REQUEST_TIMEOUT_MS: &'static str = "REQUEST_TIMEOUT_MS";
+
     /// Creates a new configuration with defaults.
     #[must_use]
     pub fn new() -> Self {
@@ -653,6 +734,177 @@ impl AppConfig {
         self.request_timeout_ms = timeout;
         self
     }
+
+    /// Load configuration from environment variables.
+    ///
+    /// Variables (prefix `FASTAPI_` by default):
+    /// - `FASTAPI_NAME`
+    /// - `FASTAPI_VERSION`
+    /// - `FASTAPI_DEBUG` (true/false/1/0/yes/no/on/off)
+    /// - `FASTAPI_MAX_BODY_SIZE` (bytes)
+    /// - `FASTAPI_REQUEST_TIMEOUT_MS`
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_env_with_prefix(Self::DEFAULT_ENV_PREFIX)
+    }
+
+    /// Load configuration from environment variables using a custom prefix.
+    pub fn from_env_with_prefix(prefix: &str) -> Result<Self, ConfigError> {
+        let mut config = Self::default();
+        config.apply_env(prefix)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load configuration from a JSON file.
+    ///
+    /// Only JSON is supported for now to keep dependencies minimal.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        if !matches!(path.extension().and_then(|ext| ext.to_str()), Some("json")) {
+            return Err(ConfigError::UnsupportedFormat {
+                path: path.to_path_buf(),
+            });
+        }
+        let contents = fs::read_to_string(path)?;
+        let parsed: AppConfigFile = serde_json::from_str(&contents)?;
+        let mut config = Self::default();
+        config.apply_file(parsed);
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load configuration from a JSON file then override with environment variables.
+    pub fn from_env_and_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let mut config = Self::from_file(path)?;
+        config.apply_env(Self::DEFAULT_ENV_PREFIX)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate configuration values.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.name.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "name must not be empty".to_string(),
+            ));
+        }
+        if self.version.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "version must not be empty".to_string(),
+            ));
+        }
+        if self.max_body_size == 0 {
+            return Err(ConfigError::Validation(
+                "max_body_size must be greater than 0".to_string(),
+            ));
+        }
+        if self.request_timeout_ms == 0 {
+            return Err(ConfigError::Validation(
+                "request_timeout_ms must be greater than 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn apply_file(&mut self, file: AppConfigFile) {
+        if let Some(name) = file.name {
+            self.name = name;
+        }
+        if let Some(version) = file.version {
+            self.version = version;
+        }
+        if let Some(debug) = file.debug {
+            self.debug = debug;
+        }
+        if let Some(max_body_size) = file.max_body_size {
+            self.max_body_size = max_body_size;
+        }
+        if let Some(request_timeout_ms) = file.request_timeout_ms {
+            self.request_timeout_ms = request_timeout_ms;
+        }
+    }
+
+    fn apply_env(&mut self, prefix: &str) -> Result<(), ConfigError> {
+        self.apply_env_with(prefix, fetch_env)
+    }
+
+    fn apply_env_with<F>(&mut self, prefix: &str, mut fetch: F) -> Result<(), ConfigError>
+    where
+        F: FnMut(&str) -> Result<Option<String>, ConfigError>,
+    {
+        let name_key = env_key(prefix, Self::ENV_NAME);
+        let version_key = env_key(prefix, Self::ENV_VERSION);
+        let debug_key = env_key(prefix, Self::ENV_DEBUG);
+        let max_body_key = env_key(prefix, Self::ENV_MAX_BODY_SIZE);
+        let timeout_key = env_key(prefix, Self::ENV_REQUEST_TIMEOUT_MS);
+
+        if let Some(value) = fetch(&name_key)? {
+            self.name = value;
+        }
+        if let Some(value) = fetch(&version_key)? {
+            self.version = value;
+        }
+        if let Some(value) = fetch(&debug_key)? {
+            self.debug = parse_bool(&debug_key, &value)?;
+        }
+        if let Some(value) = fetch(&max_body_key)? {
+            self.max_body_size = parse_usize(&max_body_key, &value)?;
+        }
+        if let Some(value) = fetch(&timeout_key)? {
+            self.request_timeout_ms = parse_u64(&timeout_key, &value)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn env_key(prefix: &str, key: &str) -> String {
+    if prefix.ends_with('_') {
+        format!("{prefix}{key}")
+    } else {
+        format!("{prefix}_{key}")
+    }
+}
+
+fn fetch_env(key: &str) -> Result<Option<String>, ConfigError> {
+    match env::var(key) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidEnvVar {
+            key: key.to_string(),
+            value: "<non-utf8>".to_string(),
+            expected: "valid UTF-8 string".to_string(),
+        }),
+    }
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(ConfigError::InvalidEnvVar {
+            key: key.to_string(),
+            value: value.to_string(),
+            expected: "boolean (true/false/1/0/yes/no/on/off)".to_string(),
+        }),
+    }
+}
+
+fn parse_usize(key: &str, value: &str) -> Result<usize, ConfigError> {
+    value.parse::<usize>().map_err(|_| ConfigError::InvalidEnvVar {
+        key: key.to_string(),
+        value: value.to_string(),
+        expected: "usize".to_string(),
+    })
+}
+
+fn parse_u64(key: &str, value: &str) -> Result<u64, ConfigError> {
+    value.parse::<u64>().map_err(|_| ConfigError::InvalidEnvVar {
+        key: key.to_string(),
+        value: value.to_string(),
+        expected: "u64".to_string(),
+    })
 }
 
 /// Builder for constructing an [`App`].
@@ -855,8 +1107,8 @@ impl AppBuilder {
         config: crate::api_router::IncludeConfig,
     ) -> Self {
         // Apply config to a temporary router, then include
-        let merged_router = crate::api_router::APIRouter::new()
-            .include_router_with_config(router, config);
+        let merged_router =
+            crate::api_router::APIRouter::new().include_router_with_config(router, config);
         for entry in merged_router.into_route_entries() {
             self.routes.push(entry);
         }
@@ -1456,6 +1708,27 @@ mod tests {
     use super::*;
 
     use crate::response::ResponseBody;
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_lock<F: FnOnce()>(f: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        f();
+    }
+
+    fn clear_config_env() {
+        for key in [
+            "FASTAPI_NAME",
+            "FASTAPI_VERSION",
+            "FASTAPI_DEBUG",
+            "FASTAPI_MAX_BODY_SIZE",
+            "FASTAPI_REQUEST_TIMEOUT_MS",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
 
     // Test handlers that return 'static futures (no borrowing from parameters)
     fn test_handler(_ctx: &RequestContext, _req: &mut Request) -> std::future::Ready<Response> {
@@ -1497,6 +1770,119 @@ mod tests {
         assert!(config.debug);
         assert_eq!(config.max_body_size, 2 * 1024 * 1024);
         assert_eq!(config.request_timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn app_config_defaults() {
+        let config = AppConfig::default();
+        assert_eq!(config.name, "fastapi_rust");
+        assert_eq!(config.version, "0.1.0");
+        assert!(!config.debug);
+        assert_eq!(config.max_body_size, 1024 * 1024);
+        assert_eq!(config.request_timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn app_config_from_env_parses_values() {
+        with_env_lock(|| {
+            clear_config_env();
+            std::env::set_var("FASTAPI_NAME", "Env API");
+            std::env::set_var("FASTAPI_VERSION", "9.9.9");
+            std::env::set_var("FASTAPI_DEBUG", "true");
+            std::env::set_var("FASTAPI_MAX_BODY_SIZE", "4096");
+            std::env::set_var("FASTAPI_REQUEST_TIMEOUT_MS", "15000");
+
+            let config = AppConfig::from_env().expect("env config");
+            assert_eq!(config.name, "Env API");
+            assert_eq!(config.version, "9.9.9");
+            assert!(config.debug);
+            assert_eq!(config.max_body_size, 4096);
+            assert_eq!(config.request_timeout_ms, 15_000);
+            clear_config_env();
+        });
+    }
+
+    #[test]
+    fn app_config_from_env_invalid_value() {
+        with_env_lock(|| {
+            clear_config_env();
+            std::env::set_var("FASTAPI_MAX_BODY_SIZE", "not-a-number");
+            let err = AppConfig::from_env().expect_err("invalid env should error");
+            match err {
+                ConfigError::InvalidEnvVar { key, .. } => {
+                    assert_eq!(key, "FASTAPI_MAX_BODY_SIZE");
+                }
+                _ => panic!("expected invalid env var error"),
+            }
+            clear_config_env();
+        });
+    }
+
+    #[test]
+    fn app_config_validation_rejects_empty_name() {
+        let mut config = AppConfig::default();
+        config.name = String::new();
+        let err = config.validate().expect_err("empty name invalid");
+        assert!(matches!(err, ConfigError::Validation(_)));
+    }
+
+    #[test]
+    fn app_config_from_file_json() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!("fastapi_config_{stamp}.json"));
+
+        let json = r#"{
+  "name": "File API",
+  "version": "2.1.0",
+  "debug": true,
+  "max_body_size": 2048,
+  "request_timeout_ms": 8000
+}"#;
+        std::fs::write(&path, json).expect("write temp config");
+
+        let config = AppConfig::from_file(&path).expect("file config");
+        assert_eq!(config.name, "File API");
+        assert_eq!(config.version, "2.1.0");
+        assert!(config.debug);
+        assert_eq!(config.max_body_size, 2048);
+        assert_eq!(config.request_timeout_ms, 8000);
+    }
+
+    #[test]
+    fn app_config_env_overrides_file() {
+        with_env_lock(|| {
+            clear_config_env();
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos();
+            let mut path = std::env::temp_dir();
+            path.push(format!("fastapi_config_override_{stamp}.json"));
+
+            let json = r#"{
+  "name": "File API",
+  "version": "1.0.0",
+  "debug": false,
+  "max_body_size": 1024,
+  "request_timeout_ms": 1000
+}"#;
+            std::fs::write(&path, json).expect("write temp config");
+
+            std::env::set_var("FASTAPI_NAME", "Env API");
+            std::env::set_var("FASTAPI_DEBUG", "1");
+
+            let config = AppConfig::from_env_and_file(&path).expect("env+file config");
+            assert_eq!(config.name, "Env API");
+            assert!(config.debug);
+            assert_eq!(config.version, "1.0.0");
+            assert_eq!(config.max_body_size, 1024);
+
+            clear_config_env();
+        });
     }
 
     #[test]
@@ -2162,9 +2548,7 @@ mod tests {
         let mut handlers = ExceptionHandlers::new();
         assert!(!handlers.has_panic_handler());
 
-        handlers.set_panic_handler(|_ctx, _msg| {
-            Response::with_status(StatusCode::GATEWAY_TIMEOUT)
-        });
+        handlers.set_panic_handler(|_ctx, _msg| Response::with_status(StatusCode::GATEWAY_TIMEOUT));
 
         assert!(handlers.has_panic_handler());
 
@@ -2198,13 +2582,11 @@ mod tests {
 
     #[test]
     fn panic_handler_merge_prefers_other() {
-        let mut handlers1 = ExceptionHandlers::new().panic_handler(|_ctx, _msg| {
-            Response::with_status(StatusCode::BAD_REQUEST)
-        });
+        let mut handlers1 = ExceptionHandlers::new()
+            .panic_handler(|_ctx, _msg| Response::with_status(StatusCode::BAD_REQUEST));
 
-        let handlers2 = ExceptionHandlers::new().panic_handler(|_ctx, _msg| {
-            Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
-        });
+        let handlers2 = ExceptionHandlers::new()
+            .panic_handler(|_ctx, _msg| Response::with_status(StatusCode::SERVICE_UNAVAILABLE));
 
         handlers1.merge(handlers2);
 
@@ -2215,9 +2597,8 @@ mod tests {
 
     #[test]
     fn panic_handler_merge_keeps_existing_if_other_empty() {
-        let mut handlers1 = ExceptionHandlers::new().panic_handler(|_ctx, _msg| {
-            Response::with_status(StatusCode::BAD_REQUEST)
-        });
+        let mut handlers1 = ExceptionHandlers::new()
+            .panic_handler(|_ctx, _msg| Response::with_status(StatusCode::BAD_REQUEST));
 
         let handlers2 = ExceptionHandlers::new(); // No panic handler
 

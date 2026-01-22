@@ -431,14 +431,18 @@ mod tests {
         let pattern = RoutePattern::parse("/users/{id}");
         assert_eq!(pattern.segments.len(), 2);
         assert!(matches!(&pattern.segments[0], PathSegment::Static(s) if s == "users"));
-        assert!(matches!(&pattern.segments[1], PathSegment::Param(info) if info.name == "id" && info.converter == Converter::Str));
+        assert!(
+            matches!(&pattern.segments[1], PathSegment::Param(info) if info.name == "id" && info.converter == Converter::Str)
+        );
     }
 
     #[test]
     fn parse_path_with_typed_param() {
         let pattern = RoutePattern::parse("/items/{id:int}");
         assert_eq!(pattern.segments.len(), 2);
-        assert!(matches!(&pattern.segments[1], PathSegment::Param(info) if info.name == "id" && info.converter == Converter::Int));
+        assert!(
+            matches!(&pattern.segments[1], PathSegment::Param(info) if info.name == "id" && info.converter == Converter::Int)
+        );
     }
 
     #[test]
@@ -473,9 +477,11 @@ mod tests {
     #[test]
     fn match_path_validates_uuid_converter() {
         let pattern = RoutePattern::parse("/objects/{id:uuid}");
-        assert!(pattern
-            .match_path("/objects/550e8400-e29b-41d4-a716-446655440000")
-            .is_some());
+        assert!(
+            pattern
+                .match_path("/objects/550e8400-e29b-41d4-a716-446655440000")
+                .is_some()
+        );
         assert!(pattern.match_path("/objects/not-a-uuid").is_none());
     }
 

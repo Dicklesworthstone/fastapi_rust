@@ -5,31 +5,21 @@
 //! Run with: cargo run --example getting_started -p fastapi
 
 use fastapi::core::{
-    App,
-    AppConfig,
-    Request,
-    RequestContext,
-    Response,
-    ResponseBody,
-    RequestIdMiddleware,
-    SecurityHeaders,
-    TestClient,
+    App, AppConfig, Request, RequestContext, RequestIdMiddleware, Response, ResponseBody,
+    SecurityHeaders, TestClient,
 };
 
 /// Handler for GET /
 fn hello(_ctx: &RequestContext, _req: &mut Request) -> std::future::Ready<Response> {
-    std::future::ready(
-        Response::ok().body(ResponseBody::Bytes(b"Hello, World!".to_vec()))
-    )
+    std::future::ready(Response::ok().body(ResponseBody::Bytes(b"Hello, World!".to_vec())))
 }
 
 /// Handler for GET /health
 fn health(_ctx: &RequestContext, _req: &mut Request) -> std::future::Ready<Response> {
     std::future::ready(
-        Response::ok().body(ResponseBody::Bytes(b"{\"status\":\"healthy\"}".to_vec()))
+        Response::ok().body(ResponseBody::Bytes(b"{\"status\":\"healthy\"}".to_vec())),
     )
 }
-
 
 fn main() {
     println!("Getting Started Guide - Code Validation\n");
@@ -45,12 +35,20 @@ fn main() {
     let client = TestClient::new(app);
 
     let response = client.get("/").send();
-    println!("   GET / -> {} ({})", response.status().as_u16(), response.text());
+    println!(
+        "   GET / -> {} ({})",
+        response.status().as_u16(),
+        response.text()
+    );
     assert_eq!(response.status().as_u16(), 200);
     assert_eq!(response.text(), "Hello, World!");
 
     let response = client.get("/health").send();
-    println!("   GET /health -> {} ({})", response.status().as_u16(), response.text());
+    println!(
+        "   GET /health -> {} ({})",
+        response.status().as_u16(),
+        response.text()
+    );
     assert_eq!(response.status().as_u16(), 200);
 
     // === App with Middleware ===
@@ -75,10 +73,7 @@ fn main() {
         .max_body_size(10 * 1024 * 1024)
         .request_timeout_ms(30_000);
 
-    let app = App::builder()
-        .config(config)
-        .get("/", hello)
-        .build();
+    let app = App::builder().config(config).get("/", hello).build();
 
     println!("   App name: {}", app.config().name);
     println!("   Version: {}", app.config().version);
@@ -87,9 +82,7 @@ fn main() {
 
     // === 404 for unknown routes ===
     println!("\n4. 404 for unknown routes:");
-    let app = App::builder()
-        .get("/", hello)
-        .build();
+    let app = App::builder().get("/", hello).build();
 
     let client = TestClient::new(app);
     let response = client.get("/nonexistent").send();

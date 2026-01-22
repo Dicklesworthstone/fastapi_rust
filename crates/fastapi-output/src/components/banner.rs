@@ -10,12 +10,12 @@ const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
 
 /// ASCII art logo for fastapi_rust.
-const LOGO_ASCII: &str = r#"
+const LOGO_ASCII: &str = r"
   ___         _      _   ___ ___   ___         _
  | __| _ _ __| |_   /_\ | _ \_ _| | _ \_  _ __| |_
  | _| / _` (_-<  _| / _ \|  _/| |  |   / || (_-<  _|
  |_|  \__,_/__/\__|/_/ \_\_| |___| |_|_\_,_/__/\__|
-"#;
+";
 
 /// Simple text logo for plain mode.
 const LOGO_PLAIN: &str = "FastAPI Rust";
@@ -216,10 +216,7 @@ impl Banner {
 
         // Server info
         let accent = self.theme.accent.to_ansi_fg();
-        lines.push(format!(
-            "Server: {accent}{}{ANSI_RESET}",
-            info.base_url()
-        ));
+        lines.push(format!("Server: {accent}{}{ANSI_RESET}", info.base_url()));
 
         // Documentation links
         if self.config.show_docs {
@@ -353,8 +350,7 @@ mod tests {
     #[test]
     fn test_banner_plain_contains_essentials() {
         let banner = Banner::new(OutputMode::Plain);
-        let info = ServerInfo::new("0.1.0", "127.0.0.1", 8000)
-            .docs_path("/docs");
+        let info = ServerInfo::new("0.1.0", "127.0.0.1", 8000).docs_path("/docs");
 
         let output = banner.render(&info);
 
@@ -406,8 +402,7 @@ mod tests {
             ..Default::default()
         };
         let banner = Banner::with_config(OutputMode::Plain, config);
-        let info = ServerInfo::new("1.0.0", "localhost", 8000)
-            .docs_path("/docs");
+        let info = ServerInfo::new("1.0.0", "localhost", 8000).docs_path("/docs");
 
         let output = banner.render(&info);
 
