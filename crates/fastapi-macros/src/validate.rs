@@ -35,7 +35,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
 use syn::{
     parse_macro_input, punctuated::Punctuated, Attribute, Data, DeriveInput, Expr, ExprLit,
-    ExprPath, Field, Fields, Lit, Meta, MetaList, MetaNameValue, Token,
+    ExprPath, Field, Fields, Ident, Lit, Meta, MetaList, MetaNameValue, Token,
 };
 
 /// Parsed validation rules for a field.
@@ -95,7 +95,7 @@ fn parse_validate_attrs(attrs: &[Attribute]) -> FieldValidators {
 
         // Parse #[validate(...)]
         if let Meta::List(meta_list) = &attr.meta {
-            parse_validate_list(&meta_list, &mut validators);
+            parse_validate_list(meta_list, &mut validators);
         }
     }
 
@@ -134,9 +134,14 @@ fn parse_validate_list(meta_list: &MetaList, validators: &mut FieldValidators) {
     }
 }
 
+/// Helper to convert ident to string.
+fn ident_to_string(ident: &Ident) -> String {
+    ident.to_string()
+}
+
 /// Parse key = value attributes.
 fn parse_name_value(nv: &MetaNameValue, validators: &mut FieldValidators) {
-    let name = nv.path.get_ident().map(|i| i.to_string());
+    let name = nv.path.get_ident().map(ident_to_string);
 
     match name.as_deref() {
         Some("regex") => {
@@ -170,7 +175,7 @@ fn parse_name_value(nv: &MetaNameValue, validators: &mut FieldValidators) {
 
 /// Parse nested validators like `length(...)` or `range(...)`.
 fn parse_nested_validator(list: &MetaList, validators: &mut FieldValidators) {
-    let name = list.path.get_ident().map(|i| i.to_string());
+    let name = list.path.get_ident().map(ident_to_string);
 
     match name.as_deref() {
         Some("length") => {
@@ -179,7 +184,7 @@ fn parse_nested_validator(list: &MetaList, validators: &mut FieldValidators) {
             {
                 for item in nested {
                     if let Meta::NameValue(nv) = item {
-                        let key = nv.path.get_ident().map(|i| i.to_string());
+                        let key = nv.path.get_ident().map(ident_to_string);
                         match key.as_deref() {
                             Some("min") => {
                                 validators.length_min = expr_to_usize(&nv.value);
@@ -199,16 +204,15 @@ fn parse_nested_validator(list: &MetaList, validators: &mut FieldValidators) {
             {
                 for item in nested {
                     if let Meta::NameValue(nv) = item {
-                        let key = nv.path.get_ident().map(|i| i.to_string());
+                        let key = nv.path.get_ident().map(ident_to_string);
                         let value = expr_to_string(&nv.value);
                         match key.as_deref() {
                             Some("gt") => validators.range_gt = Some(value),
-                            Some("ge") => validators.range_ge = Some(value),
+                            // Also support min as alias for ge
+                            Some("ge") | Some("min") => validators.range_ge = Some(value),
                             Some("lt") => validators.range_lt = Some(value),
-                            Some("le") => validators.range_le = Some(value),
-                            // Also support min/max as aliases
-                            Some("min") => validators.range_ge = Some(value),
-                            Some("max") => validators.range_le = Some(value),
+                            // Also support max as alias for le
+                            Some("le") | Some("max") => validators.range_le = Some(value),
                             _ => {}
                         }
                     }
@@ -245,6 +249,10 @@ fn expr_to_string(expr: &Expr) -> String {
 }
 
 /// Generate validation code for a single field.
+///
+/// This function is necessarily large because it handles all validator types
+/// and generates the corresponding code for each one.
+#[allow(clippy::too_many_lines)]
 fn generate_field_validation(field: &Field, validators: &FieldValidators) -> TokenStream2 {
     let field_name = field.ident.as_ref().expect("Named field required");
     let field_name_str = field_name.to_string();
