@@ -5711,6 +5711,207 @@ impl FromRequest for BearerToken {
     }
 }
 
+// ============================================================================
+// Timing-Safe Comparison Utilities
+// ============================================================================
+
+/// Performs constant-time comparison of two byte slices.
+///
+/// This function compares two byte slices in a way that takes the same amount
+/// of time regardless of where (or if) the slices differ. This prevents
+/// [timing attacks](https://en.wikipedia.org/wiki/Timing_attack) where an
+/// attacker can deduce secret values by measuring comparison time.
+///
+/// # Security Properties
+///
+/// - **Constant time**: Always iterates through all bytes regardless of mismatches
+/// - **No early return**: Uses bitwise OR to accumulate differences
+/// - **Length-safe**: Returns false for different lengths (but length itself may leak)
+///
+/// # Timing Attack Prevention
+///
+/// A naive comparison like `a == b` returns as soon as it finds a difference:
+/// - `"secret" == "aaaaaa"` returns immediately (first byte differs)
+/// - `"secret" == "saaaaa"` takes slightly longer (second byte differs)
+/// - `"secret" == "seaaaa"` takes even longer, etc.
+///
+/// An attacker can exploit this to guess a secret character-by-character.
+/// This function prevents that by always examining all bytes.
+///
+/// # Warning: Length Leakage
+///
+/// While the comparison itself is constant-time, this function returns `false`
+/// immediately if the lengths differ. This is intentional for most use cases,
+/// but be aware that an attacker may be able to determine the length of secret
+/// values. For HMAC comparison, this is typically acceptable since HMACs have
+/// fixed, known lengths.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::constant_time_eq;
+///
+/// let secret_token = b"supersecrettoken12345";
+/// let user_input = b"supersecrettoken12345";
+///
+/// if constant_time_eq(secret_token, user_input) {
+///     // Tokens match - grant access
+/// } else {
+///     // Tokens don't match - deny access
+/// }
+/// ```
+///
+/// # When to Use
+///
+/// Use this function when comparing:
+/// - Authentication tokens
+/// - API keys
+/// - Session IDs
+/// - HMAC signatures
+/// - Password hashes (after hashing)
+/// - Any secret value where timing attacks are a concern
+#[must_use]
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    // Length check - this does leak length information, but for most auth
+    // scenarios (HMAC, tokens) the length is known/fixed
+    if a.len() != b.len() {
+        return false;
+    }
+
+    // Accumulate XOR of all byte pairs. Any difference sets bits in `diff`.
+    // This always processes all bytes regardless of where differences occur.
+    let diff = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+
+    // diff == 0 only if all bytes matched
+    diff == 0
+}
+
+/// Performs constant-time comparison of two strings.
+///
+/// This is a convenience wrapper around [`constant_time_eq`] that works with
+/// string slices. Internally, it compares the UTF-8 byte representations.
+///
+/// See [`constant_time_eq`] for full documentation on timing attack prevention.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::constant_time_str_eq;
+///
+/// let stored_token = "user_api_key_xyz123";
+/// let provided_token = get_token_from_header();
+///
+/// if constant_time_str_eq(stored_token, &provided_token) {
+///     // Valid token
+/// }
+/// ```
+#[must_use]
+#[inline]
+pub fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    constant_time_eq(a.as_bytes(), b.as_bytes())
+}
+
+/// Extension trait for constant-time equality comparison on `BearerToken`.
+///
+/// Provides a method to securely compare bearer tokens without leaking
+/// timing information about where tokens differ.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::{BearerToken, SecureCompare};
+///
+/// async fn validate_token(token: BearerToken) -> bool {
+///     let expected = "valid_api_key_12345";
+///     token.secure_eq(expected)
+/// }
+/// ```
+pub trait SecureCompare {
+    /// Compares this value with another using constant-time comparison.
+    ///
+    /// Returns `true` if the values are equal, `false` otherwise.
+    /// The comparison time is independent of where (or if) the values differ.
+    fn secure_eq(&self, other: &str) -> bool;
+
+    /// Compares this value with a byte slice using constant-time comparison.
+    fn secure_eq_bytes(&self, other: &[u8]) -> bool;
+}
+
+impl SecureCompare for BearerToken {
+    #[inline]
+    fn secure_eq(&self, other: &str) -> bool {
+        constant_time_str_eq(self.token(), other)
+    }
+
+    #[inline]
+    fn secure_eq_bytes(&self, other: &[u8]) -> bool {
+        constant_time_eq(self.token().as_bytes(), other)
+    }
+}
+
+impl SecureCompare for str {
+    #[inline]
+    fn secure_eq(&self, other: &str) -> bool {
+        constant_time_str_eq(self, other)
+    }
+
+    #[inline]
+    fn secure_eq_bytes(&self, other: &[u8]) -> bool {
+        constant_time_eq(self.as_bytes(), other)
+    }
+}
+
+impl SecureCompare for String {
+    #[inline]
+    fn secure_eq(&self, other: &str) -> bool {
+        constant_time_str_eq(self, other)
+    }
+
+    #[inline]
+    fn secure_eq_bytes(&self, other: &[u8]) -> bool {
+        constant_time_eq(self.as_bytes(), other)
+    }
+}
+
+impl SecureCompare for [u8] {
+    #[inline]
+    fn secure_eq(&self, other: &str) -> bool {
+        constant_time_eq(self, other.as_bytes())
+    }
+
+    #[inline]
+    fn secure_eq_bytes(&self, other: &[u8]) -> bool {
+        constant_time_eq(self, other)
+    }
+}
+
+impl<const N: usize> SecureCompare for [u8; N] {
+    #[inline]
+    fn secure_eq(&self, other: &str) -> bool {
+        constant_time_eq(self, other.as_bytes())
+    }
+
+    #[inline]
+    fn secure_eq_bytes(&self, other: &[u8]) -> bool {
+        constant_time_eq(self, other)
+    }
+}
+
+impl SecureCompare for Vec<u8> {
+    #[inline]
+    fn secure_eq(&self, other: &str) -> bool {
+        constant_time_eq(self, other.as_bytes())
+    }
+
+    #[inline]
+    fn secure_eq_bytes(&self, other: &[u8]) -> bool {
+        constant_time_eq(self, other)
+    }
+}
+
 /// Multiple header values extractor.
 ///
 /// Extracts all values for a header that may appear multiple times.
@@ -6660,6 +6861,274 @@ mod bearer_token_tests {
         let token = BearerToken::new("cloneable");
         let cloned = token.clone();
         assert_eq!(token, cloned);
+    }
+}
+
+#[cfg(test)]
+mod secure_compare_tests {
+    use super::*;
+
+    // ========================================================================
+    // Basic constant_time_eq tests
+    // ========================================================================
+
+    #[test]
+    fn constant_time_eq_equal_slices() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"a", b"a"));
+        assert!(constant_time_eq(
+            b"a_very_long_secret_token_12345",
+            b"a_very_long_secret_token_12345"
+        ));
+    }
+
+    #[test]
+    fn constant_time_eq_different_slices() {
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"aaaaaa", b"aaaaab"));
+        assert!(!constant_time_eq(b"a", b"b"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"short", b"longer"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn constant_time_eq_binary_data() {
+        let a = [0u8, 1, 2, 3, 255, 254, 253];
+        let b = [0u8, 1, 2, 3, 255, 254, 253];
+        let c = [0u8, 1, 2, 3, 255, 254, 252];
+
+        assert!(constant_time_eq(&a, &b));
+        assert!(!constant_time_eq(&a, &c));
+    }
+
+    #[test]
+    fn constant_time_eq_all_zeros() {
+        let a = [0u8; 32];
+        let b = [0u8; 32];
+        let c = {
+            let mut arr = [0u8; 32];
+            arr[31] = 1;
+            arr
+        };
+
+        assert!(constant_time_eq(&a, &b));
+        assert!(!constant_time_eq(&a, &c));
+    }
+
+    #[test]
+    fn constant_time_eq_all_ones() {
+        let a = [0xFFu8; 16];
+        let b = [0xFFu8; 16];
+        let c = {
+            let mut arr = [0xFFu8; 16];
+            arr[0] = 0xFE;
+            arr
+        };
+
+        assert!(constant_time_eq(&a, &b));
+        assert!(!constant_time_eq(&a, &c));
+    }
+
+    // ========================================================================
+    // constant_time_str_eq tests
+    // ========================================================================
+
+    #[test]
+    fn constant_time_str_eq_equal() {
+        assert!(constant_time_str_eq("password123", "password123"));
+        assert!(constant_time_str_eq("", ""));
+        assert!(constant_time_str_eq("🔐", "🔐")); // Unicode
+    }
+
+    #[test]
+    fn constant_time_str_eq_different() {
+        assert!(!constant_time_str_eq("password123", "password124"));
+        assert!(!constant_time_str_eq("case", "CASE"));
+        assert!(!constant_time_str_eq("🔐", "🔑"));
+    }
+
+    #[test]
+    fn constant_time_str_eq_unicode() {
+        // Multi-byte UTF-8 characters
+        assert!(constant_time_str_eq("日本語", "日本語"));
+        assert!(!constant_time_str_eq("日本語", "日本话"));
+        assert!(!constant_time_str_eq("café", "cafe"));
+    }
+
+    // ========================================================================
+    // SecureCompare trait tests for BearerToken
+    // ========================================================================
+
+    #[test]
+    fn bearer_token_secure_eq() {
+        let token = BearerToken::new("my_secret_token");
+
+        assert!(token.secure_eq("my_secret_token"));
+        assert!(!token.secure_eq("my_secret_Token")); // Case sensitive
+        assert!(!token.secure_eq("wrong_token"));
+    }
+
+    #[test]
+    fn bearer_token_secure_eq_bytes() {
+        let token = BearerToken::new("api_key_123");
+
+        assert!(token.secure_eq_bytes(b"api_key_123"));
+        assert!(!token.secure_eq_bytes(b"api_key_124"));
+    }
+
+    // ========================================================================
+    // SecureCompare trait tests for String/str
+    // ========================================================================
+
+    #[test]
+    fn str_secure_eq() {
+        let secret: &str = "hunter2";
+
+        assert!(secret.secure_eq("hunter2"));
+        assert!(!secret.secure_eq("hunter3"));
+    }
+
+    #[test]
+    fn string_secure_eq() {
+        let secret = String::from("password");
+
+        assert!(secret.secure_eq("password"));
+        assert!(!secret.secure_eq("passwor"));
+    }
+
+    #[test]
+    fn string_secure_eq_bytes() {
+        let secret = String::from("binary_safe");
+
+        assert!(secret.secure_eq_bytes(b"binary_safe"));
+        assert!(!secret.secure_eq_bytes(b"binary_Safe"));
+    }
+
+    // ========================================================================
+    // SecureCompare trait tests for byte slices
+    // ========================================================================
+
+    #[test]
+    fn byte_slice_secure_eq() {
+        let hmac: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+
+        assert!(hmac.secure_eq_bytes(&[0xDE, 0xAD, 0xBE, 0xEF]));
+        assert!(!hmac.secure_eq_bytes(&[0xDE, 0xAD, 0xBE, 0xEE]));
+    }
+
+    #[test]
+    fn byte_array_secure_eq() {
+        let key: [u8; 4] = [1, 2, 3, 4];
+
+        assert!(key.secure_eq_bytes(&[1, 2, 3, 4]));
+        assert!(!key.secure_eq_bytes(&[1, 2, 3, 5]));
+    }
+
+    #[test]
+    fn vec_secure_eq() {
+        let token: Vec<u8> = vec![0x41, 0x42, 0x43];
+
+        assert!(token.secure_eq("ABC"));
+        assert!(!token.secure_eq("ABD"));
+    }
+
+    // ========================================================================
+    // Edge cases and security properties
+    // ========================================================================
+
+    #[test]
+    fn secure_compare_empty_values() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_str_eq("", ""));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(!constant_time_str_eq("", "x"));
+    }
+
+    #[test]
+    fn secure_compare_single_bit_difference() {
+        // These differ by exactly one bit
+        let a = [0b1111_1111u8];
+        let b = [0b1111_1110u8];
+
+        assert!(!constant_time_eq(&a, &b));
+    }
+
+    #[test]
+    fn secure_compare_first_byte_differs() {
+        // Difference at the very start
+        assert!(!constant_time_eq(b"Xsecret", b"Ysecret"));
+    }
+
+    #[test]
+    fn secure_compare_last_byte_differs() {
+        // Difference at the very end
+        assert!(!constant_time_eq(b"secretX", b"secretY"));
+    }
+
+    #[test]
+    fn secure_compare_middle_byte_differs() {
+        // Difference in the middle
+        assert!(!constant_time_eq(b"secXet", b"secYet"));
+    }
+
+    // Test that ensures the trait can be used with the BearerToken extractor
+    #[test]
+    fn bearer_token_integration_with_secure_compare() {
+        let token = BearerToken::new("real_api_token_xyz789");
+
+        // Simulating token validation in a handler
+        let stored_token = "real_api_token_xyz789";
+        let is_valid = token.secure_eq(stored_token);
+        assert!(is_valid);
+
+        // Wrong token should fail
+        let wrong_token = "fake_api_token_abc123";
+        let is_invalid = !token.secure_eq(wrong_token);
+        assert!(is_invalid);
+    }
+
+    #[test]
+    fn deref_with_secure_compare() {
+        // BearerToken derefs to &str, so we can use secure_eq on the deref result
+        let token = BearerToken::new("my_token");
+        let token_str: &str = &token; // Deref
+
+        // Using SecureCompare on the &str
+        assert!(token_str.secure_eq("my_token"));
+    }
+
+    // ========================================================================
+    // Timing verification (best-effort, not a cryptographic proof)
+    // ========================================================================
+    // Note: Actual timing tests are notoriously unreliable due to CPU caching,
+    // branch prediction, and OS scheduling. These tests verify the algorithm
+    // correctness rather than timing properties. For true timing verification,
+    // use specialized tools like dudect or benchmarking with statistical analysis.
+
+    #[test]
+    fn algorithm_processes_all_bytes() {
+        // This test verifies the algorithm structure by checking that
+        // all bytes are processed regardless of early differences.
+        // The fold operation ensures all bytes are XORed.
+
+        // Same length, differ at position 0
+        let a = b"Xsecret_token";
+        let b = b"Ysecret_token";
+        assert!(!constant_time_eq(a, b));
+
+        // Same length, differ at last position
+        let c = b"secret_tokenX";
+        let d = b"secret_tokenY";
+        assert!(!constant_time_eq(c, d));
+
+        // Both should take the same code path (all 13 bytes XORed)
+        // We can't easily verify timing in unit tests, but we verify correctness
     }
 }
 

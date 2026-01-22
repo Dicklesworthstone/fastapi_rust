@@ -78,8 +78,9 @@ pub use extract::{
     FromHeaderValue, FromRequest, Header, HeaderExtractError, HeaderName, HeaderValues, Host, Json,
     JsonConfig, JsonExtractError, NamedHeader, OAuth2BearerError, OAuth2BearerErrorKind,
     OAuth2PasswordBearer, OAuth2PasswordBearerConfig, Path, PathExtractError, PathParams, Query,
-    QueryExtractError, QueryParams, RequestRef, ResponseMut, ResponseMutations, SameSite, State,
-    StateExtractError, UserAgent, XRequestId, snake_to_header_case,
+    QueryExtractError, QueryParams, RequestRef, ResponseMut, ResponseMutations, SameSite,
+    SecureCompare, State, StateExtractError, UserAgent, XRequestId, constant_time_eq,
+    constant_time_str_eq, snake_to_header_case,
 };
 pub use middleware::{
     AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, Handler, Layer, Layered,
