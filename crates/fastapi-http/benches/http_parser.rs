@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 fn http_parser_benchmarks(_c: &mut Criterion) {
     // TODO: Add HTTP parser benchmarks
