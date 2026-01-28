@@ -85,6 +85,9 @@ pub use server::{
     DEFAULT_REQUEST_TIMEOUT_SECS, ServeError, Server, ServerConfig, ServerError, TcpServer, serve,
     serve_with_config,
 };
+
+// Re-export signal types for graceful shutdown
+pub use asupersync::signal::{GracefulOutcome, ShutdownController, ShutdownReceiver};
 pub use streaming::{
     CancelAwareStream, ChunkedBytes, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_BUFFER_SIZE, FileStream,
     StreamConfig, StreamError, StreamingResponseExt,

@@ -680,6 +680,8 @@ pub struct TcpServer {
     draining: Arc<AtomicBool>,
     /// Handles to spawned connection tasks for graceful shutdown.
     connection_handles: Mutex<Vec<TaskHandle<()>>>,
+    /// Shutdown controller for coordinated graceful shutdown.
+    shutdown_controller: Arc<ShutdownController>,
 }
 
 impl TcpServer {
@@ -692,6 +694,7 @@ impl TcpServer {
             connection_counter: Arc::new(AtomicU64::new(0)),
             draining: Arc::new(AtomicBool::new(false)),
             connection_handles: Mutex::new(Vec::new()),
+            shutdown_controller: Arc::new(ShutdownController::new()),
         }
     }
 
@@ -801,6 +804,197 @@ impl TcpServer {
             0
         } else {
             self.current_connections()
+        }
+    }
+
+    /// Returns a reference to the server's shutdown controller.
+    ///
+    /// This can be used to coordinate shutdown from external code,
+    /// such as signal handlers or health check endpoints.
+    #[must_use]
+    pub fn shutdown_controller(&self) -> &Arc<ShutdownController> {
+        &self.shutdown_controller
+    }
+
+    /// Returns a receiver for shutdown notifications.
+    ///
+    /// Use this to receive shutdown signals in other parts of your application.
+    /// Multiple receivers can be created and they will all be notified.
+    #[must_use]
+    pub fn subscribe_shutdown(&self) -> ShutdownReceiver {
+        self.shutdown_controller.subscribe()
+    }
+
+    /// Initiates server shutdown.
+    ///
+    /// This triggers the shutdown process:
+    /// 1. Sets the draining flag to stop accepting new connections
+    /// 2. Notifies all shutdown receivers
+    /// 3. The server's accept loop will exit and drain connections
+    ///
+    /// This method is safe to call multiple times - subsequent calls are no-ops.
+    pub fn shutdown(&self) {
+        self.start_drain();
+        self.shutdown_controller.shutdown();
+    }
+
+    /// Checks if shutdown has been initiated.
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_controller.is_shutting_down() || self.is_draining()
+    }
+
+    /// Runs the server with graceful shutdown support.
+    ///
+    /// The server will run until either:
+    /// - The provided shutdown receiver signals shutdown
+    /// - The server Cx is cancelled
+    /// - An unrecoverable error occurs
+    ///
+    /// When shutdown is signaled, the server will:
+    /// 1. Stop accepting new connections
+    /// 2. Wait for existing connections to complete (up to drain_timeout)
+    /// 3. Return gracefully
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::signal::ShutdownController;
+    /// use fastapi_http::{TcpServer, ServerConfig};
+    ///
+    /// let controller = ShutdownController::new();
+    /// let server = TcpServer::new(ServerConfig::new("127.0.0.1:8080"));
+    ///
+    /// // Get a shutdown receiver
+    /// let shutdown = controller.subscribe();
+    ///
+    /// // In another task, you can trigger shutdown:
+    /// // controller.shutdown();
+    ///
+    /// server.serve_with_shutdown(&cx, shutdown, handler).await?;
+    /// ```
+    pub async fn serve_with_shutdown<H, Fut>(
+        &self,
+        cx: &Cx,
+        mut shutdown: ShutdownReceiver,
+        handler: H,
+    ) -> Result<GracefulOutcome<()>, ServerError>
+    where
+        H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let bind_addr = self.config.bind_addr.clone();
+        let listener = TcpListener::bind(bind_addr).await?;
+        let local_addr = listener.local_addr()?;
+
+        cx.trace(&format!(
+            "Server listening on {local_addr} (with graceful shutdown)"
+        ));
+
+        // Run the accept loop with shutdown racing
+        let result = self
+            .accept_loop_with_shutdown(cx, listener, handler, &mut shutdown)
+            .await;
+
+        match result {
+            Ok(outcome) => {
+                if outcome.is_shutdown() {
+                    cx.trace("Shutdown signal received, draining connections");
+                    self.start_drain();
+                    self.drain_connection_tasks(cx).await;
+                }
+                Ok(outcome)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Accept loop that checks for shutdown signals.
+    async fn accept_loop_with_shutdown<H, Fut>(
+        &self,
+        cx: &Cx,
+        listener: TcpListener,
+        handler: H,
+        shutdown: &mut ShutdownReceiver,
+    ) -> Result<GracefulOutcome<()>, ServerError>
+    where
+        H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+
+        loop {
+            // Check for shutdown or cancellation first
+            if shutdown.is_shutting_down() {
+                return Ok(GracefulOutcome::ShutdownSignaled);
+            }
+            if cx.is_cancel_requested() || self.is_draining() {
+                return Ok(GracefulOutcome::ShutdownSignaled);
+            }
+
+            // Accept a connection
+            let (mut stream, peer_addr) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    cx.trace(&format!("Accept error: {e}"));
+                    if is_fatal_accept_error(&e) {
+                        return Err(ServerError::Io(e));
+                    }
+                    continue;
+                }
+            };
+
+            // Check connection limit before processing
+            if !self.try_acquire_connection() {
+                cx.trace(&format!(
+                    "Connection limit reached ({}), rejecting {peer_addr}",
+                    self.config.max_connections
+                ));
+
+                let response = Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header("connection", b"close".to_vec())
+                    .body(fastapi_core::ResponseBody::Bytes(
+                        b"503 Service Unavailable: connection limit reached".to_vec(),
+                    ));
+                let mut writer = crate::response::ResponseWriter::new();
+                let response_bytes = writer.write(response);
+                let _ = write_response(&mut stream, response_bytes).await;
+                continue;
+            }
+
+            // Configure the connection
+            if self.config.tcp_nodelay {
+                let _ = stream.set_nodelay(true);
+            }
+
+            cx.trace(&format!(
+                "Accepted connection from {peer_addr} ({}/{})",
+                self.current_connections(),
+                if self.config.max_connections == 0 {
+                    "∞".to_string()
+                } else {
+                    self.config.max_connections.to_string()
+                }
+            ));
+
+            let request_id = self.next_request_id();
+            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let ctx = RequestContext::new(request_cx, request_id);
+
+            // Handle connection inline (single-threaded mode)
+            let result = self
+                .handle_connection(&ctx, stream, peer_addr, &*handler)
+                .await;
+
+            self.release_connection();
+
+            if let Err(e) = result {
+                cx.trace(&format!("Connection error from {peer_addr}: {e}"));
+            }
         }
     }
 
@@ -2294,6 +2488,66 @@ mod tests {
     fn server_shutdown_error_display() {
         let err = ServerError::Shutdown;
         assert_eq!(err.to_string(), "Server shutdown");
+    }
+
+    // ========================================================================
+    // Graceful shutdown controller tests
+    // ========================================================================
+
+    #[test]
+    fn server_has_shutdown_controller() {
+        let server = TcpServer::default();
+        let controller = server.shutdown_controller();
+        assert!(!controller.is_shutting_down());
+    }
+
+    #[test]
+    fn server_subscribe_shutdown_returns_receiver() {
+        let server = TcpServer::default();
+        let receiver = server.subscribe_shutdown();
+        assert!(!receiver.is_shutting_down());
+    }
+
+    #[test]
+    fn server_shutdown_sets_draining_and_controller() {
+        let server = TcpServer::default();
+        assert!(!server.is_shutting_down());
+        assert!(!server.is_draining());
+        assert!(!server.shutdown_controller().is_shutting_down());
+
+        server.shutdown();
+
+        assert!(server.is_shutting_down());
+        assert!(server.is_draining());
+        assert!(server.shutdown_controller().is_shutting_down());
+    }
+
+    #[test]
+    fn server_shutdown_notifies_receivers() {
+        let server = TcpServer::default();
+        let receiver1 = server.subscribe_shutdown();
+        let receiver2 = server.subscribe_shutdown();
+
+        assert!(!receiver1.is_shutting_down());
+        assert!(!receiver2.is_shutting_down());
+
+        server.shutdown();
+
+        assert!(receiver1.is_shutting_down());
+        assert!(receiver2.is_shutting_down());
+    }
+
+    #[test]
+    fn server_shutdown_is_idempotent() {
+        let server = TcpServer::default();
+        let receiver = server.subscribe_shutdown();
+
+        server.shutdown();
+        server.shutdown();
+        server.shutdown();
+
+        assert!(server.is_shutting_down());
+        assert!(receiver.is_shutting_down());
     }
 
     // ========================================================================
