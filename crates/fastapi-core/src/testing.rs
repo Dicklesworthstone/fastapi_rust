@@ -2739,6 +2739,253 @@ mod tests {
         assert!(!completed.gracefully_cancelled());
         assert!(completed.completed_despite_cancel());
     }
+
+    // =========================================================================
+    // Tests for TestLogger and LogCapture (bd-2of7)
+    // =========================================================================
+
+    #[test]
+    fn test_logger_captures_all_levels() {
+        let logger = TestLogger::new();
+
+        logger.log_message(LogLevel::Debug, "debug message", 1);
+        logger.log_message(LogLevel::Info, "info message", 1);
+        logger.log_message(LogLevel::Warn, "warn message", 1);
+        logger.log_message(LogLevel::Error, "error message", 1);
+
+        let logs = logger.logs();
+        assert_eq!(logs.len(), 4);
+
+        assert_eq!(logs[0].level, LogLevel::Debug);
+        assert_eq!(logs[1].level, LogLevel::Info);
+        assert_eq!(logs[2].level, LogLevel::Warn);
+        assert_eq!(logs[3].level, LogLevel::Error);
+    }
+
+    #[test]
+    fn test_logger_logs_at_level_filters_correctly() {
+        let logger = TestLogger::new();
+
+        logger.log_message(LogLevel::Debug, "debug", 1);
+        logger.log_message(LogLevel::Info, "info 1", 1);
+        logger.log_message(LogLevel::Info, "info 2", 2);
+        logger.log_message(LogLevel::Warn, "warn", 1);
+        logger.log_message(LogLevel::Error, "error", 1);
+
+        let info_logs = logger.logs_at_level(LogLevel::Info);
+        assert_eq!(info_logs.len(), 2);
+        assert!(info_logs[0].contains("info 1"));
+        assert!(info_logs[1].contains("info 2"));
+
+        let error_logs = logger.logs_at_level(LogLevel::Error);
+        assert_eq!(error_logs.len(), 1);
+        assert!(error_logs[0].contains("error"));
+
+        let trace_logs = logger.logs_at_level(LogLevel::Trace);
+        assert_eq!(trace_logs.len(), 0);
+    }
+
+    #[test]
+    fn test_logger_contains_message_search() {
+        let logger = TestLogger::new();
+
+        logger.log_message(LogLevel::Info, "User alice logged in", 100);
+        logger.log_message(LogLevel::Info, "Request processed for /api/users", 101);
+        logger.log_message(LogLevel::Warn, "Rate limit approaching for alice", 102);
+
+        assert!(logger.contains_message("alice"));
+        assert!(logger.contains_message("/api/users"));
+        assert!(logger.contains_message("Rate limit"));
+        assert!(!logger.contains_message("bob"));
+        assert!(!logger.contains_message("nonexistent"));
+    }
+
+    #[test]
+    fn test_logger_contains_multiple_messages() {
+        let logger = TestLogger::new();
+
+        logger.log_message(LogLevel::Info, "step 1 complete", 1);
+        logger.log_message(LogLevel::Info, "step 2 complete", 2);
+        logger.log_message(LogLevel::Info, "step 3 complete", 3);
+
+        // All messages should be findable
+        assert!(logger.contains_message("step 1"));
+        assert!(logger.contains_message("step 2"));
+        assert!(logger.contains_message("step 3"));
+        assert!(logger.contains_message("complete"));
+        // Non-existent message
+        assert!(!logger.contains_message("step 4"));
+    }
+
+    #[test]
+    fn test_log_capture_captures_logs_in_closure() {
+        let capture = TestLogger::capture(|logger| {
+            logger.log_message(LogLevel::Info, "inside capture", 1);
+            logger.log_message(LogLevel::Warn, "warning inside", 2);
+            42
+        });
+
+        assert!(capture.passed());
+        assert!(!capture.failed());
+        assert_eq!(capture.result, Some(42));
+        assert_eq!(capture.logs.len(), 2);
+        assert!(capture.contains_message("inside capture"));
+        assert!(capture.contains_message("warning inside"));
+    }
+
+    #[test]
+    fn test_log_capture_count_by_level() {
+        let capture = TestLogger::capture(|logger| {
+            logger.log_message(LogLevel::Info, "info 1", 1);
+            logger.log_message(LogLevel::Info, "info 2", 2);
+            logger.log_message(LogLevel::Info, "info 3", 3);
+            logger.log_message(LogLevel::Error, "error 1", 4);
+        });
+
+        assert_eq!(capture.count_by_level(LogLevel::Info), 3);
+        assert_eq!(capture.count_by_level(LogLevel::Error), 1);
+        assert_eq!(capture.count_by_level(LogLevel::Warn), 0);
+    }
+
+    #[test]
+    fn test_log_capture_phased_all_phases() {
+        let capture = TestLogger::capture_phased(
+            |logger| {
+                logger.log_message(LogLevel::Info, "setup phase", 1);
+            },
+            |logger| {
+                logger.log_message(LogLevel::Info, "execute phase", 2);
+                "result"
+            },
+            |logger| {
+                logger.log_message(LogLevel::Info, "teardown phase", 3);
+            },
+        );
+
+        assert!(capture.passed());
+        assert_eq!(capture.result, Some("result"));
+        assert_eq!(capture.logs.len(), 3);
+        assert!(capture.contains_message("setup phase"));
+        assert!(capture.contains_message("execute phase"));
+        assert!(capture.contains_message("teardown phase"));
+    }
+
+    #[test]
+    fn test_log_capture_timings_recorded() {
+        let capture = TestLogger::capture(|_logger| {
+            // Small computation to ensure measurable time
+            let mut sum = 0;
+            for i in 0..1000 {
+                sum += i;
+            }
+            sum
+        });
+
+        assert!(capture.passed());
+        // Timings should be recorded (may be very small but non-negative)
+        let timings = &capture.timings;
+        assert!(timings.total() >= std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn test_log_capture_failure_context() {
+        let capture = TestLogger::capture(|logger| {
+            logger.log_message(LogLevel::Info, "step 1", 1);
+            logger.log_message(LogLevel::Info, "step 2", 2);
+            logger.log_message(LogLevel::Error, "something went wrong", 3);
+            logger.log_message(LogLevel::Info, "step 3", 4);
+            ()
+        });
+
+        let context = capture.failure_context(3);
+        // Should contain the last 3 logs
+        assert!(context.contains("something went wrong") || context.contains("step 3"));
+    }
+
+    #[test]
+    fn test_captured_log_format() {
+        let log = CapturedLog::new(LogLevel::Warn, "test warning message", 12345);
+
+        let formatted = log.format();
+        // Format is "[W] req=12345 test warning message" for Warn level
+        assert!(formatted.contains("[W]"));
+        assert!(formatted.contains("test warning message"));
+        assert!(formatted.contains("12345"));
+    }
+
+    #[test]
+    fn test_captured_log_contains() {
+        let log = CapturedLog::new(LogLevel::Info, "user login successful for alice", 1);
+
+        assert!(log.contains("login"));
+        assert!(log.contains("alice"));
+        assert!(log.contains("successful"));
+        assert!(!log.contains("bob"));
+        assert!(!log.contains("failed"));
+    }
+
+    #[test]
+    fn test_captured_log_fields() {
+        let log = CapturedLog::new(LogLevel::Error, "database connection failed", 999);
+
+        assert_eq!(log.level, LogLevel::Error);
+        assert_eq!(log.message, "database connection failed");
+        assert_eq!(log.request_id, 999);
+    }
+
+    #[test]
+    fn test_multiple_loggers_isolated() {
+        let logger1 = TestLogger::new();
+        let logger2 = TestLogger::new();
+
+        logger1.log_message(LogLevel::Info, "from logger 1", 1);
+        logger2.log_message(LogLevel::Info, "from logger 2", 2);
+
+        assert_eq!(logger1.logs().len(), 1);
+        assert_eq!(logger2.logs().len(), 1);
+        assert!(logger1.contains_message("logger 1"));
+        assert!(!logger1.contains_message("logger 2"));
+        assert!(logger2.contains_message("logger 2"));
+        assert!(!logger2.contains_message("logger 1"));
+    }
+
+    #[test]
+    fn test_logger_log_entry_integration() {
+        let logger = TestLogger::new();
+
+        let entry = LogEntry {
+            level: LogLevel::Warn,
+            message: "warning from entry".to_string(),
+            request_id: 42,
+            region_id: "region-1".to_string(),
+            task_id: "task-1".to_string(),
+            target: None,
+            fields: Vec::new(),
+            timestamp_ns: 0,
+        };
+
+        logger.log_entry(&entry);
+
+        assert_eq!(logger.logs().len(), 1);
+        let captured = &logger.logs()[0];
+        assert_eq!(captured.level, LogLevel::Warn);
+        assert!(captured.contains("warning from entry"));
+        assert_eq!(captured.request_id, 42);
+    }
+
+    #[test]
+    fn test_log_capture_unwrap_on_success() {
+        let capture = TestLogger::capture(|_| 123);
+        let value = capture.unwrap();
+        assert_eq!(value, 123);
+    }
+
+    #[test]
+    fn test_log_capture_unwrap_or_on_success() {
+        let capture = TestLogger::capture(|_| 456);
+        let value = capture.unwrap_or(0);
+        assert_eq!(value, 456);
+    }
 }
 
 // =============================================================================

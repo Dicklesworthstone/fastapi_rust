@@ -5096,9 +5096,7 @@ mod compression_tests {
 
     #[test]
     fn compression_config_builder() {
-        let config = CompressionConfig::new()
-            .min_size(512)
-            .level(9);
+        let config = CompressionConfig::new().min_size(512).level(9);
         assert_eq!(config.min_size, 512);
         assert_eq!(config.level, 9);
     }
@@ -5136,7 +5134,8 @@ mod compression_tests {
 
         // Create request with Accept-Encoding: gzip
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+        req.headers_mut()
+            .insert("accept-encoding", b"gzip".to_vec());
 
         // Create a small response (less than 1024 bytes)
         let response = Response::ok()
@@ -5162,7 +5161,8 @@ mod compression_tests {
 
         // Create request with Accept-Encoding: gzip
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+        req.headers_mut()
+            .insert("accept-encoding", b"gzip".to_vec());
 
         // Create a response with repetitive content (compresses well)
         let body = "Hello, World! ".repeat(100);
@@ -5194,7 +5194,10 @@ mod compression_tests {
 
         // Verify compressed size is smaller
         if let ResponseBody::Bytes(compressed) = result.body_ref() {
-            assert!(compressed.len() < original_size, "Compressed size should be smaller");
+            assert!(
+                compressed.len() < original_size,
+                "Compressed size should be smaller"
+            );
         } else {
             panic!("Expected Bytes body");
         }
@@ -5232,7 +5235,8 @@ mod compression_tests {
 
         // Create request with Accept-Encoding: gzip
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+        req.headers_mut()
+            .insert("accept-encoding", b"gzip".to_vec());
 
         // Create response with already-compressed content type
         let body = "Some image data".repeat(100);
@@ -5247,7 +5251,10 @@ mod compression_tests {
             .headers()
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
-        assert!(!has_encoding, "Should not compress already-compressed content types");
+        assert!(
+            !has_encoding,
+            "Should not compress already-compressed content types"
+        );
     }
 
     #[test]
@@ -5258,7 +5265,8 @@ mod compression_tests {
 
         // Create request with Accept-Encoding: gzip
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+        req.headers_mut()
+            .insert("accept-encoding", b"gzip".to_vec());
 
         // Create response that already has Content-Encoding
         let body = "Hello, World! ".repeat(100);
@@ -5287,17 +5295,20 @@ mod compression_tests {
 
         // Simple gzip
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+        req.headers_mut()
+            .insert("accept-encoding", b"gzip".to_vec());
         assert!(CompressionMiddleware::accepts_gzip(&req));
 
         // Multiple encodings
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("accept-encoding", b"deflate, gzip, br".to_vec());
+        req.headers_mut()
+            .insert("accept-encoding", b"deflate, gzip, br".to_vec());
         assert!(CompressionMiddleware::accepts_gzip(&req));
 
         // With quality values
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("accept-encoding", b"gzip;q=1.0, identity;q=0.5".to_vec());
+        req.headers_mut()
+            .insert("accept-encoding", b"gzip;q=1.0, identity;q=0.5".to_vec());
         assert!(CompressionMiddleware::accepts_gzip(&req));
 
         // Wildcard
@@ -5307,7 +5318,8 @@ mod compression_tests {
 
         // No gzip
         let mut req = Request::new(Method::Get, "/");
-        req.headers_mut().insert("accept-encoding", b"deflate, br".to_vec());
+        req.headers_mut()
+            .insert("accept-encoding", b"deflate, br".to_vec());
         assert!(!CompressionMiddleware::accepts_gzip(&req));
 
         // No header

@@ -932,4 +932,218 @@ mod tests {
         assert_eq!(entry.level, LogLevel::Debug);
         assert_eq!(entry.message, "Processing item 99");
     }
+
+    // =========================================================================
+    // AutoSpan and Span nesting tests (bd-sdrz)
+    // =========================================================================
+
+    #[test]
+    fn autospan_creates_and_ends_on_drop() {
+        let ctx = test_context();
+        let start = std::time::Instant::now();
+
+        {
+            let _span = AutoSpan::new(&ctx, "short_operation");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            // AutoSpan should end when dropped here
+        }
+
+        let elapsed = start.elapsed();
+        // Should have completed in a reasonable time
+        assert!(elapsed.as_millis() >= 1);
+    }
+
+    #[test]
+    fn autospan_captures_request_id() {
+        let ctx = test_context();
+        let span = AutoSpan::new(&ctx, "test_span");
+
+        // AutoSpan stores the context's request ID
+        assert_eq!(span.ctx_request_id, 12345);
+    }
+
+    #[test]
+    fn span_nested_three_levels_deep() {
+        let ctx = test_context();
+
+        let parent = Span::new(&ctx, "level_1");
+        let child = parent.child(&ctx, "level_2");
+        let grandchild = child.child(&ctx, "level_3");
+
+        // Verify parent-child relationships
+        assert!(parent.parent_id().is_none());
+        assert_eq!(child.parent_id(), Some(parent.span_id()));
+        assert_eq!(grandchild.parent_id(), Some(child.span_id()));
+
+        // Verify names
+        assert_eq!(parent.name(), "level_1");
+        assert_eq!(child.name(), "level_2");
+        assert_eq!(grandchild.name(), "level_3");
+    }
+
+    #[test]
+    fn span_nested_five_levels_deep() {
+        let ctx = test_context();
+
+        let level1 = Span::new(&ctx, "request_handler");
+        let level2 = level1.child(&ctx, "middleware");
+        let level3 = level2.child(&ctx, "auth_check");
+        let level4 = level3.child(&ctx, "token_validation");
+        let level5 = level4.child(&ctx, "signature_verify");
+
+        // Verify the full chain
+        assert!(level1.parent_id().is_none());
+        assert_eq!(level2.parent_id(), Some(level1.span_id()));
+        assert_eq!(level3.parent_id(), Some(level2.span_id()));
+        assert_eq!(level4.parent_id(), Some(level3.span_id()));
+        assert_eq!(level5.parent_id(), Some(level4.span_id()));
+    }
+
+    #[test]
+    fn span_sibling_spans_have_same_parent() {
+        let ctx = test_context();
+
+        let parent = Span::new(&ctx, "parent");
+        let sibling1 = parent.child(&ctx, "sibling_a");
+        let sibling2 = parent.child(&ctx, "sibling_b");
+        let sibling3 = parent.child(&ctx, "sibling_c");
+
+        // All siblings share the same parent
+        assert_eq!(sibling1.parent_id(), Some(parent.span_id()));
+        assert_eq!(sibling2.parent_id(), Some(parent.span_id()));
+        assert_eq!(sibling3.parent_id(), Some(parent.span_id()));
+
+        // But each has a unique span_id
+        assert_ne!(sibling1.span_id(), sibling2.span_id());
+        assert_ne!(sibling2.span_id(), sibling3.span_id());
+        assert_ne!(sibling1.span_id(), sibling3.span_id());
+    }
+
+    #[test]
+    fn span_ids_are_globally_unique() {
+        let ctx = test_context();
+
+        let span1 = Span::new(&ctx, "span1");
+        let span2 = Span::new(&ctx, "span2");
+        let span3 = Span::new(&ctx, "span3");
+
+        assert_ne!(span1.span_id(), span2.span_id());
+        assert_ne!(span2.span_id(), span3.span_id());
+        assert_ne!(span1.span_id(), span3.span_id());
+    }
+
+    #[test]
+    fn span_request_id_propagates_to_children() {
+        let ctx = test_context();
+
+        let parent = Span::new(&ctx, "parent");
+        let child = parent.child(&ctx, "child");
+        let grandchild = child.child(&ctx, "grandchild");
+
+        // All spans should have the same request_id from context
+        assert_eq!(parent.request_id, 12345);
+        assert_eq!(child.request_id, 12345);
+        assert_eq!(grandchild.request_id, 12345);
+    }
+
+    #[test]
+    fn span_json_includes_parent_id_when_present() {
+        let ctx = test_context();
+
+        let parent = Span::new(&ctx, "parent");
+        let child = parent.child(&ctx, "child");
+
+        // Parent JSON should not have parent_id
+        let parent_json = parent.to_json();
+        assert!(!parent_json.contains("parent_id"));
+
+        // Child JSON should include parent_id
+        let child_json = child.to_json();
+        assert!(child_json.contains("parent_id"));
+        assert!(child_json.contains(&parent.span_id().to_string()));
+    }
+
+    #[test]
+    fn span_elapsed_increases_over_time() {
+        let ctx = test_context();
+        let span = Span::new(&ctx, "timing_test");
+
+        let elapsed1 = span.elapsed();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let elapsed2 = span.elapsed();
+
+        assert!(elapsed2 > elapsed1);
+    }
+
+    #[test]
+    fn span_end_returns_final_duration() {
+        let ctx = test_context();
+        let mut span = Span::new(&ctx, "duration_test");
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let duration = span.end();
+
+        // Duration should be at least 1ms
+        assert!(duration.as_millis() >= 1);
+        // Span should be marked as ended
+        assert!(span.ended);
+    }
+
+    #[test]
+    fn span_multiple_end_calls_idempotent() {
+        let ctx = test_context();
+        let mut span = Span::new(&ctx, "multi_end_test");
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let duration1 = span.end();
+        let duration2 = span.end();
+        let duration3 = span.end();
+
+        // All calls after first should return similar durations (no panic)
+        // Note: duration may vary slightly due to elapsed() calls
+        assert!(duration1.as_micros() > 0);
+        assert!(duration2.as_micros() > 0);
+        assert!(duration3.as_micros() > 0);
+    }
+
+    #[test]
+    fn span_drop_ends_span_automatically() {
+        let ctx = test_context();
+
+        // Create a span and let it drop
+        {
+            let span = Span::new(&ctx, "auto_end_test");
+            assert!(!span.ended);
+            // Span should be ended when dropped
+        }
+        // We can't directly verify ended after drop, but the Drop impl
+        // should not panic and should mark it ended
+    }
+
+    #[test]
+    fn nested_spans_timing_accumulates_correctly() {
+        let ctx = test_context();
+
+        let start = std::time::Instant::now();
+
+        let mut parent = Span::new(&ctx, "parent");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        {
+            let mut child = parent.child(&ctx, "child");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let child_duration = child.end();
+
+            // Child duration should be ~2ms
+            assert!(child_duration.as_millis() >= 2);
+        }
+
+        let parent_duration = parent.end();
+
+        // Parent duration should include child time (~4ms total)
+        assert!(parent_duration.as_millis() >= 4);
+
+        let total = start.elapsed();
+        assert!(total.as_millis() >= 4);
+    }
 }

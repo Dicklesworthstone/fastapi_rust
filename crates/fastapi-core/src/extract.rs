@@ -7162,6 +7162,269 @@ mod special_extractor_tests {
     }
 }
 
+#[cfg(test)]
+mod background_tasks_tests {
+    use super::*;
+    use crate::request::Method;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    fn test_context() -> RequestContext {
+        let cx = asupersync::Cx::for_testing();
+        RequestContext::new(cx, 12345)
+    }
+
+    #[test]
+    fn background_tasks_inner_new_is_empty() {
+        let inner = BackgroundTasksInner::new();
+        assert!(inner.take().is_empty());
+    }
+
+    #[test]
+    fn background_tasks_inner_push_and_take() {
+        let inner = BackgroundTasksInner::new();
+
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_clone = executed.clone();
+
+        // BackgroundTask is FnOnce() -> Pin<Box<Future>>
+        inner.push(Box::new(move || {
+            Box::pin(async move {
+                executed_clone.store(true, Ordering::SeqCst);
+            })
+        }));
+
+        let tasks = inner.take();
+        assert_eq!(tasks.len(), 1);
+
+        // Execute the task: call to get future, then block_on
+        let task_fn = tasks.into_iter().next().unwrap();
+        let future = task_fn();
+        futures_executor::block_on(future);
+        assert!(executed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn background_tasks_inner_take_empties_queue() {
+        let inner = BackgroundTasksInner::new();
+
+        inner.push(Box::new(|| Box::pin(async {})));
+        inner.push(Box::new(|| Box::pin(async {})));
+
+        let tasks = inner.take();
+        assert_eq!(tasks.len(), 2);
+
+        // Taking again should be empty
+        let tasks = inner.take();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn background_tasks_add_async_task() {
+        let mut tasks = BackgroundTasks::new();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        tasks.add_task(move || async move {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let queued = tasks.take_tasks();
+        assert_eq!(queued.len(), 1);
+
+        // Execute the task
+        let task_fn = queued.into_iter().next().unwrap();
+        futures_executor::block_on(task_fn());
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn background_tasks_add_sync_task() {
+        let mut tasks = BackgroundTasks::new();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        tasks.add_sync_task(move || {
+            counter_clone.fetch_add(10, Ordering::SeqCst);
+        });
+
+        let queued = tasks.take_tasks();
+        assert_eq!(queued.len(), 1);
+
+        let task_fn = queued.into_iter().next().unwrap();
+        futures_executor::block_on(task_fn());
+        assert_eq!(counter.load(Ordering::SeqCst), 10);
+    }
+
+    #[test]
+    fn background_tasks_multiple_tasks_execute_in_order() {
+        let mut tasks = BackgroundTasks::new();
+
+        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let order1 = order.clone();
+        let order2 = order.clone();
+        let order3 = order.clone();
+
+        tasks.add_task(move || async move {
+            order1.lock().push(1);
+        });
+        tasks.add_task(move || async move {
+            order2.lock().push(2);
+        });
+        tasks.add_task(move || async move {
+            order3.lock().push(3);
+        });
+
+        let queued = tasks.take_tasks();
+        assert_eq!(queued.len(), 3);
+
+        // Execute tasks in order
+        for task_fn in queued {
+            futures_executor::block_on(task_fn());
+        }
+
+        assert_eq!(*order.lock(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn background_tasks_from_request_creates_new() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/");
+
+        let tasks = futures_executor::block_on(BackgroundTasks::from_request(&ctx, &mut req))
+            .expect("extraction should succeed");
+
+        // Should be empty initially
+        let inner_tasks = tasks.into_inner().take();
+        assert!(inner_tasks.is_empty());
+    }
+
+    #[test]
+    fn background_tasks_from_request_shares_inner() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/");
+
+        // First extraction creates inner
+        let mut tasks1 = futures_executor::block_on(BackgroundTasks::from_request(&ctx, &mut req))
+            .expect("extraction should succeed");
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+        tasks1.add_task(move || async move {
+            counter_clone.store(42, Ordering::SeqCst);
+        });
+
+        // Second extraction should get the same inner
+        let tasks2 = futures_executor::block_on(BackgroundTasks::from_request(&ctx, &mut req))
+            .expect("extraction should succeed");
+
+        // Inner should have the task added by tasks1
+        let queued = tasks2.into_inner().take();
+        assert_eq!(queued.len(), 1);
+
+        // Execute and verify
+        let task_fn = queued.into_iter().next().unwrap();
+        futures_executor::block_on(task_fn());
+        assert_eq!(counter.load(Ordering::SeqCst), 42);
+    }
+
+    #[test]
+    fn background_tasks_debug_shows_task_count() {
+        let mut tasks = BackgroundTasks::new();
+
+        let debug_empty = format!("{:?}", tasks);
+        assert!(debug_empty.contains("task_count"));
+        assert!(debug_empty.contains("BackgroundTasks"));
+
+        tasks.add_task(|| async {});
+        tasks.add_task(|| async {});
+
+        let debug_with_tasks = format!("{:?}", tasks);
+        assert!(debug_with_tasks.contains("task_count"));
+    }
+
+    #[test]
+    fn background_tasks_inner_thread_safe() {
+        let inner = BackgroundTasksInner::new();
+        let inner_clone = inner.clone();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter1 = counter.clone();
+        let counter2 = counter.clone();
+
+        // Push from two "threads" (simulated via sequential calls)
+        inner.push(Box::new(move || {
+            Box::pin(async move {
+                counter1.fetch_add(1, Ordering::SeqCst);
+            })
+        }));
+        inner_clone.push(Box::new(move || {
+            Box::pin(async move {
+                counter2.fetch_add(10, Ordering::SeqCst);
+            })
+        }));
+
+        // Both tasks should be in the queue
+        let tasks = inner.take();
+        assert_eq!(tasks.len(), 2);
+
+        for task_fn in tasks {
+            futures_executor::block_on(task_fn());
+        }
+
+        assert_eq!(counter.load(Ordering::SeqCst), 11);
+    }
+
+    #[test]
+    fn background_tasks_into_inner_conversion() {
+        let mut tasks = BackgroundTasks::new();
+
+        tasks.add_task(|| async {});
+        tasks.add_task(|| async {});
+
+        let inner = tasks.into_inner();
+        let queued = inner.take();
+        assert_eq!(queued.len(), 2);
+    }
+
+    #[test]
+    fn background_tasks_is_empty_and_len() {
+        let mut tasks = BackgroundTasks::new();
+
+        assert!(tasks.is_empty());
+        assert_eq!(tasks.len(), 0);
+
+        tasks.add_task(|| async {});
+        assert!(!tasks.is_empty());
+        assert_eq!(tasks.len(), 1);
+
+        tasks.add_task(|| async {});
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn background_tasks_inner_len_and_is_empty() {
+        let inner = BackgroundTasksInner::new();
+
+        assert!(inner.is_empty());
+        assert_eq!(inner.len(), 0);
+
+        inner.push(Box::new(|| Box::pin(async {})));
+        assert!(!inner.is_empty());
+        assert_eq!(inner.len(), 1);
+
+        inner.push(Box::new(|| Box::pin(async {})));
+        assert_eq!(inner.len(), 2);
+
+        // Take empties it
+        let _ = inner.take();
+        assert!(inner.is_empty());
+        assert_eq!(inner.len(), 0);
+    }
+}
+
 // ============================================================================
 // Header Extractor
 // ============================================================================
