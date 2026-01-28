@@ -40,6 +40,107 @@ pub enum Converter {
     Path,
 }
 
+/// A type-converted path parameter value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamValue {
+    /// String value (from `{param}` or `{param:str}`).
+    Str(String),
+    /// Integer value (from `{param:int}`).
+    Int(i64),
+    /// Float value (from `{param:float}`).
+    Float(f64),
+    /// UUID value (from `{param:uuid}`).
+    Uuid(String),
+    /// Path value including slashes (from `{*param}` or `{param:path}`).
+    Path(String),
+}
+
+impl ParamValue {
+    /// Get as string reference. Works for all variants.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Str(s) | Self::Uuid(s) | Self::Path(s) => s,
+            Self::Int(_) | Self::Float(_) => {
+                // For numeric types, this isn't ideal but maintains API consistency
+                // Users should use as_int() or as_float() for those types
+                ""
+            }
+        }
+    }
+
+    /// Get as i64 if this is an Int variant.
+    #[must_use]
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Int(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Get as f64 if this is a Float variant.
+    #[must_use]
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Self::Float(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Get the raw string for Str, Uuid, or Path variants.
+    #[must_use]
+    pub fn into_string(self) -> Option<String> {
+        match self {
+            Self::Str(s) | Self::Uuid(s) | Self::Path(s) => Some(s),
+            Self::Int(_) | Self::Float(_) => None,
+        }
+    }
+}
+
+/// Error type for parameter conversion failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversionError {
+    /// Failed to parse as integer.
+    InvalidInt {
+        /// The value that failed to parse.
+        value: String,
+        /// The parameter name.
+        param: String,
+    },
+    /// Failed to parse as float.
+    InvalidFloat {
+        /// The value that failed to parse.
+        value: String,
+        /// The parameter name.
+        param: String,
+    },
+    /// Failed to parse as UUID.
+    InvalidUuid {
+        /// The value that failed to parse.
+        value: String,
+        /// The parameter name.
+        param: String,
+    },
+}
+
+impl fmt::Display for ConversionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInt { value, param } => {
+                write!(f, "path parameter '{param}': '{value}' is not a valid integer")
+            }
+            Self::InvalidFloat { value, param } => {
+                write!(f, "path parameter '{param}': '{value}' is not a valid float")
+            }
+            Self::InvalidUuid { value, param } => {
+                write!(f, "path parameter '{param}': '{value}' is not a valid UUID")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConversionError {}
+
 impl Converter {
     /// Check if a value matches this converter.
     #[must_use]
@@ -50,6 +151,52 @@ impl Converter {
             Self::Float => value.parse::<f64>().is_ok(),
             Self::Uuid => is_uuid(value),
             Self::Path => true,
+        }
+    }
+
+    /// Convert a string value to the appropriate typed value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ConversionError` if the value cannot be parsed as the expected type.
+    pub fn convert(&self, value: &str, param_name: &str) -> Result<ParamValue, ConversionError> {
+        match self {
+            Self::Str => Ok(ParamValue::Str(value.to_string())),
+            Self::Int => value.parse::<i64>().map(ParamValue::Int).map_err(|_| {
+                ConversionError::InvalidInt {
+                    value: value.to_string(),
+                    param: param_name.to_string(),
+                }
+            }),
+            Self::Float => value.parse::<f64>().map(ParamValue::Float).map_err(|_| {
+                ConversionError::InvalidFloat {
+                    value: value.to_string(),
+                    param: param_name.to_string(),
+                }
+            }),
+            Self::Uuid => {
+                if is_uuid(value) {
+                    Ok(ParamValue::Uuid(value.to_string()))
+                } else {
+                    Err(ConversionError::InvalidUuid {
+                        value: value.to_string(),
+                        param: param_name.to_string(),
+                    })
+                }
+            }
+            Self::Path => Ok(ParamValue::Path(value.to_string())),
+        }
+    }
+
+    /// Returns the type name for error messages.
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Str => "string",
+            Self::Int => "integer",
+            Self::Float => "float",
+            Self::Uuid => "UUID",
+            Self::Path => "path",
         }
     }
 }
@@ -559,7 +706,9 @@ fn validate_path_segments(
             if idx + 1 != segments.len() {
                 return Err(InvalidRouteError::new(
                     path,
-                    format!("wildcard '{{*{name}}}' or '{{{name}:path}}' must be the final segment"),
+                    format!(
+                        "wildcard '{{*{name}}}' or '{{{name}:path}}' must be the final segment"
+                    ),
                 ));
             }
         }
@@ -1599,9 +1748,13 @@ mod tests {
     #[test]
     fn wildcard_asterisk_captures_multiple_segments() {
         let mut router = Router::new();
-        router.add(route(Method::Get, "/files/{*filepath}")).unwrap();
+        router
+            .add(route(Method::Get, "/files/{*filepath}"))
+            .unwrap();
 
-        let m = router.match_path("/files/css/styles/main.css", Method::Get).unwrap();
+        let m = router
+            .match_path("/files/css/styles/main.css", Method::Get)
+            .unwrap();
         assert_eq!(m.params[0], ("filepath", "css/styles/main.css"));
     }
 
@@ -1610,7 +1763,9 @@ mod tests {
         let mut router = Router::new();
         router.add(route(Method::Get, "/api/v1/{*rest}")).unwrap();
 
-        let m = router.match_path("/api/v1/users/123/posts", Method::Get).unwrap();
+        let m = router
+            .match_path("/api/v1/users/123/posts", Method::Get)
+            .unwrap();
         assert_eq!(m.params[0], ("rest", "users/123/posts"));
     }
 
@@ -1642,8 +1797,14 @@ mod tests {
 
         match (&segments_asterisk[1], &segments_converter[1]) {
             (
-                PathSegment::Param { name: n1, converter: c1 },
-                PathSegment::Param { name: n2, converter: c2 },
+                PathSegment::Param {
+                    name: n1,
+                    converter: c1,
+                },
+                PathSegment::Param {
+                    name: n2,
+                    converter: c2,
+                },
             ) => {
                 assert_eq!(*n1, "filepath");
                 assert_eq!(*n2, "filepath");
@@ -1671,19 +1832,27 @@ mod tests {
         let m = router.match_path("/dashboard", Method::Get).unwrap();
         assert_eq!(m.params[0], ("route", "dashboard"));
 
-        let m = router.match_path("/users/123/profile", Method::Get).unwrap();
+        let m = router
+            .match_path("/users/123/profile", Method::Get)
+            .unwrap();
         assert_eq!(m.params[0], ("route", "users/123/profile"));
     }
 
     #[test]
     fn wildcard_asterisk_file_serving() {
         let mut router = Router::new();
-        router.add(route(Method::Get, "/static/{*filepath}")).unwrap();
+        router
+            .add(route(Method::Get, "/static/{*filepath}"))
+            .unwrap();
 
-        let m = router.match_path("/static/js/app.bundle.js", Method::Get).unwrap();
+        let m = router
+            .match_path("/static/js/app.bundle.js", Method::Get)
+            .unwrap();
         assert_eq!(m.params[0], ("filepath", "js/app.bundle.js"));
 
-        let m = router.match_path("/static/images/logo.png", Method::Get).unwrap();
+        let m = router
+            .match_path("/static/images/logo.png", Method::Get)
+            .unwrap();
         assert_eq!(m.params[0], ("filepath", "images/logo.png"));
     }
 

@@ -2,7 +2,7 @@
 //!
 //! This crate provides the following macros:
 //!
-//! - Route macros: `#[get]`, `#[post]`, `#[put]`, `#[delete]`, `#[patch]`
+//! - Route macros: `#[get]`, `#[post]`, `#[put]`, `#[delete]`, `#[patch]`, `#[head]`, `#[options]`
 //! - `#[derive(Validate)]` for compile-time validation
 //! - `#[derive(JsonSchema)]` for OpenAPI schema generation
 //!
@@ -61,6 +61,43 @@ pub fn delete(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn patch(attr: TokenStream, item: TokenStream) -> TokenStream {
     route::route_impl("Patch", attr, item)
+}
+
+/// Mark a function as a HEAD handler.
+///
+/// HEAD requests are identical to GET but return only headers, not body.
+/// Useful for checking resource existence or metadata without full content.
+///
+/// # Example
+///
+/// ```ignore
+/// #[head("/items/{id}")]
+/// async fn head_item(id: Path<i64>) -> StatusCode {
+///     StatusCode::OK
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn head(attr: TokenStream, item: TokenStream) -> TokenStream {
+    route::route_impl("Head", attr, item)
+}
+
+/// Mark a function as an OPTIONS handler.
+///
+/// OPTIONS requests return allowed methods and CORS headers for a resource.
+///
+/// # Example
+///
+/// ```ignore
+/// #[options("/items")]
+/// async fn options_items() -> Response {
+///     Response::builder()
+///         .header("Allow", "GET, POST, OPTIONS")
+///         .body(())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn options(attr: TokenStream, item: TokenStream) -> TokenStream {
+    route::route_impl("Options", attr, item)
 }
 
 /// Derive validation for a struct.

@@ -2,6 +2,7 @@
 
 use crate::trie::Route;
 use fastapi_core::Method;
+use std::num::{ParseFloatError, ParseIntError};
 
 /// A matched route with extracted parameters.
 #[derive(Debug)]
@@ -13,7 +14,7 @@ pub struct RouteMatch<'a> {
 }
 
 impl<'a> RouteMatch<'a> {
-    /// Get a parameter value by name.
+    /// Get a parameter value by name as a string slice.
     #[must_use]
     pub fn get_param(&self, name: &str) -> Option<&str> {
         self.params
@@ -21,6 +22,124 @@ impl<'a> RouteMatch<'a> {
             .find(|(n, _)| *n == name)
             .map(|(_, v)| *v)
     }
+
+    /// Get a parameter value parsed as an i64 integer.
+    ///
+    /// Returns `None` if the parameter doesn't exist.
+    /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as i64.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Route: /users/{id:int}
+    /// if let Some(Ok(id)) = route_match.get_param_int("id") {
+    ///     println!("User ID: {id}");
+    /// }
+    /// ```
+    #[must_use]
+    pub fn get_param_int(&self, name: &str) -> Option<Result<i64, ParseIntError>> {
+        self.get_param(name).map(|v| v.parse())
+    }
+
+    /// Get a parameter value parsed as an i32 integer.
+    ///
+    /// Returns `None` if the parameter doesn't exist.
+    /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as i32.
+    #[must_use]
+    pub fn get_param_i32(&self, name: &str) -> Option<Result<i32, ParseIntError>> {
+        self.get_param(name).map(|v| v.parse())
+    }
+
+    /// Get a parameter value parsed as a u64 unsigned integer.
+    ///
+    /// Returns `None` if the parameter doesn't exist.
+    /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as u64.
+    #[must_use]
+    pub fn get_param_u64(&self, name: &str) -> Option<Result<u64, ParseIntError>> {
+        self.get_param(name).map(|v| v.parse())
+    }
+
+    /// Get a parameter value parsed as a u32 unsigned integer.
+    ///
+    /// Returns `None` if the parameter doesn't exist.
+    /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as u32.
+    #[must_use]
+    pub fn get_param_u32(&self, name: &str) -> Option<Result<u32, ParseIntError>> {
+        self.get_param(name).map(|v| v.parse())
+    }
+
+    /// Get a parameter value parsed as an f64 float.
+    ///
+    /// Returns `None` if the parameter doesn't exist.
+    /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as f64.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Route: /values/{val:float}
+    /// if let Some(Ok(val)) = route_match.get_param_float("val") {
+    ///     println!("Value: {val}");
+    /// }
+    /// ```
+    #[must_use]
+    pub fn get_param_float(&self, name: &str) -> Option<Result<f64, ParseFloatError>> {
+        self.get_param(name).map(|v| v.parse())
+    }
+
+    /// Get a parameter value parsed as an f32 float.
+    ///
+    /// Returns `None` if the parameter doesn't exist.
+    /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as f32.
+    #[must_use]
+    pub fn get_param_f32(&self, name: &str) -> Option<Result<f32, ParseFloatError>> {
+        self.get_param(name).map(|v| v.parse())
+    }
+
+    /// Check if a parameter value is a valid UUID format.
+    ///
+    /// Returns `None` if the parameter doesn't exist.
+    /// Returns `Some(true)` if the parameter is a valid UUID.
+    /// Returns `Some(false)` if the parameter exists but isn't a valid UUID.
+    #[must_use]
+    pub fn is_param_uuid(&self, name: &str) -> Option<bool> {
+        self.get_param(name).map(is_valid_uuid)
+    }
+
+    /// Get parameter count.
+    #[must_use]
+    pub fn param_count(&self) -> usize {
+        self.params.len()
+    }
+
+    /// Check if there are no parameters.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+
+    /// Iterate over all parameters as (name, value) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.params.iter().map(|(n, v)| (*n, *v))
+    }
+}
+
+/// Check if a string is a valid UUID format (8-4-4-4-12 hex digits).
+fn is_valid_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    let parts: Vec<_> = s.split('-').collect();
+    if parts.len() != 5 {
+        return false;
+    }
+    parts[0].len() == 8
+        && parts[1].len() == 4
+        && parts[2].len() == 4
+        && parts[3].len() == 4
+        && parts[4].len() == 12
+        && parts
+            .iter()
+            .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 /// Result of attempting to locate a route by path and method.

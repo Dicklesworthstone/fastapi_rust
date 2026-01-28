@@ -1970,6 +1970,384 @@ impl Middleware for SecurityHeaders {
     }
 }
 
+// ============================================================================
+// CSRF Protection Middleware
+// ============================================================================
+
+/// CSRF token stored in request extensions.
+///
+/// Middleware stores this after generating or validating a token,
+/// allowing handlers to access the current CSRF token.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CsrfToken(pub String);
+
+impl CsrfToken {
+    /// Creates a new CSRF token with the given value.
+    #[must_use]
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// Returns the token as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Generates a new unique CSRF token.
+    ///
+    /// Uses timestamp + counter + thread-id for uniqueness.
+    /// For production use, consider replacing with a cryptographically
+    /// secure random source.
+    #[must_use]
+    pub fn generate() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let thread_id = std::thread::current().id();
+
+        // Create a longer, more unique token
+        // Format: timestamp_hex-counter_hex-thread_hash
+        let thread_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            thread_id.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        Self(format!("{timestamp:016x}-{counter:08x}-{thread_hash:016x}"))
+    }
+}
+
+impl std::fmt::Display for CsrfToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for CsrfToken {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// CSRF protection mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CsrfMode {
+    /// Double-submit cookie pattern: token in cookie must match token in header.
+    /// This is the default and most common pattern.
+    #[default]
+    DoubleSubmit,
+    /// Require token in header only (for APIs where cookies are not used).
+    HeaderOnly,
+}
+
+/// Configuration for CSRF protection middleware.
+#[derive(Debug, Clone)]
+pub struct CsrfConfig {
+    /// Cookie name for CSRF token (default: "csrf_token").
+    pub cookie_name: String,
+    /// Header name for CSRF token (default: "x-csrf-token").
+    pub header_name: String,
+    /// CSRF protection mode (default: DoubleSubmit).
+    pub mode: CsrfMode,
+    /// Whether to rotate token on each request (default: false).
+    pub rotate_token: bool,
+    /// Whether in production mode (affects Secure cookie flag).
+    pub production: bool,
+    /// Custom error message for CSRF failures.
+    pub error_message: Option<String>,
+}
+
+impl Default for CsrfConfig {
+    fn default() -> Self {
+        Self {
+            cookie_name: "csrf_token".to_string(),
+            header_name: "x-csrf-token".to_string(),
+            mode: CsrfMode::DoubleSubmit,
+            rotate_token: false,
+            production: true,
+            error_message: None,
+        }
+    }
+}
+
+impl CsrfConfig {
+    /// Creates a new configuration with defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the cookie name for CSRF token.
+    #[must_use]
+    pub fn cookie_name(mut self, name: impl Into<String>) -> Self {
+        self.cookie_name = name.into();
+        self
+    }
+
+    /// Sets the header name for CSRF token.
+    #[must_use]
+    pub fn header_name(mut self, name: impl Into<String>) -> Self {
+        self.header_name = name.into();
+        self
+    }
+
+    /// Sets the CSRF protection mode.
+    #[must_use]
+    pub fn mode(mut self, mode: CsrfMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Enables token rotation on each request.
+    #[must_use]
+    pub fn rotate_token(mut self, rotate: bool) -> Self {
+        self.rotate_token = rotate;
+        self
+    }
+
+    /// Sets production mode (affects Secure cookie flag).
+    #[must_use]
+    pub fn production(mut self, production: bool) -> Self {
+        self.production = production;
+        self
+    }
+
+    /// Sets a custom error message for CSRF failures.
+    #[must_use]
+    pub fn error_message(mut self, message: impl Into<String>) -> Self {
+        self.error_message = Some(message.into());
+        self
+    }
+}
+
+/// CSRF protection middleware.
+///
+/// Implements protection against Cross-Site Request Forgery attacks using
+/// the double-submit cookie pattern by default.
+///
+/// # How It Works
+///
+/// 1. For safe methods (GET, HEAD, OPTIONS, TRACE): generates a CSRF token
+///    and sets it in a cookie if not present.
+/// 2. For state-changing methods (POST, PUT, DELETE, PATCH): validates that
+///    the token in the header matches the token in the cookie.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::{CsrfMiddleware, CsrfConfig};
+///
+/// let mut stack = MiddlewareStack::new();
+/// stack.push(CsrfMiddleware::new());
+///
+/// // Or with custom configuration:
+/// let csrf = CsrfMiddleware::with_config(
+///     CsrfConfig::new()
+///         .header_name("X-XSRF-Token")
+///         .cookie_name("XSRF-TOKEN")
+///         .production(false)
+/// );
+/// stack.push(csrf);
+/// ```
+#[derive(Debug, Clone)]
+pub struct CsrfMiddleware {
+    config: CsrfConfig,
+}
+
+impl Default for CsrfMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CsrfMiddleware {
+    /// Creates a new CSRF middleware with default configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: CsrfConfig::default(),
+        }
+    }
+
+    /// Creates a new CSRF middleware with the given configuration.
+    #[must_use]
+    pub fn with_config(config: CsrfConfig) -> Self {
+        Self { config }
+    }
+
+    /// Checks if the HTTP method is safe (does not modify state).
+    fn is_safe_method(method: crate::request::Method) -> bool {
+        matches!(
+            method,
+            crate::request::Method::Get
+                | crate::request::Method::Head
+                | crate::request::Method::Options
+                | crate::request::Method::Trace
+        )
+    }
+
+    /// Extracts the CSRF token from the cookie header.
+    fn get_cookie_token(&self, req: &Request) -> Option<String> {
+        let cookie_header = req.headers().get("cookie")?;
+        let cookie_str = std::str::from_utf8(cookie_header).ok()?;
+
+        // Parse cookie header: "name1=value1; name2=value2"
+        for part in cookie_str.split(';') {
+            let part = part.trim();
+            if let Some((name, value)) = part.split_once('=') {
+                if name.trim() == self.config.cookie_name {
+                    return Some(value.trim().to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Extracts the CSRF token from the request header.
+    fn get_header_token(&self, req: &Request) -> Option<String> {
+        let header_value = req.headers().get(&self.config.header_name)?;
+        std::str::from_utf8(header_value)
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    /// Validates the CSRF token for state-changing requests.
+    fn validate_token(&self, req: &Request) -> Result<Option<CsrfToken>, Response> {
+        let header_token = self.get_header_token(req);
+
+        match self.config.mode {
+            CsrfMode::DoubleSubmit => {
+                let cookie_token = self.get_cookie_token(req);
+
+                match (header_token, cookie_token) {
+                    (Some(header), Some(cookie)) if header == cookie && !header.is_empty() => {
+                        Ok(Some(CsrfToken::new(header)))
+                    }
+                    (None, _) | (_, None) => {
+                        Err(self.csrf_error_response("CSRF token missing"))
+                    }
+                    _ => {
+                        Err(self.csrf_error_response("CSRF token mismatch"))
+                    }
+                }
+            }
+            CsrfMode::HeaderOnly => {
+                match header_token {
+                    Some(token) if !token.is_empty() => Ok(Some(CsrfToken::new(token))),
+                    _ => Err(self.csrf_error_response("CSRF token missing in header")),
+                }
+            }
+        }
+    }
+
+    /// Creates a 403 Forbidden response for CSRF failures.
+    fn csrf_error_response(&self, default_message: &str) -> Response {
+        let message = self.config.error_message.as_deref().unwrap_or(default_message);
+
+        // Create a FastAPI-compatible error response
+        let body = format!(
+            r#"{{"detail":[{{"type":"csrf_error","loc":["header","{}"],"msg":"{}"}}]}}"#,
+            self.config.header_name, message
+        );
+
+        Response::with_status(crate::response::StatusCode::FORBIDDEN)
+            .header("content-type", b"application/json".to_vec())
+            .body(crate::response::ResponseBody::Bytes(body.into_bytes()))
+    }
+
+    /// Creates the Set-Cookie header value for a CSRF token.
+    fn make_set_cookie_header_value(cookie_name: &str, token: &str, production: bool) -> Vec<u8> {
+        let mut cookie = format!(
+            "{}={}; Path=/; SameSite=Strict",
+            cookie_name, token
+        );
+
+        if production {
+            cookie.push_str("; Secure");
+        }
+
+        // Note: HttpOnly is NOT set - CSRF cookies must be readable by JavaScript
+
+        cookie.into_bytes()
+    }
+}
+
+impl Middleware for CsrfMiddleware {
+    fn before<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> BoxFuture<'a, ControlFlow> {
+        Box::pin(async move {
+            if Self::is_safe_method(req.method()) {
+                // Safe methods: generate token if not present
+                let existing_token = self.get_cookie_token(req);
+                let token = existing_token
+                    .map(CsrfToken::new)
+                    .unwrap_or_else(CsrfToken::generate);
+                req.insert_extension(token);
+                ControlFlow::Continue
+            } else {
+                // State-changing methods: validate token
+                match self.validate_token(req) {
+                    Ok(Some(token)) => {
+                        req.insert_extension(token);
+                        ControlFlow::Continue
+                    }
+                    Ok(None) => ControlFlow::Continue,
+                    Err(response) => ControlFlow::Break(response),
+                }
+            }
+        })
+    }
+
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a Request,
+        response: Response,
+    ) -> BoxFuture<'a, Response> {
+        let config = self.config.clone();
+        let is_safe = Self::is_safe_method(req.method());
+        let existing_cookie_token = self.get_cookie_token(req);
+        let token = req.get_extension::<CsrfToken>().cloned();
+
+        Box::pin(async move {
+            // Set cookie for safe methods if:
+            // 1. No cookie exists yet, or
+            // 2. Token rotation is enabled
+            if is_safe {
+                let should_set_cookie = existing_cookie_token.is_none() || config.rotate_token;
+
+                if should_set_cookie {
+                    if let Some(token) = token {
+                        let cookie_value = Self::make_set_cookie_header_value(
+                            &config.cookie_name,
+                            token.as_str(),
+                            config.production,
+                        );
+                        return response.header("set-cookie", cookie_value);
+                    }
+                }
+            }
+            response
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "CSRF"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3446,5 +3824,404 @@ mod tests {
         assert!(config.content_security_policy.is_none());
         assert!(config.hsts.is_none());
         assert!(config.permissions_policy.is_none());
+    }
+
+    // =========================================================================
+    // CSRF Middleware Tests
+    // =========================================================================
+
+    #[test]
+    fn csrf_token_generate_produces_unique_tokens() {
+        let token1 = CsrfToken::generate();
+        let token2 = CsrfToken::generate();
+        assert_ne!(token1, token2);
+        assert!(!token1.as_str().is_empty());
+        assert!(!token2.as_str().is_empty());
+    }
+
+    #[test]
+    fn csrf_token_display() {
+        let token = CsrfToken::new("test-token-123");
+        assert_eq!(format!("{}", token), "test-token-123");
+    }
+
+    #[test]
+    fn csrf_config_defaults() {
+        let config = CsrfConfig::default();
+        assert_eq!(config.cookie_name, "csrf_token");
+        assert_eq!(config.header_name, "x-csrf-token");
+        assert_eq!(config.mode, CsrfMode::DoubleSubmit);
+        assert!(!config.rotate_token);
+        assert!(config.production);
+        assert!(config.error_message.is_none());
+    }
+
+    #[test]
+    fn csrf_config_builder() {
+        let config = CsrfConfig::new()
+            .cookie_name("XSRF-TOKEN")
+            .header_name("X-XSRF-Token")
+            .mode(CsrfMode::HeaderOnly)
+            .rotate_token(true)
+            .production(false)
+            .error_message("Custom CSRF error");
+
+        assert_eq!(config.cookie_name, "XSRF-TOKEN");
+        assert_eq!(config.header_name, "X-XSRF-Token");
+        assert_eq!(config.mode, CsrfMode::HeaderOnly);
+        assert!(config.rotate_token);
+        assert!(!config.production);
+        assert_eq!(config.error_message, Some("Custom CSRF error".to_string()));
+    }
+
+    #[test]
+    fn csrf_middleware_allows_get_without_token() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_continue());
+        // Token should be generated and stored
+        assert!(req.get_extension::<CsrfToken>().is_some());
+    }
+
+    #[test]
+    fn csrf_middleware_allows_head_without_token() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Head, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_continue());
+    }
+
+    #[test]
+    fn csrf_middleware_allows_options_without_token() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Options, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_continue());
+    }
+
+    #[test]
+    fn csrf_middleware_blocks_post_without_token() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break());
+
+        if let ControlFlow::Break(response) = result {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[test]
+    fn csrf_middleware_blocks_put_without_token() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Put, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break());
+    }
+
+    #[test]
+    fn csrf_middleware_blocks_delete_without_token() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Delete, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break());
+    }
+
+    #[test]
+    fn csrf_middleware_blocks_patch_without_token() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Patch, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break());
+    }
+
+    #[test]
+    fn csrf_middleware_allows_post_with_matching_tokens() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        // Set matching cookie and header
+        let token = "valid-csrf-token-12345";
+        req.headers_mut()
+            .insert("cookie", format!("csrf_token={}", token).into_bytes());
+        req.headers_mut()
+            .insert("x-csrf-token", token.as_bytes().to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_continue());
+
+        // Token should be stored in extensions
+        let stored_token = req.get_extension::<CsrfToken>().unwrap();
+        assert_eq!(stored_token.as_str(), token);
+    }
+
+    #[test]
+    fn csrf_middleware_blocks_post_with_mismatched_tokens() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        // Set mismatched cookie and header
+        req.headers_mut()
+            .insert("cookie", b"csrf_token=token-in-cookie".to_vec());
+        req.headers_mut()
+            .insert("x-csrf-token", b"different-token".to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break());
+
+        if let ControlFlow::Break(response) = result {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[test]
+    fn csrf_middleware_blocks_post_with_header_only_in_double_submit_mode() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        // Only header, no cookie
+        req.headers_mut()
+            .insert("x-csrf-token", b"some-token".to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break());
+    }
+
+    #[test]
+    fn csrf_middleware_blocks_post_with_cookie_only_in_double_submit_mode() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        // Only cookie, no header
+        req.headers_mut()
+            .insert("cookie", b"csrf_token=some-token".to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break());
+    }
+
+    #[test]
+    fn csrf_middleware_header_only_mode_accepts_header_token() {
+        let csrf = CsrfMiddleware::with_config(CsrfConfig::new().mode(CsrfMode::HeaderOnly));
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        req.headers_mut()
+            .insert("x-csrf-token", b"valid-token".to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_continue());
+    }
+
+    #[test]
+    fn csrf_middleware_header_only_mode_rejects_empty_header() {
+        let csrf = CsrfMiddleware::with_config(CsrfConfig::new().mode(CsrfMode::HeaderOnly));
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        req.headers_mut()
+            .insert("x-csrf-token", b"".to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break());
+    }
+
+    #[test]
+    fn csrf_middleware_sets_cookie_on_get() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/");
+
+        // Run before to generate token
+        let _ = futures_executor::block_on(csrf.before(&ctx, &mut req));
+
+        // Run after to set cookie
+        let response = Response::ok();
+        let result = futures_executor::block_on(csrf.after(&ctx, &req, response));
+
+        // Check Set-Cookie header
+        let cookie_header = result.headers().get("set-cookie");
+        assert!(cookie_header.is_some());
+
+        let cookie_value = std::str::from_utf8(cookie_header.unwrap()).unwrap();
+        assert!(cookie_value.starts_with("csrf_token="));
+        assert!(cookie_value.contains("SameSite=Strict"));
+        assert!(cookie_value.contains("Secure")); // Production mode
+    }
+
+    #[test]
+    fn csrf_middleware_no_secure_in_dev_mode() {
+        let csrf = CsrfMiddleware::with_config(CsrfConfig::new().production(false));
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/");
+
+        let _ = futures_executor::block_on(csrf.before(&ctx, &mut req));
+
+        let response = Response::ok();
+        let result = futures_executor::block_on(csrf.after(&ctx, &req, response));
+
+        let cookie_header = result.headers().get("set-cookie");
+        let cookie_value = std::str::from_utf8(cookie_header.unwrap()).unwrap();
+        assert!(!cookie_value.contains("Secure")); // No Secure in dev mode
+    }
+
+    #[test]
+    fn csrf_middleware_does_not_set_cookie_if_already_present() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/");
+
+        // Cookie already present
+        req.headers_mut()
+            .insert("cookie", b"csrf_token=existing-token".to_vec());
+
+        let _ = futures_executor::block_on(csrf.before(&ctx, &mut req));
+
+        let response = Response::ok();
+        let result = futures_executor::block_on(csrf.after(&ctx, &req, response));
+
+        // Should not set a new cookie
+        assert!(result.headers().get("set-cookie").is_none());
+    }
+
+    #[test]
+    fn csrf_middleware_rotates_token_when_configured() {
+        let csrf = CsrfMiddleware::with_config(CsrfConfig::new().rotate_token(true));
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/");
+
+        // Cookie already present
+        req.headers_mut()
+            .insert("cookie", b"csrf_token=old-token".to_vec());
+
+        let _ = futures_executor::block_on(csrf.before(&ctx, &mut req));
+
+        let response = Response::ok();
+        let result = futures_executor::block_on(csrf.after(&ctx, &req, response));
+
+        // Should set a new cookie even though one exists
+        assert!(result.headers().get("set-cookie").is_some());
+    }
+
+    #[test]
+    fn csrf_middleware_custom_header_name() {
+        let csrf = CsrfMiddleware::with_config(
+            CsrfConfig::new()
+                .header_name("X-XSRF-Token")
+                .cookie_name("XSRF-TOKEN"),
+        );
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        let token = "custom-token-value";
+        req.headers_mut()
+            .insert("cookie", format!("XSRF-TOKEN={}", token).into_bytes());
+        req.headers_mut()
+            .insert("x-xsrf-token", token.as_bytes().to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_continue());
+    }
+
+    #[test]
+    fn csrf_middleware_error_response_is_json() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+
+        if let ControlFlow::Break(response) = result {
+            let content_type = response.headers().get("content-type");
+            assert_eq!(content_type, Some(b"application/json".as_slice()));
+
+            // Check body contains proper error structure
+            if let ResponseBody::Bytes(body) = response.body_ref() {
+                let body_str = std::str::from_utf8(body).unwrap();
+                assert!(body_str.contains("csrf_error"));
+                assert!(body_str.contains("x-csrf-token"));
+            } else {
+                panic!("Expected Bytes body");
+            }
+        } else {
+            panic!("Expected Break");
+        }
+    }
+
+    #[test]
+    fn csrf_middleware_custom_error_message() {
+        let csrf = CsrfMiddleware::with_config(
+            CsrfConfig::new().error_message("Access denied: invalid security token"),
+        );
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+
+        if let ControlFlow::Break(response) = result {
+            if let ResponseBody::Bytes(body) = response.body_ref() {
+                let body_str = std::str::from_utf8(body).unwrap();
+                assert!(body_str.contains("Access denied: invalid security token"));
+            }
+        }
+    }
+
+    #[test]
+    fn csrf_middleware_name() {
+        let csrf = CsrfMiddleware::new();
+        assert_eq!(csrf.name(), "CSRF");
+    }
+
+    #[test]
+    fn csrf_middleware_parses_cookie_with_multiple_cookies() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        // Multiple cookies in the header
+        let token = "the-csrf-token";
+        req.headers_mut().insert(
+            "cookie",
+            format!("session=abc123; csrf_token={}; user=test", token).into_bytes(),
+        );
+        req.headers_mut()
+            .insert("x-csrf-token", token.as_bytes().to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_continue());
+    }
+
+    #[test]
+    fn csrf_middleware_handles_empty_token_value() {
+        let csrf = CsrfMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/");
+
+        // Empty token values
+        req.headers_mut()
+            .insert("cookie", b"csrf_token=".to_vec());
+        req.headers_mut().insert("x-csrf-token", b"".to_vec());
+
+        let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
+        assert!(result.is_break()); // Should reject empty tokens
     }
 }

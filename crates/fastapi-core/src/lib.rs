@@ -90,10 +90,11 @@ pub use extract::{
     UserAgent, XRequestId, constant_time_eq, constant_time_str_eq, snake_to_header_case,
 };
 pub use middleware::{
-    AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, Handler, Layer, Layered,
-    Middleware, MiddlewareStack, NoopMiddleware, OriginPattern, PathPrefixFilter, ReferrerPolicy,
-    RequestId, RequestIdConfig, RequestIdMiddleware, RequestResponseLogger, RequireHeader,
-    SecurityHeaders, SecurityHeadersConfig, XFrameOptions,
+    AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, CsrfConfig, CsrfMiddleware,
+    CsrfMode, CsrfToken, Handler, Layer, Layered, Middleware, MiddlewareStack, NoopMiddleware,
+    OriginPattern, PathPrefixFilter, ReferrerPolicy, RequestId, RequestIdConfig,
+    RequestIdMiddleware, RequestResponseLogger, RequireHeader, SecurityHeaders,
+    SecurityHeadersConfig, XFrameOptions,
 };
 pub use request::{Body, Headers, HttpVersion, Method, Request};
 pub use response::{
