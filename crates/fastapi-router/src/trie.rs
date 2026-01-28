@@ -1113,6 +1113,7 @@ impl Router {
                 request_body_content_type: route.request_body_content_type,
                 request_body_required: route.request_body_required,
                 security: route.security,
+                responses: route.responses,
                 handler: route.handler,
             };
 
