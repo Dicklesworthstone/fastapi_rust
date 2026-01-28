@@ -865,10 +865,10 @@ struct AllFieldsInvalid {
 #[test]
 fn test_all_fields_invalid_aggregation() {
     let invalid = AllFieldsInvalid {
-        name: "ab".to_string(),          // too short
+        name: "ab".to_string(),            // too short
         email: "not-an-email".to_string(), // invalid email
-        age: 10,                          // too young
-        website: "not-a-url".to_string(), // invalid url
+        age: 10,                           // too young
+        website: "not-a-url".to_string(),  // invalid url
     };
 
     let result = invalid.validate();
@@ -956,7 +956,10 @@ fn test_validation_errors_json_format() {
     assert!(!errors_array.is_empty(), "Should have at least one error");
 
     let first_error = &errors_array[0];
-    assert!(first_error.get("type").is_some(), "Should have 'type' field");
+    assert!(
+        first_error.get("type").is_some(),
+        "Should have 'type' field"
+    );
     assert!(first_error.get("loc").is_some(), "Should have 'loc' field");
     assert!(first_error.get("msg").is_some(), "Should have 'msg' field");
 }
@@ -1032,7 +1035,12 @@ fn test_optional_field_some_invalid() {
 
 fn validate_username(value: &str) -> Result<(), String> {
     // Username must start with a letter
-    if value.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+    if value
+        .chars()
+        .next()
+        .map(|c| c.is_alphabetic())
+        .unwrap_or(false)
+    {
         Ok(())
     } else {
         Err("Username must start with a letter".to_string())
@@ -1097,7 +1105,10 @@ fn test_real_world_multiple_issues() {
 
     let errors = result.unwrap_err();
     // Should have errors for all invalid fields
-    assert!(errors.len() >= 5, "Should have at least 5 validation errors");
+    assert!(
+        errors.len() >= 5,
+        "Should have at least 5 validation errors"
+    );
 }
 
 // ============================================================================

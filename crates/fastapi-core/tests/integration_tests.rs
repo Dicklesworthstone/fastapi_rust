@@ -92,18 +92,24 @@ fn test_fixture_setup_and_teardown() {
 fn test_app_test_client_integration() {
     // Build a simple app with closures
     let app = App::builder()
-        .route("/hello", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-            async { Response::ok().body(ResponseBody::Bytes(b"Hello, World!".to_vec())) }
-        })
-        .route("/user", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-            async {
+        .route(
+            "/hello",
+            Method::Get,
+            |_ctx: &RequestContext, _req: &mut Request| async {
+                Response::ok().body(ResponseBody::Bytes(b"Hello, World!".to_vec()))
+            },
+        )
+        .route(
+            "/user",
+            Method::Get,
+            |_ctx: &RequestContext, _req: &mut Request| async {
                 Response::json(&serde_json::json!({
                     "id": 42,
                     "name": "Test User"
                 }))
                 .unwrap()
-            }
-        })
+            },
+        )
         .build();
 
     // Create test client from Arc<App>
@@ -127,15 +133,17 @@ fn test_app_test_client_integration() {
 fn test_integration_test_with_fixtures() {
     let app = Arc::new(
         App::builder()
-            .route("/user", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-                async {
+            .route(
+                "/user",
+                Method::Get,
+                |_ctx: &RequestContext, _req: &mut Request| async {
                     Response::json(&serde_json::json!({
                         "id": 42,
                         "name": "Test User"
                     }))
                     .unwrap()
-                }
-            })
+                },
+            )
             .build(),
     );
 
@@ -161,15 +169,21 @@ fn test_full_request_lifecycle() {
     // Tests the complete flow: request -> routing -> handler -> response
     let app = Arc::new(
         App::builder()
-            .route("/hello", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-                async { Response::ok().body(ResponseBody::Bytes(b"Hello!".to_vec())) }
-            })
-            .route("/error", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-                async {
+            .route(
+                "/hello",
+                Method::Get,
+                |_ctx: &RequestContext, _req: &mut Request| async {
+                    Response::ok().body(ResponseBody::Bytes(b"Hello!".to_vec()))
+                },
+            )
+            .route(
+                "/error",
+                Method::Get,
+                |_ctx: &RequestContext, _req: &mut Request| async {
                     Response::with_status(StatusCode::BAD_REQUEST)
                         .body(ResponseBody::Bytes(b"Bad Request".to_vec()))
-                }
-            })
+                },
+            )
             .build(),
     );
 
@@ -198,12 +212,20 @@ fn test_full_request_lifecycle() {
 fn test_options_auto_handling() {
     let app = Arc::new(
         App::builder()
-            .route("/resource", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-                async { Response::ok().body(ResponseBody::Bytes(b"GET".to_vec())) }
-            })
-            .route("/resource", Method::Post, |_ctx: &RequestContext, _req: &mut Request| {
-                async { Response::ok().body(ResponseBody::Empty) }
-            })
+            .route(
+                "/resource",
+                Method::Get,
+                |_ctx: &RequestContext, _req: &mut Request| async {
+                    Response::ok().body(ResponseBody::Bytes(b"GET".to_vec()))
+                },
+            )
+            .route(
+                "/resource",
+                Method::Post,
+                |_ctx: &RequestContext, _req: &mut Request| async {
+                    Response::ok().body(ResponseBody::Empty)
+                },
+            )
             .build(),
     );
 
@@ -224,9 +246,13 @@ fn test_parallel_test_isolation() {
     // Verify that tests with seeds are deterministic
     let app = Arc::new(
         App::builder()
-            .route("/hello", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-                async { Response::ok().body(ResponseBody::Bytes(b"Hello!".to_vec())) }
-            })
+            .route(
+                "/hello",
+                Method::Get,
+                |_ctx: &RequestContext, _req: &mut Request| async {
+                    Response::ok().body(ResponseBody::Bytes(b"Hello!".to_vec()))
+                },
+            )
             .build(),
     );
 
@@ -250,9 +276,13 @@ fn test_parallel_test_isolation() {
 fn test_state_reset_between_tests() {
     let app = Arc::new(
         App::builder()
-            .route("/hello", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-                async { Response::ok().body(ResponseBody::Bytes(b"Hello!".to_vec())) }
-            })
+            .route(
+                "/hello",
+                Method::Get,
+                |_ctx: &RequestContext, _req: &mut Request| async {
+                    Response::ok().body(ResponseBody::Bytes(b"Hello!".to_vec()))
+                },
+            )
             .build(),
     );
 
@@ -278,9 +308,13 @@ fn test_integration_test_reset_hooks() {
 
     let app = Arc::new(
         App::builder()
-            .route("/hello", Method::Get, |_ctx: &RequestContext, _req: &mut Request| {
-                async { Response::ok().body(ResponseBody::Bytes(b"Hello!".to_vec())) }
-            })
+            .route(
+                "/hello",
+                Method::Get,
+                |_ctx: &RequestContext, _req: &mut Request| async {
+                    Response::ok().body(ResponseBody::Bytes(b"Hello!".to_vec()))
+                },
+            )
             .build(),
     );
 
