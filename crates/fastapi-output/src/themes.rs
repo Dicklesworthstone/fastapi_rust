@@ -1,6 +1,6 @@
 //! Theme system for fastapi_rust console output.
 //!
-//! Defines color palettes and styling presets for consistent
+//! Defines color palettes, icons, spacing, and box styles for consistent
 //! visual output across all components. Colors follow the FastAPI
 //! visual identity and Swagger UI conventions for familiarity.
 //!
@@ -10,17 +10,34 @@
 //! - `Neon` - High-contrast cyberpunk theme
 //! - `Minimal` - Grayscale with subtle accents
 //! - `Monokai` - Dark theme inspired by the Monokai color scheme
+//! - `Light` - Optimized for light terminal backgrounds
+//! - `Accessible` - High-contrast, WCAG-compliant colors
+//!
+//! # Components
+//!
+//! - [`FastApiTheme`] - Color palette for all UI elements
+//! - [`ThemeIcons`] - Unicode icons with ASCII fallbacks
+//! - [`ThemeSpacing`] - Consistent layout spacing values
+//! - [`BoxStyle`] - Box drawing character sets
 //!
 //! # Example
 //!
 //! ```rust
-//! use fastapi_output::themes::{FastApiTheme, ThemePreset};
+//! use fastapi_output::themes::{FastApiTheme, ThemePreset, ThemeIcons, ThemeSpacing};
 //!
 //! // Get default theme
 //! let theme = FastApiTheme::default();
 //!
 //! // Get theme by preset
 //! let neon = FastApiTheme::from_preset(ThemePreset::Neon);
+//!
+//! // Use icons (with ASCII fallback)
+//! let icons = ThemeIcons::unicode();
+//! println!("{} Success!", icons.success);
+//!
+//! // Consistent spacing
+//! let spacing = ThemeSpacing::default();
+//! let indent = " ".repeat(spacing.indent);
 //!
 //! // Parse from environment variable
 //! let preset: ThemePreset = "monokai".parse().unwrap();
@@ -82,7 +99,527 @@ impl Color {
     pub fn to_ansi_bg(&self) -> String {
         format!("\x1b[48;2;{};{};{}m", self.r, self.g, self.b)
     }
+
+    /// Calculate relative luminance for contrast calculations.
+    ///
+    /// Uses the WCAG formula for relative luminance.
+    #[must_use]
+    pub fn luminance(&self) -> f64 {
+        fn channel_luminance(c: u8) -> f64 {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel_luminance(self.r)
+            + 0.7152 * channel_luminance(self.g)
+            + 0.0722 * channel_luminance(self.b)
+    }
+
+    /// Calculate WCAG contrast ratio between this color and another.
+    ///
+    /// Returns a value between 1.0 (no contrast) and 21.0 (max contrast).
+    /// WCAG AA requires 4.5:1 for normal text, 3:1 for large text.
+    #[must_use]
+    pub fn contrast_ratio(&self, other: &Color) -> f64 {
+        let l1 = self.luminance();
+        let l2 = other.luminance();
+        let (lighter, darker) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
 }
+
+// ================================================================================================
+// Theme Icons
+// ================================================================================================
+
+/// Icons used throughout the theme for visual feedback.
+///
+/// Provides both Unicode icons and ASCII fallbacks for terminals
+/// that don't support extended Unicode characters.
+///
+/// # Example
+///
+/// ```rust
+/// use fastapi_output::themes::ThemeIcons;
+///
+/// let icons = ThemeIcons::unicode();
+/// println!("{} Success!", icons.success);
+///
+/// // For older terminals
+/// let ascii = ThemeIcons::ascii();
+/// println!("{} Success!", ascii.success);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeIcons {
+    /// Success indicator (e.g., checkmark).
+    pub success: &'static str,
+    /// Failure/error indicator (e.g., X).
+    pub failure: &'static str,
+    /// Warning indicator.
+    pub warning: &'static str,
+    /// Info indicator.
+    pub info: &'static str,
+    /// Right arrow for flow indication.
+    pub arrow_right: &'static str,
+    /// Left arrow.
+    pub arrow_left: &'static str,
+    /// Bullet point.
+    pub bullet: &'static str,
+    /// Lock/security indicator.
+    pub lock: &'static str,
+    /// Unlock indicator.
+    pub unlock: &'static str,
+    /// HTTP indicator.
+    pub http: &'static str,
+    /// Loading/in-progress indicator.
+    pub loading: &'static str,
+    /// Route/path indicator.
+    pub route: &'static str,
+    /// Database/storage indicator.
+    pub database: &'static str,
+    /// Time/clock indicator.
+    pub time: &'static str,
+    /// Size/memory indicator.
+    pub size: &'static str,
+}
+
+impl ThemeIcons {
+    /// Create icons using Unicode characters.
+    ///
+    /// Recommended for modern terminals with good Unicode support.
+    #[must_use]
+    pub const fn unicode() -> Self {
+        Self {
+            success: "\u{2713}",     // ✓
+            failure: "\u{2717}",     // ✗
+            warning: "\u{26A0}",     // ⚠
+            info: "\u{2139}",        // ℹ
+            arrow_right: "\u{2192}", // →
+            arrow_left: "\u{2190}",  // ←
+            bullet: "\u{2022}",      // •
+            lock: "\u{1F512}",       // 🔒
+            unlock: "\u{1F513}",     // 🔓
+            http: "\u{1F310}",       // 🌐
+            loading: "\u{25CF}",     // ●
+            route: "\u{2192}",       // →
+            database: "\u{1F5C4}",   // 🗄
+            time: "\u{23F1}",        // ⏱
+            size: "\u{1F4BE}",       // 💾
+        }
+    }
+
+    /// Create icons using ASCII-only characters.
+    ///
+    /// Use for terminals without Unicode support or when
+    /// consistent character widths are required.
+    #[must_use]
+    pub const fn ascii() -> Self {
+        Self {
+            success: "[OK]",
+            failure: "[X]",
+            warning: "[!]",
+            info: "[i]",
+            arrow_right: "->",
+            arrow_left: "<-",
+            bullet: "*",
+            lock: "[#]",
+            unlock: "[ ]",
+            http: "[H]",
+            loading: "...",
+            route: "->",
+            database: "[D]",
+            time: "[T]",
+            size: "[S]",
+        }
+    }
+
+    /// Create compact Unicode icons (single-width preferred).
+    ///
+    /// Uses single-width Unicode where possible for better alignment.
+    #[must_use]
+    pub const fn compact() -> Self {
+        Self {
+            success: "\u{2713}", // ✓
+            failure: "\u{2717}", // ✗
+            warning: "!",
+            info: "i",
+            arrow_right: ">",
+            arrow_left: "<",
+            bullet: "\u{2022}", // •
+            lock: "#",
+            unlock: "o",
+            http: "@",
+            loading: ".",
+            route: "/",
+            database: "D",
+            time: "T",
+            size: "S",
+        }
+    }
+
+    /// Auto-detect based on environment.
+    ///
+    /// Returns ASCII icons if TERM is "dumb" or if running in
+    /// a known agent environment that prefers plain text.
+    #[must_use]
+    pub fn auto() -> Self {
+        if std::env::var("TERM").map_or(false, |t| t == "dumb")
+            || std::env::var("CI").is_ok()
+            || std::env::var("CLAUDE_CODE").is_ok()
+            || std::env::var("CODEX_CLI").is_ok()
+        {
+            Self::ascii()
+        } else {
+            Self::unicode()
+        }
+    }
+}
+
+impl Default for ThemeIcons {
+    fn default() -> Self {
+        Self::unicode()
+    }
+}
+
+// ================================================================================================
+// Theme Spacing
+// ================================================================================================
+
+/// Spacing values for consistent layout across components.
+///
+/// All values are in character units for terminal output.
+///
+/// # Example
+///
+/// ```rust
+/// use fastapi_output::themes::ThemeSpacing;
+///
+/// let spacing = ThemeSpacing::default();
+/// let indent = " ".repeat(spacing.indent);
+/// println!("{}Indented content", indent);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeSpacing {
+    /// Standard indentation level (characters).
+    pub indent: usize,
+    /// Padding inside panels/boxes (characters).
+    pub panel_padding: usize,
+    /// Cell padding in tables (characters).
+    pub table_cell_padding: usize,
+    /// Gap between sections (blank lines).
+    pub section_gap: usize,
+    /// Gap between related items (blank lines).
+    pub item_gap: usize,
+    /// Width of method column in route tables.
+    pub method_width: usize,
+    /// Width of status code column.
+    pub status_width: usize,
+}
+
+impl ThemeSpacing {
+    /// Create default spacing suitable for most terminals.
+    #[must_use]
+    pub const fn default_spacing() -> Self {
+        Self {
+            indent: 2,
+            panel_padding: 1,
+            table_cell_padding: 1,
+            section_gap: 1,
+            item_gap: 0,
+            method_width: 7,  // "OPTIONS" is longest at 7 chars
+            status_width: 3,  // "500" is 3 chars
+        }
+    }
+
+    /// Create compact spacing for dense output.
+    #[must_use]
+    pub const fn compact() -> Self {
+        Self {
+            indent: 1,
+            panel_padding: 0,
+            table_cell_padding: 1,
+            section_gap: 0,
+            item_gap: 0,
+            method_width: 6,
+            status_width: 3,
+        }
+    }
+
+    /// Create spacious layout for readability.
+    #[must_use]
+    pub const fn spacious() -> Self {
+        Self {
+            indent: 4,
+            panel_padding: 2,
+            table_cell_padding: 2,
+            section_gap: 2,
+            item_gap: 1,
+            method_width: 8,
+            status_width: 4,
+        }
+    }
+}
+
+impl Default for ThemeSpacing {
+    fn default() -> Self {
+        Self::default_spacing()
+    }
+}
+
+// ================================================================================================
+// Box Styles
+// ================================================================================================
+
+/// Box drawing character sets for panels and tables.
+///
+/// Supports multiple styles from minimal ASCII to decorative Unicode.
+///
+/// # Example
+///
+/// ```rust
+/// use fastapi_output::themes::BoxStyle;
+///
+/// let style = BoxStyle::rounded();
+/// println!("{}{}{}", style.top_left, style.horizontal, style.top_right);
+/// // ╭─╮
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoxStyle {
+    /// Top-left corner character.
+    pub top_left: char,
+    /// Top-right corner character.
+    pub top_right: char,
+    /// Bottom-left corner character.
+    pub bottom_left: char,
+    /// Bottom-right corner character.
+    pub bottom_right: char,
+    /// Horizontal line character.
+    pub horizontal: char,
+    /// Vertical line character.
+    pub vertical: char,
+    /// Left T-junction for tables.
+    pub left_tee: char,
+    /// Right T-junction for tables.
+    pub right_tee: char,
+    /// Top T-junction for tables.
+    pub top_tee: char,
+    /// Bottom T-junction for tables.
+    pub bottom_tee: char,
+    /// Cross/plus for table intersections.
+    pub cross: char,
+}
+
+impl BoxStyle {
+    /// Rounded corners using Unicode box drawing characters.
+    #[must_use]
+    pub const fn rounded() -> Self {
+        Self {
+            top_left: '\u{256D}',     // ╭
+            top_right: '\u{256E}',    // ╮
+            bottom_left: '\u{2570}',  // ╰
+            bottom_right: '\u{256F}', // ╯
+            horizontal: '\u{2500}',   // ─
+            vertical: '\u{2502}',     // │
+            left_tee: '\u{251C}',     // ├
+            right_tee: '\u{2524}',    // ┤
+            top_tee: '\u{252C}',      // ┬
+            bottom_tee: '\u{2534}',   // ┴
+            cross: '\u{253C}',        // ┼
+        }
+    }
+
+    /// Square corners using Unicode box drawing characters.
+    #[must_use]
+    pub const fn square() -> Self {
+        Self {
+            top_left: '\u{250C}',     // ┌
+            top_right: '\u{2510}',    // ┐
+            bottom_left: '\u{2514}',  // └
+            bottom_right: '\u{2518}', // ┘
+            horizontal: '\u{2500}',   // ─
+            vertical: '\u{2502}',     // │
+            left_tee: '\u{251C}',     // ├
+            right_tee: '\u{2524}',    // ┤
+            top_tee: '\u{252C}',      // ┬
+            bottom_tee: '\u{2534}',   // ┴
+            cross: '\u{253C}',        // ┼
+        }
+    }
+
+    /// Heavy/bold box drawing characters.
+    #[must_use]
+    pub const fn heavy() -> Self {
+        Self {
+            top_left: '\u{250F}',     // ┏
+            top_right: '\u{2513}',    // ┓
+            bottom_left: '\u{2517}',  // ┗
+            bottom_right: '\u{251B}', // ┛
+            horizontal: '\u{2501}',   // ━
+            vertical: '\u{2503}',     // ┃
+            left_tee: '\u{2523}',     // ┣
+            right_tee: '\u{252B}',    // ┫
+            top_tee: '\u{2533}',      // ┳
+            bottom_tee: '\u{253B}',   // ┻
+            cross: '\u{254B}',        // ╋
+        }
+    }
+
+    /// Double-line box drawing characters.
+    #[must_use]
+    pub const fn double() -> Self {
+        Self {
+            top_left: '\u{2554}',     // ╔
+            top_right: '\u{2557}',    // ╗
+            bottom_left: '\u{255A}',  // ╚
+            bottom_right: '\u{255D}', // ╝
+            horizontal: '\u{2550}',   // ═
+            vertical: '\u{2551}',     // ║
+            left_tee: '\u{2560}',     // ╠
+            right_tee: '\u{2563}',    // ╣
+            top_tee: '\u{2566}',      // ╦
+            bottom_tee: '\u{2569}',   // ╩
+            cross: '\u{256C}',        // ╬
+        }
+    }
+
+    /// ASCII-only box drawing using +, -, |.
+    #[must_use]
+    pub const fn ascii() -> Self {
+        Self {
+            top_left: '+',
+            top_right: '+',
+            bottom_left: '+',
+            bottom_right: '+',
+            horizontal: '-',
+            vertical: '|',
+            left_tee: '+',
+            right_tee: '+',
+            top_tee: '+',
+            bottom_tee: '+',
+            cross: '+',
+        }
+    }
+
+    /// No visible borders (space characters).
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            top_left: ' ',
+            top_right: ' ',
+            bottom_left: ' ',
+            bottom_right: ' ',
+            horizontal: ' ',
+            vertical: ' ',
+            left_tee: ' ',
+            right_tee: ' ',
+            top_tee: ' ',
+            bottom_tee: ' ',
+            cross: ' ',
+        }
+    }
+
+    /// Draw a horizontal line of the specified width.
+    #[must_use]
+    pub fn horizontal_line(&self, width: usize) -> String {
+        std::iter::repeat(self.horizontal).take(width).collect()
+    }
+
+    /// Draw a complete top border with corners.
+    #[must_use]
+    pub fn top_border(&self, width: usize) -> String {
+        format!(
+            "{}{}{}",
+            self.top_left,
+            self.horizontal_line(width.saturating_sub(2)),
+            self.top_right
+        )
+    }
+
+    /// Draw a complete bottom border with corners.
+    #[must_use]
+    pub fn bottom_border(&self, width: usize) -> String {
+        format!(
+            "{}{}{}",
+            self.bottom_left,
+            self.horizontal_line(width.saturating_sub(2)),
+            self.bottom_right
+        )
+    }
+}
+
+impl Default for BoxStyle {
+    fn default() -> Self {
+        Self::rounded()
+    }
+}
+
+/// Preset for box style selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxStylePreset {
+    /// Rounded corners (default).
+    #[default]
+    Rounded,
+    /// Square corners.
+    Square,
+    /// Heavy/bold lines.
+    Heavy,
+    /// Double-line borders.
+    Double,
+    /// ASCII-only characters.
+    Ascii,
+    /// No visible borders.
+    None,
+}
+
+impl BoxStylePreset {
+    /// Get the `BoxStyle` for this preset.
+    #[must_use]
+    pub const fn style(&self) -> BoxStyle {
+        match self {
+            Self::Rounded => BoxStyle::rounded(),
+            Self::Square => BoxStyle::square(),
+            Self::Heavy => BoxStyle::heavy(),
+            Self::Double => BoxStyle::double(),
+            Self::Ascii => BoxStyle::ascii(),
+            Self::None => BoxStyle::none(),
+        }
+    }
+}
+
+impl FromStr for BoxStylePreset {
+    type Err = BoxStyleParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "rounded" => Ok(Self::Rounded),
+            "square" => Ok(Self::Square),
+            "heavy" | "bold" => Ok(Self::Heavy),
+            "double" => Ok(Self::Double),
+            "ascii" | "plain" => Ok(Self::Ascii),
+            "none" | "invisible" => Ok(Self::None),
+            _ => Err(BoxStyleParseError(s.to_string())),
+        }
+    }
+}
+
+/// Error parsing box style name.
+#[derive(Debug, Clone)]
+pub struct BoxStyleParseError(String);
+
+impl std::fmt::Display for BoxStyleParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown box style '{}', available: rounded, square, heavy, double, ascii, none",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for BoxStyleParseError {}
 
 /// Convert RGB tuple to hex string.
 #[must_use]
