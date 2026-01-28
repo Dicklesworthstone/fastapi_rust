@@ -266,7 +266,7 @@ impl ThemeIcons {
     /// a known agent environment that prefers plain text.
     #[must_use]
     pub fn auto() -> Self {
-        if std::env::var("TERM").map_or(false, |t| t == "dumb")
+        if std::env::var("TERM").is_ok_and(|t| t == "dumb")
             || std::env::var("CI").is_ok()
             || std::env::var("CLAUDE_CODE").is_ok()
             || std::env::var("CODEX_CLI").is_ok()
@@ -524,7 +524,7 @@ impl BoxStyle {
     /// Draw a horizontal line of the specified width.
     #[must_use]
     pub fn horizontal_line(&self, width: usize) -> String {
-        std::iter::repeat(self.horizontal).take(width).collect()
+        std::iter::repeat_n(self.horizontal, width).collect()
     }
 
     /// Draw a complete top border with corners.
@@ -735,6 +735,8 @@ impl FastApiTheme {
             ThemePreset::Neon => Self::neon(),
             ThemePreset::Minimal => Self::minimal(),
             ThemePreset::Monokai => Self::monokai(),
+            ThemePreset::Light => Self::light(),
+            ThemePreset::Accessible => Self::accessible(),
         }
     }
 
@@ -882,6 +884,97 @@ impl FastApiTheme {
         }
     }
 
+    /// Create a theme optimized for light terminal backgrounds.
+    ///
+    /// Uses darker, more saturated colors that maintain good contrast
+    /// against white or light-colored terminal backgrounds.
+    #[must_use]
+    pub fn light() -> Self {
+        Self {
+            // Brand colors - darker for light backgrounds
+            primary: Color::from_hex(0x00796B),   // Darker teal
+            secondary: Color::from_hex(0x388E3C), // Darker green
+            accent: Color::from_hex(0xE65100),    // Darker orange
+
+            // Semantic colors - saturated for visibility
+            success: Color::from_hex(0x2E7D32), // Dark green
+            warning: Color::from_hex(0xE65100), // Dark orange
+            error: Color::from_hex(0xC62828),   // Dark red
+            info: Color::from_hex(0x1565C0),    // Dark blue
+
+            // HTTP methods - darker versions of Swagger colors
+            http_get: Color::from_hex(0x1976D2),    // Darker blue
+            http_post: Color::from_hex(0x2E7D32),   // Dark green
+            http_put: Color::from_hex(0xE65100),    // Dark orange
+            http_delete: Color::from_hex(0xC62828), // Dark red
+            http_patch: Color::from_hex(0x00838F),  // Dark cyan
+            http_options: Color::from_hex(0x616161), // Medium gray
+            http_head: Color::from_hex(0x6A1B9A),   // Dark purple
+
+            // Status codes
+            status_1xx: Color::from_hex(0x616161), // Gray
+            status_2xx: Color::from_hex(0x2E7D32), // Dark green
+            status_3xx: Color::from_hex(0x00838F), // Dark cyan
+            status_4xx: Color::from_hex(0xE65100), // Dark orange
+            status_5xx: Color::from_hex(0xC62828), // Dark red
+
+            // Structural - dark for light backgrounds
+            border: Color::from_hex(0x9E9E9E),       // Medium gray
+            header: Color::from_hex(0x212121),       // Near black
+            muted: Color::from_hex(0x757575),        // Medium gray
+            highlight_bg: Color::from_hex(0xE3F2FD), // Very light blue
+        }
+    }
+
+    /// Create a high-contrast accessible theme.
+    ///
+    /// Designed to meet WCAG 2.1 Level AA contrast requirements (4.5:1 minimum).
+    /// Uses bright, saturated colors for maximum visibility.
+    ///
+    /// # Color Choices
+    ///
+    /// - All colors have >4.5:1 contrast ratio against dark backgrounds
+    /// - Uses pure, saturated terminal colors for maximum compatibility
+    /// - Semantic colors follow universal conventions (red=error, green=success)
+    /// - Avoids colors that may be difficult for colorblind users
+    #[must_use]
+    pub fn accessible() -> Self {
+        Self {
+            // Brand colors - high contrast, saturated
+            primary: Color::from_hex(0x00FFFF),   // Bright cyan
+            secondary: Color::from_hex(0x00FF00), // Bright green
+            accent: Color::from_hex(0xFFFF00),    // Bright yellow
+
+            // Semantic colors - pure terminal colors
+            success: Color::from_hex(0x00FF00), // Bright green
+            warning: Color::from_hex(0xFFFF00), // Bright yellow
+            error: Color::from_hex(0xFF0000),   // Bright red
+            info: Color::from_hex(0x00FFFF),    // Bright cyan
+
+            // HTTP methods - distinct, high-contrast colors
+            http_get: Color::from_hex(0x00FFFF),    // Cyan
+            http_post: Color::from_hex(0x00FF00),   // Green
+            http_put: Color::from_hex(0xFFFF00),    // Yellow
+            http_delete: Color::from_hex(0xFF0000), // Red
+            http_patch: Color::from_hex(0xFF00FF),  // Magenta
+            http_options: Color::from_hex(0xFFFFFF), // White
+            http_head: Color::from_hex(0xFF00FF),   // Magenta
+
+            // Status codes - clear semantic mapping
+            status_1xx: Color::from_hex(0xFFFFFF), // White
+            status_2xx: Color::from_hex(0x00FF00), // Green
+            status_3xx: Color::from_hex(0x00FFFF), // Cyan
+            status_4xx: Color::from_hex(0xFFFF00), // Yellow
+            status_5xx: Color::from_hex(0xFF0000), // Red
+
+            // Structural - maximum contrast
+            border: Color::from_hex(0xFFFFFF),       // White
+            header: Color::from_hex(0xFFFFFF),       // White
+            muted: Color::from_hex(0xC0C0C0),        // Silver/light gray
+            highlight_bg: Color::from_hex(0x000080), // Navy blue
+        }
+    }
+
     // === Color Lookup Methods ===
 
     /// Get the color for an HTTP method.
@@ -1005,6 +1098,10 @@ pub enum ThemePreset {
     Minimal,
     /// Monokai dark theme.
     Monokai,
+    /// Theme optimized for light terminal backgrounds.
+    Light,
+    /// High-contrast, WCAG-compliant accessible theme.
+    Accessible,
 }
 
 impl ThemePreset {
@@ -1017,7 +1114,7 @@ impl ThemePreset {
     /// List all available preset names.
     #[must_use]
     pub fn available_presets() -> &'static [&'static str] {
-        &["default", "fastapi", "neon", "minimal", "monokai"]
+        &["default", "fastapi", "neon", "minimal", "monokai", "light", "accessible"]
     }
 }
 
@@ -1029,6 +1126,8 @@ impl std::fmt::Display for ThemePreset {
             Self::Neon => write!(f, "neon"),
             Self::Minimal => write!(f, "minimal"),
             Self::Monokai => write!(f, "monokai"),
+            Self::Light => write!(f, "light"),
+            Self::Accessible => write!(f, "accessible"),
         }
     }
 }
@@ -1042,6 +1141,8 @@ impl FromStr for ThemePreset {
             "neon" | "cyberpunk" => Ok(Self::Neon),
             "minimal" | "gray" | "grey" => Ok(Self::Minimal),
             "monokai" | "dark" => Ok(Self::Monokai),
+            "light" => Ok(Self::Light),
+            "accessible" | "a11y" => Ok(Self::Accessible),
             _ => Err(ThemePresetParseError(s.to_string())),
         }
     }
@@ -1171,13 +1272,24 @@ mod tests {
         let neon = FastApiTheme::neon();
         let minimal = FastApiTheme::minimal();
         let monokai = FastApiTheme::monokai();
+        let light = FastApiTheme::light();
+        let accessible = FastApiTheme::accessible();
 
         assert_ne!(fastapi, neon);
         assert_ne!(fastapi, minimal);
         assert_ne!(fastapi, monokai);
+        assert_ne!(fastapi, light);
+        assert_ne!(fastapi, accessible);
         assert_ne!(neon, minimal);
         assert_ne!(neon, monokai);
+        assert_ne!(neon, light);
+        assert_ne!(neon, accessible);
         assert_ne!(minimal, monokai);
+        assert_ne!(minimal, light);
+        assert_ne!(minimal, accessible);
+        assert_ne!(monokai, light);
+        assert_ne!(monokai, accessible);
+        assert_ne!(light, accessible);
     }
 
     #[test]
@@ -1201,6 +1313,14 @@ mod tests {
         assert_eq!(
             FastApiTheme::from_preset(ThemePreset::Monokai),
             FastApiTheme::monokai()
+        );
+        assert_eq!(
+            FastApiTheme::from_preset(ThemePreset::Light),
+            FastApiTheme::light()
+        );
+        assert_eq!(
+            FastApiTheme::from_preset(ThemePreset::Accessible),
+            FastApiTheme::accessible()
         );
     }
 
@@ -1276,6 +1396,8 @@ mod tests {
         assert_eq!(ThemePreset::Neon.to_string(), "neon");
         assert_eq!(ThemePreset::Minimal.to_string(), "minimal");
         assert_eq!(ThemePreset::Monokai.to_string(), "monokai");
+        assert_eq!(ThemePreset::Light.to_string(), "light");
+        assert_eq!(ThemePreset::Accessible.to_string(), "accessible");
     }
 
     #[test]
@@ -1308,6 +1430,12 @@ mod tests {
             ThemePreset::Monokai
         );
         assert_eq!("dark".parse::<ThemePreset>().unwrap(), ThemePreset::Monokai);
+        assert_eq!("light".parse::<ThemePreset>().unwrap(), ThemePreset::Light);
+        assert_eq!(
+            "accessible".parse::<ThemePreset>().unwrap(),
+            ThemePreset::Accessible
+        );
+        assert_eq!("a11y".parse::<ThemePreset>().unwrap(), ThemePreset::Accessible);
     }
 
     #[test]
@@ -1322,6 +1450,8 @@ mod tests {
     fn test_theme_preset_theme() {
         assert_eq!(ThemePreset::FastApi.theme(), FastApiTheme::fastapi());
         assert_eq!(ThemePreset::Neon.theme(), FastApiTheme::neon());
+        assert_eq!(ThemePreset::Light.theme(), FastApiTheme::light());
+        assert_eq!(ThemePreset::Accessible.theme(), FastApiTheme::accessible());
     }
 
     #[test]
@@ -1332,5 +1462,141 @@ mod tests {
         assert!(presets.contains(&"neon"));
         assert!(presets.contains(&"minimal"));
         assert!(presets.contains(&"monokai"));
+        assert!(presets.contains(&"light"));
+        assert!(presets.contains(&"accessible"));
+    }
+
+    // === ThemeIcons Tests ===
+
+    #[test]
+    fn test_theme_icons_unicode() {
+        let icons = ThemeIcons::unicode();
+        assert!(!icons.success.is_empty());
+        assert!(!icons.failure.is_empty());
+        assert!(!icons.warning.is_empty());
+        assert!(!icons.info.is_empty());
+    }
+
+    #[test]
+    fn test_theme_icons_ascii() {
+        let icons = ThemeIcons::ascii();
+        assert!(icons.success.is_ascii());
+        assert!(icons.failure.is_ascii());
+        assert!(icons.warning.is_ascii());
+        assert!(icons.info.is_ascii());
+    }
+
+    #[test]
+    fn test_theme_icons_compact() {
+        let icons = ThemeIcons::compact();
+        assert!(!icons.success.is_empty());
+        assert!(!icons.arrow_right.is_empty());
+    }
+
+    // === ThemeSpacing Tests ===
+
+    #[test]
+    fn test_theme_spacing_default() {
+        let spacing = ThemeSpacing::default();
+        assert!(spacing.indent > 0);
+        assert!(spacing.method_width >= 7); // "OPTIONS" is 7 chars
+    }
+
+    #[test]
+    fn test_theme_spacing_compact() {
+        let compact = ThemeSpacing::compact();
+        let default = ThemeSpacing::default();
+        assert!(compact.indent <= default.indent);
+    }
+
+    #[test]
+    fn test_theme_spacing_spacious() {
+        let spacious = ThemeSpacing::spacious();
+        let default = ThemeSpacing::default();
+        assert!(spacious.indent >= default.indent);
+    }
+
+    // === BoxStyle Tests ===
+
+    #[test]
+    fn test_box_style_rounded() {
+        let style = BoxStyle::rounded();
+        assert_ne!(style.top_left, style.horizontal);
+        assert_ne!(style.vertical, style.horizontal);
+    }
+
+    #[test]
+    fn test_box_style_ascii() {
+        let style = BoxStyle::ascii();
+        assert_eq!(style.top_left, '+');
+        assert_eq!(style.horizontal, '-');
+        assert_eq!(style.vertical, '|');
+    }
+
+    #[test]
+    fn test_box_style_horizontal_line() {
+        let style = BoxStyle::rounded();
+        let line = style.horizontal_line(5);
+        assert_eq!(line.chars().count(), 5);
+    }
+
+    #[test]
+    fn test_box_style_borders() {
+        let style = BoxStyle::rounded();
+        let top = style.top_border(10);
+        let bottom = style.bottom_border(10);
+        assert!(top.starts_with(style.top_left));
+        assert!(top.ends_with(style.top_right));
+        assert!(bottom.starts_with(style.bottom_left));
+        assert!(bottom.ends_with(style.bottom_right));
+    }
+
+    #[test]
+    fn test_box_style_preset_parse() {
+        assert_eq!(
+            "rounded".parse::<BoxStylePreset>().unwrap(),
+            BoxStylePreset::Rounded
+        );
+        assert_eq!(
+            "heavy".parse::<BoxStylePreset>().unwrap(),
+            BoxStylePreset::Heavy
+        );
+        assert_eq!(
+            "ascii".parse::<BoxStylePreset>().unwrap(),
+            BoxStylePreset::Ascii
+        );
+        assert!("invalid".parse::<BoxStylePreset>().is_err());
+    }
+
+    // === Color Contrast Tests ===
+
+    #[test]
+    fn test_color_luminance() {
+        let black = Color::new(0, 0, 0);
+        let white = Color::new(255, 255, 255);
+        assert!(black.luminance() < 0.01);
+        assert!(white.luminance() > 0.99);
+    }
+
+    #[test]
+    fn test_color_contrast_ratio() {
+        let black = Color::new(0, 0, 0);
+        let white = Color::new(255, 255, 255);
+        let ratio = black.contrast_ratio(&white);
+        // Max contrast is 21:1
+        assert!(ratio > 20.0);
+        assert!(ratio <= 21.0);
+    }
+
+    #[test]
+    fn test_accessible_theme_high_contrast() {
+        let accessible = FastApiTheme::accessible();
+        let black = Color::new(0, 0, 0);
+
+        // All semantic colors should have good contrast against black background
+        assert!(accessible.success.contrast_ratio(&black) >= 4.5);
+        assert!(accessible.error.contrast_ratio(&black) >= 4.5);
+        assert!(accessible.warning.contrast_ratio(&black) >= 4.5);
+        assert!(accessible.info.contrast_ratio(&black) >= 4.5);
     }
 }
