@@ -401,6 +401,7 @@ name = "fastapi-core"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "fastapi-macros",
  "futures-executor",
  "parking_lot",
  "regex",

@@ -23,5 +23,9 @@ default = []
 # Enable regex support in testing assertions
 regex = ["dep:regex"]
 
+[dev-dependencies]
+fastapi-macros = { path = "../fastapi-macros" }
+regex = "1"
+
 [lints]
 workspace = true

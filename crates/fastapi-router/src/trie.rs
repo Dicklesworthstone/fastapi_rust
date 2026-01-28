@@ -127,10 +127,16 @@ impl fmt::Display for ConversionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInt { value, param } => {
-                write!(f, "path parameter '{param}': '{value}' is not a valid integer")
+                write!(
+                    f,
+                    "path parameter '{param}': '{value}' is not a valid integer"
+                )
             }
             Self::InvalidFloat { value, param } => {
-                write!(f, "path parameter '{param}': '{value}' is not a valid float")
+                write!(
+                    f,
+                    "path parameter '{param}': '{value}' is not a valid float"
+                )
             }
             Self::InvalidUuid { value, param } => {
                 write!(f, "path parameter '{param}': '{value}' is not a valid UUID")
@@ -162,12 +168,15 @@ impl Converter {
     pub fn convert(&self, value: &str, param_name: &str) -> Result<ParamValue, ConversionError> {
         match self {
             Self::Str => Ok(ParamValue::Str(value.to_string())),
-            Self::Int => value.parse::<i64>().map(ParamValue::Int).map_err(|_| {
-                ConversionError::InvalidInt {
-                    value: value.to_string(),
-                    param: param_name.to_string(),
-                }
-            }),
+            Self::Int => {
+                value
+                    .parse::<i64>()
+                    .map(ParamValue::Int)
+                    .map_err(|_| ConversionError::InvalidInt {
+                        value: value.to_string(),
+                        param: param_name.to_string(),
+                    })
+            }
             Self::Float => value.parse::<f64>().map(ParamValue::Float).map_err(|_| {
                 ConversionError::InvalidFloat {
                     value: value.to_string(),
@@ -1929,5 +1938,280 @@ mod tests {
 
         let m = router.match_path("/files/a/b/c", Method::Delete).unwrap();
         assert_eq!(m.route.method, Method::Delete);
+    }
+
+    // =========================================================================
+    // TYPE CONVERTER TESTS
+    // =========================================================================
+
+    #[test]
+    fn converter_convert_str() {
+        let result = Converter::Str.convert("hello", "param");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ParamValue::Str("hello".to_string()));
+    }
+
+    #[test]
+    fn converter_convert_int_valid() {
+        let result = Converter::Int.convert("42", "id");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ParamValue::Int(42));
+    }
+
+    #[test]
+    fn converter_convert_int_negative() {
+        let result = Converter::Int.convert("-123", "id");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ParamValue::Int(-123));
+    }
+
+    #[test]
+    fn converter_convert_int_invalid() {
+        let result = Converter::Int.convert("abc", "id");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ConversionError::InvalidInt { value, param } => {
+                assert_eq!(value, "abc");
+                assert_eq!(param, "id");
+            }
+            _ => panic!("Expected InvalidInt error"),
+        }
+    }
+
+    #[test]
+    fn converter_convert_float_valid() {
+        let result = Converter::Float.convert("3.14", "val");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ParamValue::Float(3.14));
+    }
+
+    #[test]
+    fn converter_convert_float_integer() {
+        let result = Converter::Float.convert("42", "val");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ParamValue::Float(42.0));
+    }
+
+    #[test]
+    fn converter_convert_float_scientific() {
+        let result = Converter::Float.convert("1e10", "val");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ParamValue::Float(1e10));
+    }
+
+    #[test]
+    fn converter_convert_float_invalid() {
+        let result = Converter::Float.convert("not-a-float", "val");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ConversionError::InvalidFloat { value, param } => {
+                assert_eq!(value, "not-a-float");
+                assert_eq!(param, "val");
+            }
+            _ => panic!("Expected InvalidFloat error"),
+        }
+    }
+
+    #[test]
+    fn converter_convert_uuid_valid() {
+        let result = Converter::Uuid.convert("550e8400-e29b-41d4-a716-446655440000", "id");
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            ParamValue::Uuid("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+
+    #[test]
+    fn converter_convert_uuid_invalid() {
+        let result = Converter::Uuid.convert("not-a-uuid", "id");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ConversionError::InvalidUuid { value, param } => {
+                assert_eq!(value, "not-a-uuid");
+                assert_eq!(param, "id");
+            }
+            _ => panic!("Expected InvalidUuid error"),
+        }
+    }
+
+    #[test]
+    fn converter_convert_path() {
+        let result = Converter::Path.convert("a/b/c.txt", "filepath");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ParamValue::Path("a/b/c.txt".to_string()));
+    }
+
+    #[test]
+    fn param_value_accessors() {
+        // Str variant
+        let val = ParamValue::Str("hello".to_string());
+        assert_eq!(val.as_str(), "hello");
+        assert_eq!(val.as_int(), None);
+        assert_eq!(val.as_float(), None);
+        assert_eq!(val.into_string(), Some("hello".to_string()));
+
+        // Int variant
+        let val = ParamValue::Int(42);
+        assert_eq!(val.as_int(), Some(42));
+        assert_eq!(val.as_float(), None);
+        assert_eq!(val.into_string(), None);
+
+        // Float variant
+        let val = ParamValue::Float(3.14);
+        assert_eq!(val.as_float(), Some(3.14));
+        assert_eq!(val.as_int(), None);
+        assert_eq!(val.into_string(), None);
+
+        // Uuid variant
+        let val = ParamValue::Uuid("550e8400-e29b-41d4-a716-446655440000".to_string());
+        assert_eq!(val.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            val.into_string(),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+
+        // Path variant
+        let val = ParamValue::Path("a/b/c".to_string());
+        assert_eq!(val.as_str(), "a/b/c");
+        assert_eq!(val.into_string(), Some("a/b/c".to_string()));
+    }
+
+    #[test]
+    fn conversion_error_display() {
+        let err = ConversionError::InvalidInt {
+            value: "abc".to_string(),
+            param: "id".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("id"));
+        assert!(msg.contains("abc"));
+        assert!(msg.contains("integer"));
+
+        let err = ConversionError::InvalidFloat {
+            value: "xyz".to_string(),
+            param: "val".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("val"));
+        assert!(msg.contains("xyz"));
+        assert!(msg.contains("float"));
+
+        let err = ConversionError::InvalidUuid {
+            value: "bad".to_string(),
+            param: "uuid".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("uuid"));
+        assert!(msg.contains("bad"));
+        assert!(msg.contains("UUID"));
+    }
+
+    #[test]
+    fn converter_type_name() {
+        assert_eq!(Converter::Str.type_name(), "string");
+        assert_eq!(Converter::Int.type_name(), "integer");
+        assert_eq!(Converter::Float.type_name(), "float");
+        assert_eq!(Converter::Uuid.type_name(), "UUID");
+        assert_eq!(Converter::Path.type_name(), "path");
+    }
+
+    #[test]
+    fn route_match_typed_getters() {
+        let mut router = Router::new();
+        router
+            .add(route(Method::Get, "/items/{id:int}/price/{val:float}"))
+            .unwrap();
+
+        let m = router
+            .match_path("/items/42/price/99.99", Method::Get)
+            .unwrap();
+
+        // String getter (existing API)
+        assert_eq!(m.get_param("id"), Some("42"));
+        assert_eq!(m.get_param("val"), Some("99.99"));
+
+        // Typed getters (new API)
+        assert_eq!(m.get_param_int("id"), Some(Ok(42)));
+        assert_eq!(m.get_param_float("val"), Some(Ok(99.99)));
+
+        // Missing param
+        assert!(m.get_param_int("missing").is_none());
+
+        // Wrong type
+        let result = m.get_param_int("val");
+        // "99.99" can be parsed as i64 (it becomes 99)
+        // Actually wait, "99.99" cannot be parsed as i64
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn route_match_param_count() {
+        let mut router = Router::new();
+        router
+            .add(route(Method::Get, "/users/{user_id}/posts/{post_id}"))
+            .unwrap();
+
+        let m = router.match_path("/users/1/posts/2", Method::Get).unwrap();
+
+        assert_eq!(m.param_count(), 2);
+        assert!(!m.is_empty());
+
+        // Static route with no params
+        let mut router2 = Router::new();
+        router2.add(route(Method::Get, "/static")).unwrap();
+        let m2 = router2.match_path("/static", Method::Get).unwrap();
+        assert_eq!(m2.param_count(), 0);
+        assert!(m2.is_empty());
+    }
+
+    #[test]
+    fn route_match_iter() {
+        let mut router = Router::new();
+        router
+            .add(route(Method::Get, "/a/{x}/b/{y}/c/{z}"))
+            .unwrap();
+
+        let m = router.match_path("/a/1/b/2/c/3", Method::Get).unwrap();
+
+        let params: Vec<_> = m.iter().collect();
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0], ("x", "1"));
+        assert_eq!(params[1], ("y", "2"));
+        assert_eq!(params[2], ("z", "3"));
+    }
+
+    #[test]
+    fn route_match_is_param_uuid() {
+        let mut router = Router::new();
+        router
+            .add(route(Method::Get, "/objects/{id:uuid}"))
+            .unwrap();
+
+        let m = router
+            .match_path("/objects/550e8400-e29b-41d4-a716-446655440000", Method::Get)
+            .unwrap();
+
+        assert_eq!(m.is_param_uuid("id"), Some(true));
+        assert_eq!(m.is_param_uuid("missing"), None);
+    }
+
+    #[test]
+    fn route_match_integer_variants() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/items/{id}")).unwrap();
+
+        let m = router.match_path("/items/12345", Method::Get).unwrap();
+
+        // All integer variants
+        assert_eq!(m.get_param_int("id"), Some(Ok(12345i64)));
+        assert_eq!(m.get_param_i32("id"), Some(Ok(12345i32)));
+        assert_eq!(m.get_param_u64("id"), Some(Ok(12345u64)));
+        assert_eq!(m.get_param_u32("id"), Some(Ok(12345u32)));
+
+        // Float variants
+        assert_eq!(m.get_param_float("id"), Some(Ok(12345.0f64)));
+        assert_eq!(m.get_param_f32("id"), Some(Ok(12345.0f32)));
     }
 }

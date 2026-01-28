@@ -38,7 +38,7 @@ impl<'a> RouteMatch<'a> {
     /// ```
     #[must_use]
     pub fn get_param_int(&self, name: &str) -> Option<Result<i64, ParseIntError>> {
-        self.get_param(name).map(|v| v.parse())
+        self.get_param(name).map(str::parse)
     }
 
     /// Get a parameter value parsed as an i32 integer.
@@ -47,7 +47,7 @@ impl<'a> RouteMatch<'a> {
     /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as i32.
     #[must_use]
     pub fn get_param_i32(&self, name: &str) -> Option<Result<i32, ParseIntError>> {
-        self.get_param(name).map(|v| v.parse())
+        self.get_param(name).map(str::parse)
     }
 
     /// Get a parameter value parsed as a u64 unsigned integer.
@@ -56,7 +56,7 @@ impl<'a> RouteMatch<'a> {
     /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as u64.
     #[must_use]
     pub fn get_param_u64(&self, name: &str) -> Option<Result<u64, ParseIntError>> {
-        self.get_param(name).map(|v| v.parse())
+        self.get_param(name).map(str::parse)
     }
 
     /// Get a parameter value parsed as a u32 unsigned integer.
@@ -65,7 +65,7 @@ impl<'a> RouteMatch<'a> {
     /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as u32.
     #[must_use]
     pub fn get_param_u32(&self, name: &str) -> Option<Result<u32, ParseIntError>> {
-        self.get_param(name).map(|v| v.parse())
+        self.get_param(name).map(str::parse)
     }
 
     /// Get a parameter value parsed as an f64 float.
@@ -83,7 +83,7 @@ impl<'a> RouteMatch<'a> {
     /// ```
     #[must_use]
     pub fn get_param_float(&self, name: &str) -> Option<Result<f64, ParseFloatError>> {
-        self.get_param(name).map(|v| v.parse())
+        self.get_param(name).map(str::parse)
     }
 
     /// Get a parameter value parsed as an f32 float.
@@ -92,7 +92,7 @@ impl<'a> RouteMatch<'a> {
     /// Returns `Some(Err(_))` if the parameter exists but can't be parsed as f32.
     #[must_use]
     pub fn get_param_f32(&self, name: &str) -> Option<Result<f32, ParseFloatError>> {
-        self.get_param(name).map(|v| v.parse())
+        self.get_param(name).map(str::parse)
     }
 
     /// Check if a parameter value is a valid UUID format.

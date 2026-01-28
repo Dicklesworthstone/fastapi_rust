@@ -101,7 +101,7 @@ pub use fastapi_core::{
 
 // Re-export testing utilities
 pub use fastapi_core::{CookieJar, RequestBuilder, TestClient, TestResponse};
-pub use fastapi_macros::{JsonSchema, Validate, delete, get, patch, post, put};
+pub use fastapi_macros::{JsonSchema, Validate, delete, get, head, options, patch, post, put};
 pub use fastapi_openapi::{OpenApi, OpenApiBuilder};
 pub use fastapi_router::{Route, Router};
 
@@ -121,7 +121,7 @@ pub mod prelude {
         // Pagination
         Pagination, Page,
         // Macros
-        JsonSchema, Validate, delete, get, patch, post, put,
+        JsonSchema, Validate, delete, get, head, options, patch, post, put,
         // OpenAPI
         OpenApi, OpenApiBuilder,
     };

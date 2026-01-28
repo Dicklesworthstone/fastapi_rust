@@ -2232,26 +2232,24 @@ impl CsrfMiddleware {
                     (Some(header), Some(cookie)) if header == cookie && !header.is_empty() => {
                         Ok(Some(CsrfToken::new(header)))
                     }
-                    (None, _) | (_, None) => {
-                        Err(self.csrf_error_response("CSRF token missing"))
-                    }
-                    _ => {
-                        Err(self.csrf_error_response("CSRF token mismatch"))
-                    }
+                    (None, _) | (_, None) => Err(self.csrf_error_response("CSRF token missing")),
+                    _ => Err(self.csrf_error_response("CSRF token mismatch")),
                 }
             }
-            CsrfMode::HeaderOnly => {
-                match header_token {
-                    Some(token) if !token.is_empty() => Ok(Some(CsrfToken::new(token))),
-                    _ => Err(self.csrf_error_response("CSRF token missing in header")),
-                }
-            }
+            CsrfMode::HeaderOnly => match header_token {
+                Some(token) if !token.is_empty() => Ok(Some(CsrfToken::new(token))),
+                _ => Err(self.csrf_error_response("CSRF token missing in header")),
+            },
         }
     }
 
     /// Creates a 403 Forbidden response for CSRF failures.
     fn csrf_error_response(&self, default_message: &str) -> Response {
-        let message = self.config.error_message.as_deref().unwrap_or(default_message);
+        let message = self
+            .config
+            .error_message
+            .as_deref()
+            .unwrap_or(default_message);
 
         // Create a FastAPI-compatible error response
         let body = format!(
@@ -2266,10 +2264,7 @@ impl CsrfMiddleware {
 
     /// Creates the Set-Cookie header value for a CSRF token.
     fn make_set_cookie_header_value(cookie_name: &str, token: &str, production: bool) -> Vec<u8> {
-        let mut cookie = format!(
-            "{}={}; Path=/; SameSite=Strict",
-            cookie_name, token
-        );
+        let mut cookie = format!("{}={}; Path=/; SameSite=Strict", cookie_name, token);
 
         if production {
             cookie.push_str("; Secure");
@@ -4038,8 +4033,7 @@ mod tests {
         let ctx = test_context();
         let mut req = Request::new(crate::request::Method::Post, "/");
 
-        req.headers_mut()
-            .insert("x-csrf-token", b"".to_vec());
+        req.headers_mut().insert("x-csrf-token", b"".to_vec());
 
         let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
         assert!(result.is_break());
@@ -4059,10 +4053,10 @@ mod tests {
         let result = futures_executor::block_on(csrf.after(&ctx, &req, response));
 
         // Check Set-Cookie header
-        let cookie_header = result.headers().get("set-cookie");
-        assert!(cookie_header.is_some());
+        let cookie_value = header_value(&result, "set-cookie");
+        assert!(cookie_value.is_some());
 
-        let cookie_value = std::str::from_utf8(cookie_header.unwrap()).unwrap();
+        let cookie_value = cookie_value.unwrap();
         assert!(cookie_value.starts_with("csrf_token="));
         assert!(cookie_value.contains("SameSite=Strict"));
         assert!(cookie_value.contains("Secure")); // Production mode
@@ -4079,8 +4073,7 @@ mod tests {
         let response = Response::ok();
         let result = futures_executor::block_on(csrf.after(&ctx, &req, response));
 
-        let cookie_header = result.headers().get("set-cookie");
-        let cookie_value = std::str::from_utf8(cookie_header.unwrap()).unwrap();
+        let cookie_value = header_value(&result, "set-cookie").unwrap();
         assert!(!cookie_value.contains("Secure")); // No Secure in dev mode
     }
 
@@ -4100,7 +4093,7 @@ mod tests {
         let result = futures_executor::block_on(csrf.after(&ctx, &req, response));
 
         // Should not set a new cookie
-        assert!(result.headers().get("set-cookie").is_none());
+        assert!(header_value(&result, "set-cookie").is_none());
     }
 
     #[test]
@@ -4119,7 +4112,7 @@ mod tests {
         let result = futures_executor::block_on(csrf.after(&ctx, &req, response));
 
         // Should set a new cookie even though one exists
-        assert!(result.headers().get("set-cookie").is_some());
+        assert!(header_value(&result, "set-cookie").is_some());
     }
 
     #[test]
@@ -4151,8 +4144,8 @@ mod tests {
         let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
 
         if let ControlFlow::Break(response) = result {
-            let content_type = response.headers().get("content-type");
-            assert_eq!(content_type, Some(b"application/json".as_slice()));
+            let content_type = header_value(&response, "content-type");
+            assert_eq!(content_type, Some("application/json".to_string()));
 
             // Check body contains proper error structure
             if let ResponseBody::Bytes(body) = response.body_ref() {
@@ -4217,8 +4210,7 @@ mod tests {
         let mut req = Request::new(crate::request::Method::Post, "/");
 
         // Empty token values
-        req.headers_mut()
-            .insert("cookie", b"csrf_token=".to_vec());
+        req.headers_mut().insert("cookie", b"csrf_token=".to_vec());
         req.headers_mut().insert("x-csrf-token", b"".to_vec());
 
         let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
