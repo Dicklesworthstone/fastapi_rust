@@ -81,18 +81,19 @@ pub use extract::{
     Accept, ApiKeyCookie, ApiKeyCookieConfig, ApiKeyCookieError, ApiKeyHeader, ApiKeyHeaderConfig,
     ApiKeyHeaderError, ApiKeyQuery, ApiKeyQueryConfig, ApiKeyQueryError, AppState, Authorization,
     BackgroundTasks, BackgroundTasksInner, BasicAuth, BasicAuthError, BearerToken,
-    BearerTokenError, ContentType, Cookie, CookieExtractError, CookieName, CookiePrefix,
+    BearerTokenError, Bytes, ContentType, Cookie, CookieExtractError, CookieName, CookiePrefix,
     CookiePrefixError, CsrfTokenCookie, DEFAULT_API_KEY_COOKIE, DEFAULT_API_KEY_HEADER,
     DEFAULT_API_KEY_QUERY_PARAM, DEFAULT_FORM_LIMIT, DEFAULT_JSON_LIMIT,
     DEFAULT_MULTIPART_FILE_SIZE, DEFAULT_MULTIPART_MAX_FIELDS, DEFAULT_MULTIPART_TOTAL_SIZE,
-    DEFAULT_PAGE, DEFAULT_PER_PAGE, File, FileConfig, Form, FormConfig, FormExtractError,
-    FromHeaderValue, FromRequest, Header, HeaderExtractError, HeaderName, HeaderValues, Host, Json,
-    JsonConfig, JsonExtractError, MAX_PER_PAGE, Multipart, MultipartConfig, MultipartExtractError,
-    MultipartPart, NamedHeader, OAuth2BearerError, OAuth2BearerErrorKind, OAuth2PasswordBearer,
-    OAuth2PasswordBearerConfig, Page, Pagination, PaginationConfig, Path, PathExtractError,
-    PathParams, Query, QueryExtractError, QueryParams, RequestCookie, RequestCookies, RequestRef,
-    ResponseMut, ResponseMutations, SameSite, SecureCompare, SessionIdCookie, State,
-    StateExtractError, UploadedFile, UserAgent, XRequestId, constant_time_eq, constant_time_str_eq,
+    DEFAULT_PAGE, DEFAULT_PER_PAGE, DEFAULT_RAW_BODY_LIMIT, File, FileConfig, Form, FormConfig,
+    FormExtractError, FromHeaderValue, FromRequest, Header, HeaderExtractError, HeaderName,
+    HeaderValues, Host, Json, JsonConfig, JsonExtractError, MAX_PER_PAGE, Multipart,
+    MultipartConfig, MultipartExtractError, MultipartPart, NamedHeader, OAuth2BearerError,
+    OAuth2BearerErrorKind, OAuth2PasswordBearer, OAuth2PasswordBearerConfig, Page, Pagination,
+    PaginationConfig, Path, PathExtractError, PathParams, Query, QueryExtractError, QueryParams,
+    RawBodyConfig, RawBodyError, RequestCookie, RequestCookies, RequestRef, ResponseMut,
+    ResponseMutations, SameSite, SecureCompare, SessionIdCookie, State, StateExtractError,
+    StringBody, UploadedFile, UserAgent, XRequestId, constant_time_eq, constant_time_str_eq,
     snake_to_header_case,
 };
 pub use middleware::{
@@ -102,6 +103,8 @@ pub use middleware::{
     RequestIdMiddleware, RequestResponseLogger, RequireHeader, SecurityHeaders,
     SecurityHeadersConfig, XFrameOptions,
 };
+#[cfg(feature = "compression")]
+pub use middleware::{CompressionConfig, CompressionMiddleware};
 pub use request::{
     Body, Headers, HttpVersion, Method, Request, RequestBodyStream, RequestBodyStreamError,
 };

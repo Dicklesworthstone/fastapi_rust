@@ -849,7 +849,10 @@ impl std::fmt::Display for RawBodyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PayloadTooLarge { size, limit } => {
-                write!(f, "Payload too large: {size} bytes exceeds limit of {limit}")
+                write!(
+                    f,
+                    "Payload too large: {size} bytes exceeds limit of {limit}"
+                )
             }
             Self::StreamingNotSupported => {
                 write!(f, "Streaming body not supported for raw extraction")
@@ -1032,13 +1035,13 @@ impl StringBody {
     }
 }
 
-impl AsRef<str> for Text {
+impl AsRef<str> for StringBody {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl std::ops::Deref for Text {
+impl std::ops::Deref for StringBody {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -1058,7 +1061,7 @@ impl From<StringBody> for String {
     }
 }
 
-impl FromRequest for Text {
+impl FromRequest for StringBody {
     type Error = RawBodyError;
 
     async fn from_request(ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
@@ -1123,7 +1126,10 @@ mod raw_body_tests {
         let result = futures_executor::block_on(Bytes::from_request(&ctx, &mut req));
         assert!(matches!(
             result,
-            Err(RawBodyError::PayloadTooLarge { size: 150, limit: 100 })
+            Err(RawBodyError::PayloadTooLarge {
+                size: 150,
+                limit: 100
+            })
         ));
     }
 

@@ -2578,8 +2578,8 @@ impl CompressionMiddleware {
 
     /// Compresses data using gzip.
     fn compress_gzip(data: &[u8], level: u32) -> Result<Vec<u8>, std::io::Error> {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         use std::io::Write;
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
@@ -5069,5 +5069,255 @@ mod tests {
             execution_log,
             vec!["layer:before", "handler", "layer:after",]
         );
+    }
+}
+
+// ============================================================================
+// Compression Middleware Tests (requires "compression" feature)
+// ============================================================================
+
+#[cfg(all(test, feature = "compression"))]
+mod compression_tests {
+    use super::*;
+    use crate::request::Method;
+    use crate::response::ResponseBody;
+
+    fn test_context() -> RequestContext {
+        RequestContext::new(asupersync::Cx::for_testing(), 1)
+    }
+
+    #[test]
+    fn compression_config_defaults() {
+        let config = CompressionConfig::default();
+        assert_eq!(config.min_size, 1024);
+        assert_eq!(config.level, 6);
+        assert!(!config.skip_content_types.is_empty());
+    }
+
+    #[test]
+    fn compression_config_builder() {
+        let config = CompressionConfig::new()
+            .min_size(512)
+            .level(9);
+        assert_eq!(config.min_size, 512);
+        assert_eq!(config.level, 9);
+    }
+
+    #[test]
+    fn compression_level_clamped() {
+        let config = CompressionConfig::new().level(100);
+        assert_eq!(config.level, 9);
+
+        let config = CompressionConfig::new().level(0);
+        assert_eq!(config.level, 1);
+    }
+
+    #[test]
+    fn skip_content_type_exact_match() {
+        let config = CompressionConfig::default();
+        assert!(config.should_skip_content_type("image/jpeg"));
+        assert!(config.should_skip_content_type("image/jpeg; charset=utf-8"));
+        assert!(!config.should_skip_content_type("text/html"));
+    }
+
+    #[test]
+    fn skip_content_type_prefix_match() {
+        let config = CompressionConfig::default();
+        // "video/" prefix should match any video type
+        assert!(config.should_skip_content_type("video/mp4"));
+        assert!(config.should_skip_content_type("video/webm"));
+        assert!(config.should_skip_content_type("audio/mpeg"));
+    }
+
+    #[test]
+    fn compression_skips_small_responses() {
+        let middleware = CompressionMiddleware::new();
+        let ctx = test_context();
+
+        // Create request with Accept-Encoding: gzip
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+
+        // Create a small response (less than 1024 bytes)
+        let response = Response::ok()
+            .header("content-type", b"text/plain".to_vec())
+            .body(ResponseBody::Bytes(b"Hello, World!".to_vec()));
+
+        // Run the after hook
+        let result = futures_executor::block_on(middleware.after(&ctx, &req, response));
+
+        // Should NOT be compressed (too small)
+        let has_encoding = result
+            .headers()
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
+        assert!(!has_encoding, "Small response should not be compressed");
+    }
+
+    #[test]
+    fn compression_works_for_large_responses() {
+        let config = CompressionConfig::new().min_size(10); // Lower threshold
+        let middleware = CompressionMiddleware::with_config(config);
+        let ctx = test_context();
+
+        // Create request with Accept-Encoding: gzip
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+
+        // Create a response with repetitive content (compresses well)
+        let body = "Hello, World! ".repeat(100);
+        let original_size = body.len();
+
+        let response = Response::ok()
+            .header("content-type", b"text/plain".to_vec())
+            .body(ResponseBody::Bytes(body.into_bytes()));
+
+        // Run the after hook
+        let result = futures_executor::block_on(middleware.after(&ctx, &req, response));
+
+        // Should be compressed
+        let encoding = result
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
+        assert!(encoding.is_some(), "Large response should be compressed");
+
+        let (_, value) = encoding.unwrap();
+        assert_eq!(value, b"gzip");
+
+        // Check Vary header
+        let vary = result
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("vary"));
+        assert!(vary.is_some(), "Should have Vary header");
+
+        // Verify compressed size is smaller
+        if let ResponseBody::Bytes(compressed) = result.body_ref() {
+            assert!(compressed.len() < original_size, "Compressed size should be smaller");
+        } else {
+            panic!("Expected Bytes body");
+        }
+    }
+
+    #[test]
+    fn compression_skips_without_accept_encoding() {
+        let config = CompressionConfig::new().min_size(10);
+        let middleware = CompressionMiddleware::with_config(config);
+        let ctx = test_context();
+
+        // Create request WITHOUT Accept-Encoding
+        let req = Request::new(Method::Get, "/");
+
+        let body = "Hello, World! ".repeat(100);
+        let response = Response::ok()
+            .header("content-type", b"text/plain".to_vec())
+            .body(ResponseBody::Bytes(body.into_bytes()));
+
+        let result = futures_executor::block_on(middleware.after(&ctx, &req, response));
+
+        // Should NOT be compressed (no Accept-Encoding)
+        let has_encoding = result
+            .headers()
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
+        assert!(!has_encoding, "Should not compress without Accept-Encoding");
+    }
+
+    #[test]
+    fn compression_skips_already_compressed_content() {
+        let config = CompressionConfig::new().min_size(10);
+        let middleware = CompressionMiddleware::with_config(config);
+        let ctx = test_context();
+
+        // Create request with Accept-Encoding: gzip
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+
+        // Create response with already-compressed content type
+        let body = "Some image data".repeat(100);
+        let response = Response::ok()
+            .header("content-type", b"image/jpeg".to_vec())
+            .body(ResponseBody::Bytes(body.into_bytes()));
+
+        let result = futures_executor::block_on(middleware.after(&ctx, &req, response));
+
+        // Should NOT be compressed (image/jpeg is already compressed)
+        let has_encoding = result
+            .headers()
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
+        assert!(!has_encoding, "Should not compress already-compressed content types");
+    }
+
+    #[test]
+    fn compression_skips_if_already_has_content_encoding() {
+        let config = CompressionConfig::new().min_size(10);
+        let middleware = CompressionMiddleware::with_config(config);
+        let ctx = test_context();
+
+        // Create request with Accept-Encoding: gzip
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+
+        // Create response that already has Content-Encoding
+        let body = "Hello, World! ".repeat(100);
+        let response = Response::ok()
+            .header("content-type", b"text/plain".to_vec())
+            .header("content-encoding", b"br".to_vec())
+            .body(ResponseBody::Bytes(body.into_bytes()));
+
+        let result = futures_executor::block_on(middleware.after(&ctx, &req, response));
+
+        // Should NOT double-compress
+        let encodings: Vec<_> = result
+            .headers()
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+            .collect();
+
+        // Should still have exactly one Content-Encoding header (the original br)
+        assert_eq!(encodings.len(), 1);
+        assert_eq!(encodings[0].1, b"br");
+    }
+
+    #[test]
+    fn accepts_gzip_parses_header_correctly() {
+        // Test various Accept-Encoding header formats
+
+        // Simple gzip
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"gzip".to_vec());
+        assert!(CompressionMiddleware::accepts_gzip(&req));
+
+        // Multiple encodings
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"deflate, gzip, br".to_vec());
+        assert!(CompressionMiddleware::accepts_gzip(&req));
+
+        // With quality values
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"gzip;q=1.0, identity;q=0.5".to_vec());
+        assert!(CompressionMiddleware::accepts_gzip(&req));
+
+        // Wildcard
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"*".to_vec());
+        assert!(CompressionMiddleware::accepts_gzip(&req));
+
+        // No gzip
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("accept-encoding", b"deflate, br".to_vec());
+        assert!(!CompressionMiddleware::accepts_gzip(&req));
+
+        // No header
+        let req_no_header = Request::new(Method::Get, "/");
+        assert!(!CompressionMiddleware::accepts_gzip(&req_no_header));
+    }
+
+    #[test]
+    fn compression_middleware_name() {
+        let middleware = CompressionMiddleware::new();
+        assert_eq!(middleware.name(), "Compression");
     }
 }

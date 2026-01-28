@@ -430,7 +430,7 @@ impl<T> RouteTable<T> {
                     params: params.clone(),
                 }
             }
-            (RouteLookup::MethodNotAllowed { allowed }, TrailingSlashMode::Redirect) => {
+            (RouteLookup::MethodNotAllowed { allowed: _ }, TrailingSlashMode::Redirect) => {
                 // Path has trailing slash, route exists without it - redirect
                 RouteLookup::Redirect {
                     target: alt_path.to_string(),
@@ -469,7 +469,10 @@ impl<T> RouteTable<T> {
                     params: params.clone(),
                 }
             }
-            (RouteLookup::MethodNotAllowed { allowed }, TrailingSlashMode::RedirectWithSlash) => {
+            (
+                RouteLookup::MethodNotAllowed { allowed: _ },
+                TrailingSlashMode::RedirectWithSlash,
+            ) => {
                 // Route exists with trailing slash - redirect
                 RouteLookup::Redirect { target: with_slash }
             }
