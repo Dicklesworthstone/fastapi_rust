@@ -9207,10 +9207,10 @@ impl SecurityScopes {
     ///
     /// New scopes are appended, preserving order and deduplicating.
     pub fn merge(&mut self, other: &SecurityScopes) {
-        let mut seen: std::collections::HashSet<&str> =
-            self.scopes.iter().map(String::as_str).collect();
+        let existing: std::collections::HashSet<String> =
+            self.scopes.iter().cloned().collect();
         for scope in &other.scopes {
-            if seen.insert(scope.as_str()) {
+            if !existing.contains(scope) {
                 self.scopes.push(scope.clone());
             }
         }
@@ -9255,7 +9255,7 @@ impl std::error::Error for SecurityScopesError {}
 
 impl IntoResponse for SecurityScopesError {
     fn into_response(self) -> Response {
-        HttpError::internal_server_error()
+        HttpError::new(crate::response::StatusCode::INTERNAL_SERVER_ERROR)
             .with_detail("Security scopes not configured")
             .into_response()
     }
