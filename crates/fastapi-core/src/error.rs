@@ -1465,6 +1465,7 @@ impl IntoResponse for ResponseValidationError {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
 
     // ========================================================================
     // LocItem Tests
@@ -2412,6 +2413,7 @@ mod tests {
     // ========================================================================
 
     #[test]
+    #[serial]
     fn debug_mode_default_disabled() {
         // Ensure debug mode is disabled by default
         disable_debug_mode();
@@ -2419,6 +2421,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn debug_mode_can_be_enabled_and_disabled() {
         // Start disabled
         disable_debug_mode();
@@ -2637,6 +2640,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn http_error_response_without_debug_mode() {
         disable_debug_mode();
 
@@ -2662,6 +2666,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn http_error_response_with_debug_mode() {
         // Enable debug mode for this test
         enable_debug_mode();
@@ -2695,6 +2700,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn http_error_response_with_debug_mode_no_debug_info() {
         // Enable debug mode but don't add debug info
         enable_debug_mode();
@@ -2730,6 +2736,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn validation_errors_response_without_debug_mode() {
         disable_debug_mode();
 
@@ -2750,6 +2757,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn validation_errors_response_with_debug_mode() {
         enable_debug_mode();
 
@@ -2901,6 +2909,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn response_validation_error_into_response_production_mode() {
         // Ensure debug mode is off
         disable_debug_mode();
@@ -2932,6 +2941,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn response_validation_error_into_response_debug_mode() {
         // Enable debug mode
         enable_debug_mode();

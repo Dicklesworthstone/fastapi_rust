@@ -26,6 +26,7 @@ regex = ["dep:regex"]
 [dev-dependencies]
 fastapi-macros = { path = "../fastapi-macros" }
 regex = "1"
+serial_test = "2"
 
 [lints]
 workspace = true
