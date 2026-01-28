@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 fastapi-core = { workspace = true }
+fastapi-router = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

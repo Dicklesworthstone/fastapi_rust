@@ -96,7 +96,9 @@ pub use middleware::{
     RequestIdMiddleware, RequestResponseLogger, RequireHeader, SecurityHeaders,
     SecurityHeadersConfig, XFrameOptions,
 };
-pub use request::{Body, Headers, HttpVersion, Method, Request};
+pub use request::{
+    Body, Headers, HttpVersion, Method, Request, RequestBodyStream, RequestBodyStreamError,
+};
 pub use response::{
     Binary, BinaryWithType, BodyStream, FileResponse, Html, IntoResponse, NoContent, Redirect,
     Response, ResponseBody, ResponseModel, ResponseModelConfig, StatusCode, Text,

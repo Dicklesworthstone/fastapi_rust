@@ -66,8 +66,10 @@ mod server;
 pub mod streaming;
 
 pub use body::{
-    BodyConfig, BodyError, ChunkedReader, ContentLengthReader, DEFAULT_MAX_BODY_SIZE, parse_body,
-    parse_body_with_consumed, validate_content_length,
+    AsyncChunkedStream, AsyncContentLengthStream, BodyConfig, BodyError, ChunkedReader,
+    ContentLengthReader, DEFAULT_MAX_BODY_SIZE, DEFAULT_STREAMING_THRESHOLD, StreamingBodyConfig,
+    create_chunked_stream, create_content_length_stream, parse_body, parse_body_with_consumed,
+    validate_content_length,
 };
 pub use connection::{
     ConnectionInfo, STANDARD_HOP_BY_HOP_HEADERS, is_standard_hop_by_hop_header,

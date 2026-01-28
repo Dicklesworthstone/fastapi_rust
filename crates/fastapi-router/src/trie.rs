@@ -24,9 +24,10 @@ use std::fmt;
 use std::sync::Arc;
 
 /// Path parameter type converter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Converter {
     /// String (default).
+    #[default]
     Str,
     /// Integer (i64).
     Int,
@@ -229,13 +230,131 @@ fn is_uuid(s: &str) -> bool {
             .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-/// Path parameter information.
-#[derive(Debug, Clone)]
+/// Path parameter information with optional OpenAPI metadata.
+#[derive(Debug, Clone, Default)]
 pub struct ParamInfo {
     /// Parameter name.
     pub name: String,
     /// Type converter.
     pub converter: Converter,
+    /// Title for display in OpenAPI documentation.
+    pub title: Option<String>,
+    /// Description for OpenAPI documentation.
+    pub description: Option<String>,
+    /// Whether the parameter is deprecated.
+    pub deprecated: bool,
+    /// Example value for OpenAPI documentation.
+    pub example: Option<serde_json::Value>,
+    /// Named examples for OpenAPI documentation.
+    pub examples: Vec<(String, serde_json::Value)>,
+}
+
+impl ParamInfo {
+    /// Create a new parameter info with name and converter.
+    #[must_use]
+    pub fn new(name: impl Into<String>, converter: Converter) -> Self {
+        Self {
+            name: name.into(),
+            converter,
+            title: None,
+            description: None,
+            deprecated: false,
+            example: None,
+            examples: Vec::new(),
+        }
+    }
+
+    /// Set the title for OpenAPI documentation.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the description for OpenAPI documentation.
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Mark the parameter as deprecated.
+    #[must_use]
+    pub fn deprecated(mut self) -> Self {
+        self.deprecated = true;
+        self
+    }
+
+    /// Set an example value for OpenAPI documentation.
+    #[must_use]
+    pub fn with_example(mut self, example: serde_json::Value) -> Self {
+        self.example = Some(example);
+        self
+    }
+
+    /// Add a named example for OpenAPI documentation.
+    #[must_use]
+    pub fn with_named_example(mut self, name: impl Into<String>, value: serde_json::Value) -> Self {
+        self.examples.push((name.into(), value));
+        self
+    }
+}
+
+/// Extract path parameters from a route path pattern.
+///
+/// Parses a path pattern like `/users/{id}/posts/{post_id:int}` and returns
+/// information about each parameter, including its name and type converter.
+///
+/// # Examples
+///
+/// ```ignore
+/// use fastapi_router::{extract_path_params, Converter};
+///
+/// let params = extract_path_params("/users/{id}");
+/// assert_eq!(params.len(), 1);
+/// assert_eq!(params[0].name, "id");
+/// assert!(matches!(params[0].converter, Converter::Str));
+///
+/// // Typed parameters
+/// let params = extract_path_params("/items/{item_id:int}/price/{value:float}");
+/// assert_eq!(params.len(), 2);
+/// assert!(matches!(params[0].converter, Converter::Int));
+/// assert!(matches!(params[1].converter, Converter::Float));
+///
+/// // Wildcard catch-all
+/// let params = extract_path_params("/files/{*path}");
+/// assert_eq!(params.len(), 1);
+/// assert!(matches!(params[0].converter, Converter::Path));
+/// ```
+#[must_use]
+pub fn extract_path_params(path: &str) -> Vec<ParamInfo> {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            if s.starts_with('{') && s.ends_with('}') {
+                let inner = &s[1..s.len() - 1];
+                // Check for {*name} wildcard syntax (catch-all)
+                if let Some(name) = inner.strip_prefix('*') {
+                    return Some(ParamInfo::new(name, Converter::Path));
+                }
+                let (name, converter) = if let Some(pos) = inner.find(':') {
+                    let conv = match &inner[pos + 1..] {
+                        "int" => Converter::Int,
+                        "float" => Converter::Float,
+                        "uuid" => Converter::Uuid,
+                        "path" => Converter::Path,
+                        _ => Converter::Str,
+                    };
+                    (&inner[..pos], conv)
+                } else {
+                    (inner, Converter::Str)
+                };
+                Some(ParamInfo::new(name, converter))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// A route definition with handler for request processing.
@@ -266,6 +385,8 @@ pub struct Route {
     pub tags: Vec<String>,
     /// Whether this route is deprecated.
     pub deprecated: bool,
+    /// Path parameters extracted from the route pattern for OpenAPI documentation.
+    pub path_params: Vec<ParamInfo>,
     /// Request body schema type name for OpenAPI documentation (e.g., "CreateUser").
     pub request_body_schema: Option<String>,
     /// Request body content type for OpenAPI documentation (e.g., "application/json").
@@ -293,6 +414,9 @@ impl fmt::Debug for Route {
         }
         if self.deprecated {
             s.field("deprecated", &self.deprecated);
+        }
+        if !self.path_params.is_empty() {
+            s.field("path_params", &self.path_params);
         }
         if let Some(ref schema) = self.request_body_schema {
             s.field("request_body_schema", schema);
@@ -420,6 +544,7 @@ impl Route {
     {
         let path = path.into();
         let operation_id = path.replace('/', "_").replace(['{', '}'], "");
+        let path_params = extract_path_params(&path);
         Self {
             path,
             method,
@@ -428,6 +553,7 @@ impl Route {
             description: None,
             tags: Vec::new(),
             deprecated: false,
+            path_params,
             request_body_schema: None,
             request_body_content_type: None,
             request_body_required: false,
@@ -445,6 +571,7 @@ impl Route {
     ) -> Self {
         let path = path.into();
         let operation_id = path.replace('/', "_").replace(['{', '}'], "");
+        let path_params = extract_path_params(&path);
         Self {
             path,
             method,
@@ -453,6 +580,7 @@ impl Route {
             description: None,
             tags: Vec::new(),
             deprecated: false,
+            path_params,
             request_body_schema: None,
             request_body_content_type: None,
             request_body_required: false,
@@ -541,6 +669,12 @@ impl Route {
     #[must_use]
     pub fn has_request_body(&self) -> bool {
         self.request_body_schema.is_some()
+    }
+
+    /// Check if this route has path parameters.
+    #[must_use]
+    pub fn has_path_params(&self) -> bool {
+        !self.path_params.is_empty()
     }
 }
 
@@ -634,10 +768,7 @@ impl Router {
             let (segment, param) = match seg {
                 PathSegment::Static(s) => (s.to_string(), None),
                 PathSegment::Param { name, converter } => {
-                    let info = ParamInfo {
-                        name: name.to_string(),
-                        converter,
-                    };
+                    let info = ParamInfo::new(name, converter);
                     (format!("{{{name}}}"), Some(info))
                 }
             };
@@ -758,6 +889,8 @@ impl Router {
                 format!("{}{}", prefix, child_path)
             };
 
+            // Recompute path_params from full_path since the mounted path may differ
+            let path_params = extract_path_params(&full_path);
             let mounted = Route {
                 path: full_path,
                 method: route.method,
@@ -766,6 +899,7 @@ impl Router {
                 description: route.description,
                 tags: route.tags,
                 deprecated: route.deprecated,
+                path_params,
                 request_body_schema: route.request_body_schema,
                 request_body_content_type: route.request_body_content_type,
                 request_body_required: route.request_body_required,
@@ -1346,6 +1480,163 @@ mod tests {
             }
             _ => panic!("Expected param segment"),
         }
+    }
+
+    // =========================================================================
+    // EXTRACT PATH PARAMS TESTS
+    // =========================================================================
+
+    #[test]
+    fn extract_path_params_simple() {
+        let params = extract_path_params("/users/{id}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "id");
+        assert_eq!(params[0].converter, Converter::Str);
+    }
+
+    #[test]
+    fn extract_path_params_multiple() {
+        let params = extract_path_params("/users/{id}/posts/{post_id}");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "id");
+        assert_eq!(params[1].name, "post_id");
+    }
+
+    #[test]
+    fn extract_path_params_typed_int() {
+        let params = extract_path_params("/items/{item_id:int}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "item_id");
+        assert_eq!(params[0].converter, Converter::Int);
+    }
+
+    #[test]
+    fn extract_path_params_typed_float() {
+        let params = extract_path_params("/prices/{value:float}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "value");
+        assert_eq!(params[0].converter, Converter::Float);
+    }
+
+    #[test]
+    fn extract_path_params_typed_uuid() {
+        let params = extract_path_params("/resources/{uuid:uuid}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "uuid");
+        assert_eq!(params[0].converter, Converter::Uuid);
+    }
+
+    #[test]
+    fn extract_path_params_wildcard_asterisk() {
+        let params = extract_path_params("/files/{*filepath}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "filepath");
+        assert_eq!(params[0].converter, Converter::Path);
+    }
+
+    #[test]
+    fn extract_path_params_wildcard_path_converter() {
+        let params = extract_path_params("/static/{path:path}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "path");
+        assert_eq!(params[0].converter, Converter::Path);
+    }
+
+    #[test]
+    fn extract_path_params_mixed_types() {
+        let params = extract_path_params("/api/{version}/items/{id:int}/details/{slug}");
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0].name, "version");
+        assert_eq!(params[0].converter, Converter::Str);
+        assert_eq!(params[1].name, "id");
+        assert_eq!(params[1].converter, Converter::Int);
+        assert_eq!(params[2].name, "slug");
+        assert_eq!(params[2].converter, Converter::Str);
+    }
+
+    #[test]
+    fn extract_path_params_no_params() {
+        let params = extract_path_params("/static/path/no/params");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn extract_path_params_root() {
+        let params = extract_path_params("/");
+        assert!(params.is_empty());
+    }
+
+    // =========================================================================
+    // PARAM INFO BUILDER TESTS
+    // =========================================================================
+
+    #[test]
+    fn param_info_new() {
+        let info = ParamInfo::new("id", Converter::Int);
+        assert_eq!(info.name, "id");
+        assert_eq!(info.converter, Converter::Int);
+        assert!(info.title.is_none());
+        assert!(info.description.is_none());
+        assert!(!info.deprecated);
+        assert!(info.example.is_none());
+        assert!(info.examples.is_empty());
+    }
+
+    #[test]
+    fn param_info_with_title() {
+        let info = ParamInfo::new("id", Converter::Str).with_title("User ID");
+        assert_eq!(info.title.as_deref(), Some("User ID"));
+    }
+
+    #[test]
+    fn param_info_with_description() {
+        let info =
+            ParamInfo::new("page", Converter::Int).with_description("Page number for pagination");
+        assert_eq!(
+            info.description.as_deref(),
+            Some("Page number for pagination")
+        );
+    }
+
+    #[test]
+    fn param_info_deprecated() {
+        let info = ParamInfo::new("old", Converter::Str).deprecated();
+        assert!(info.deprecated);
+    }
+
+    #[test]
+    fn param_info_with_example() {
+        let info = ParamInfo::new("id", Converter::Int).with_example(serde_json::json!(42));
+        assert_eq!(info.example, Some(serde_json::json!(42)));
+    }
+
+    #[test]
+    fn param_info_with_named_examples() {
+        let info = ParamInfo::new("status", Converter::Str)
+            .with_named_example("active", serde_json::json!("active"))
+            .with_named_example("inactive", serde_json::json!("inactive"));
+        assert_eq!(info.examples.len(), 2);
+        assert_eq!(info.examples[0].0, "active");
+        assert_eq!(info.examples[1].0, "inactive");
+    }
+
+    #[test]
+    fn param_info_builder_chain() {
+        let info = ParamInfo::new("item_id", Converter::Int)
+            .with_title("Item ID")
+            .with_description("The unique item identifier")
+            .deprecated()
+            .with_example(serde_json::json!(123));
+
+        assert_eq!(info.name, "item_id");
+        assert_eq!(info.converter, Converter::Int);
+        assert_eq!(info.title.as_deref(), Some("Item ID"));
+        assert_eq!(
+            info.description.as_deref(),
+            Some("The unique item identifier")
+        );
+        assert!(info.deprecated);
+        assert_eq!(info.example, Some(serde_json::json!(123)));
     }
 
     #[test]

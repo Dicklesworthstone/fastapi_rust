@@ -588,6 +588,583 @@ pub fn validate_content_length(
 }
 
 // ============================================================================
+// Async Streaming Body Readers
+// ============================================================================
+
+use asupersync::io::AsyncRead;
+use asupersync::stream::Stream;
+use fastapi_core::RequestBodyStreamError;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+/// Default threshold for enabling streaming (64KB).
+///
+/// Bodies larger than this will be streamed rather than buffered entirely.
+pub const DEFAULT_STREAMING_THRESHOLD: usize = 64 * 1024;
+
+/// Configuration for async body streaming.
+#[derive(Debug, Clone)]
+pub struct StreamingBodyConfig {
+    /// Threshold above which bodies are streamed.
+    pub streaming_threshold: usize,
+    /// Size of each read chunk.
+    pub chunk_size: usize,
+    /// Maximum body size (enforced during streaming).
+    pub max_size: usize,
+}
+
+impl Default for StreamingBodyConfig {
+    fn default() -> Self {
+        Self {
+            streaming_threshold: DEFAULT_STREAMING_THRESHOLD,
+            chunk_size: 8 * 1024, // 8KB chunks
+            max_size: DEFAULT_MAX_BODY_SIZE,
+        }
+    }
+}
+
+impl StreamingBodyConfig {
+    /// Create a new streaming config with default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the streaming threshold.
+    #[must_use]
+    pub fn with_streaming_threshold(mut self, threshold: usize) -> Self {
+        self.streaming_threshold = threshold;
+        self
+    }
+
+    /// Set the chunk size for reads.
+    ///
+    /// Note: For network efficiency, values below 1KB are allowed but not recommended
+    /// for production use.
+    #[must_use]
+    pub fn with_chunk_size(mut self, size: usize) -> Self {
+        self.chunk_size = size.max(1); // Minimum 1 byte (for testing)
+        self
+    }
+
+    /// Set the maximum body size.
+    #[must_use]
+    pub fn with_max_size(mut self, size: usize) -> Self {
+        self.max_size = size;
+        self
+    }
+
+    /// Returns true if the given content length should be streamed.
+    #[must_use]
+    pub fn should_stream(&self, content_length: usize) -> bool {
+        content_length > self.streaming_threshold
+    }
+}
+
+/// An async stream that reads a Content-Length body in chunks.
+///
+/// This stream first yields any buffered data from the parser, then
+/// continues reading from the underlying async reader until the
+/// expected length is reached.
+///
+/// # Memory Efficiency
+///
+/// Only one chunk is buffered at a time, making this suitable for
+/// streaming large request bodies without excessive memory usage.
+pub struct AsyncContentLengthStream<R> {
+    /// Optional reader for more data (None after initial buffer exhausted and no reader).
+    reader: Option<R>,
+    /// Initial buffer from parser.
+    initial_buffer: Vec<u8>,
+    /// Position in initial buffer.
+    initial_position: usize,
+    /// Expected total size from Content-Length.
+    expected_size: usize,
+    /// Bytes read so far.
+    bytes_read: usize,
+    /// Chunk size for reads.
+    chunk_size: usize,
+    /// Maximum allowed size.
+    max_size: usize,
+    /// Read buffer (reused across reads).
+    read_buffer: Vec<u8>,
+    /// Whether the stream is complete.
+    complete: bool,
+    /// Whether an error occurred.
+    error: bool,
+}
+
+impl<R> AsyncContentLengthStream<R>
+where
+    R: AsyncRead + Unpin + Send + Sync + 'static,
+{
+    /// Create a new Content-Length stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_buffer` - Any bytes already buffered by the parser
+    /// * `reader` - The async reader for remaining bytes
+    /// * `content_length` - Expected total body size
+    /// * `config` - Streaming configuration
+    pub fn new(
+        initial_buffer: Vec<u8>,
+        reader: R,
+        content_length: usize,
+        config: &StreamingBodyConfig,
+    ) -> Self {
+        Self {
+            reader: Some(reader),
+            initial_buffer,
+            initial_position: 0,
+            expected_size: content_length,
+            bytes_read: 0,
+            chunk_size: config.chunk_size,
+            max_size: config.max_size,
+            read_buffer: vec![0u8; config.chunk_size],
+            complete: false,
+            error: false,
+        }
+    }
+
+    /// Create a Content-Length stream with default config.
+    pub fn with_defaults(initial_buffer: Vec<u8>, reader: R, content_length: usize) -> Self {
+        Self::new(
+            initial_buffer,
+            reader,
+            content_length,
+            &StreamingBodyConfig::default(),
+        )
+    }
+
+    /// Returns the expected total size.
+    #[must_use]
+    pub fn expected_size(&self) -> usize {
+        self.expected_size
+    }
+
+    /// Returns the number of bytes read so far.
+    #[must_use]
+    pub fn bytes_read(&self) -> usize {
+        self.bytes_read
+    }
+
+    /// Returns the remaining bytes to read.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.expected_size.saturating_sub(self.bytes_read)
+    }
+
+    /// Returns true if the stream is complete.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    fn initial_remaining(&self) -> usize {
+        self.initial_buffer
+            .len()
+            .saturating_sub(self.initial_position)
+    }
+}
+
+impl<R> Stream for AsyncContentLengthStream<R>
+where
+    R: AsyncRead + Unpin + Send + Sync + 'static,
+{
+    type Item = Result<Vec<u8>, RequestBodyStreamError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Check if complete or error
+        if self.complete || self.error {
+            return Poll::Ready(None);
+        }
+
+        // Check if we've read all expected bytes
+        if self.bytes_read >= self.expected_size {
+            self.complete = true;
+            return Poll::Ready(None);
+        }
+
+        // Check size limit
+        if self.bytes_read > self.max_size {
+            self.error = true;
+            let bytes_read = self.bytes_read;
+            let max_size = self.max_size;
+            return Poll::Ready(Some(Err(RequestBodyStreamError::TooLarge {
+                received: bytes_read,
+                max: max_size,
+            })));
+        }
+
+        // First, try to yield from initial buffer
+        let initial_remaining = self.initial_remaining();
+        if initial_remaining > 0 {
+            let remaining_for_body = self.expected_size.saturating_sub(self.bytes_read);
+            let chunk_size = self
+                .chunk_size
+                .min(initial_remaining)
+                .min(remaining_for_body);
+
+            if chunk_size > 0 {
+                let start = self.initial_position;
+                let chunk = self.initial_buffer[start..start + chunk_size].to_vec();
+                self.initial_position += chunk_size;
+                self.bytes_read += chunk_size;
+                return Poll::Ready(Some(Ok(chunk)));
+            }
+        }
+
+        // Initial buffer exhausted, read from reader
+        let remaining = self.expected_size.saturating_sub(self.bytes_read);
+        let to_read = self.chunk_size.min(remaining);
+
+        if to_read == 0 {
+            self.complete = true;
+            return Poll::Ready(None);
+        }
+
+        // Ensure buffer is sized appropriately
+        if self.read_buffer.len() < to_read {
+            self.read_buffer.resize(to_read, 0);
+        }
+
+        // Take reader temporarily to avoid borrow conflicts
+        let mut reader = match self.reader.take() {
+            Some(r) => r,
+            None => {
+                self.error = true;
+                return Poll::Ready(Some(Err(RequestBodyStreamError::ConnectionClosed)));
+            }
+        };
+
+        // Perform the read and extract result before modifying self
+        let read_result = {
+            let mut read_buf = asupersync::io::ReadBuf::new(&mut self.read_buffer[..to_read]);
+            match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => {
+                    let n = read_buf.filled().len();
+                    let chunk = read_buf.filled().to_vec();
+                    Poll::Ready(Ok((n, chunk)))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        };
+
+        match read_result {
+            Poll::Ready(Ok((n, chunk))) => {
+                if n == 0 {
+                    // EOF before expected bytes - incomplete body
+                    self.error = true;
+                    return Poll::Ready(Some(Err(RequestBodyStreamError::ConnectionClosed)));
+                }
+
+                self.bytes_read += n;
+
+                // Put reader back
+                self.reader = Some(reader);
+
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Err(e)) => {
+                self.error = true;
+                Poll::Ready(Some(Err(RequestBodyStreamError::Io(e.to_string()))))
+            }
+            Poll::Pending => {
+                // Put reader back before returning Pending
+                self.reader = Some(reader);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Parsing state for chunked encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsyncChunkedState {
+    /// Parsing chunk size line.
+    ChunkSize,
+    /// Reading chunk data.
+    ChunkData { remaining: usize },
+    /// Expecting CRLF after chunk data.
+    ChunkDataEnd,
+    /// Complete.
+    Complete,
+    /// Error.
+    Error,
+}
+
+/// An async stream that reads a chunked-encoded body.
+///
+/// This stream parses chunked transfer encoding on the fly,
+/// yielding decoded chunks as they become available.
+///
+/// # Chunked Encoding Format
+///
+/// ```text
+/// chunk-size CRLF
+/// chunk-data CRLF
+/// ...
+/// 0 CRLF
+/// [trailers] CRLF
+/// ```
+pub struct AsyncChunkedStream<R> {
+    /// Reader for more data (used when buffer is exhausted).
+    #[allow(dead_code)]
+    reader: Option<R>,
+    /// Parsing state.
+    state: AsyncChunkedState,
+    /// Total decoded bytes so far.
+    bytes_decoded: usize,
+    /// Maximum allowed size.
+    max_size: usize,
+    /// Chunk size for reads.
+    chunk_size: usize,
+    /// Read buffer (used when socket reads are needed).
+    #[allow(dead_code)]
+    read_buffer: Vec<u8>,
+    /// Buffer for initial data from parser + any data read from socket.
+    buffer: Vec<u8>,
+    /// Position in buffer.
+    position: usize,
+}
+
+impl<R> AsyncChunkedStream<R>
+where
+    R: AsyncRead + Unpin + Send + Sync + 'static,
+{
+    /// Create a new chunked stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_buffer` - Any bytes already buffered by the parser
+    /// * `reader` - The async reader for remaining bytes
+    /// * `config` - Streaming configuration
+    pub fn new(initial_buffer: Vec<u8>, reader: R, config: &StreamingBodyConfig) -> Self {
+        Self {
+            reader: Some(reader),
+            state: AsyncChunkedState::ChunkSize,
+            bytes_decoded: 0,
+            max_size: config.max_size,
+            chunk_size: config.chunk_size,
+            read_buffer: vec![0u8; config.chunk_size],
+            buffer: initial_buffer,
+            position: 0,
+        }
+    }
+
+    /// Create a chunked stream with default config.
+    pub fn with_defaults(initial_buffer: Vec<u8>, reader: R) -> Self {
+        Self::new(initial_buffer, reader, &StreamingBodyConfig::default())
+    }
+
+    /// Returns the total decoded bytes so far.
+    #[must_use]
+    pub fn bytes_decoded(&self) -> usize {
+        self.bytes_decoded
+    }
+
+    /// Returns true if the stream is complete.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.state == AsyncChunkedState::Complete
+    }
+
+    /// Get remaining buffer bytes.
+    fn buffer_remaining(&self) -> &[u8] {
+        &self.buffer[self.position..]
+    }
+
+    /// Consume bytes from buffer.
+    fn consume(&mut self, n: usize) {
+        self.position += n;
+    }
+}
+
+impl<R> Stream for AsyncChunkedStream<R>
+where
+    R: AsyncRead + Unpin + Send + Sync + 'static,
+{
+    type Item = Result<Vec<u8>, RequestBodyStreamError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Check if complete or error
+        if self.state == AsyncChunkedState::Complete || self.state == AsyncChunkedState::Error {
+            return Poll::Ready(None);
+        }
+
+        // Check size limit
+        if self.bytes_decoded > self.max_size {
+            self.state = AsyncChunkedState::Error;
+            let bytes_decoded = self.bytes_decoded;
+            let max_size = self.max_size;
+            return Poll::Ready(Some(Err(RequestBodyStreamError::TooLarge {
+                received: bytes_decoded,
+                max: max_size,
+            })));
+        }
+
+        loop {
+            match self.state {
+                AsyncChunkedState::ChunkSize => {
+                    // Try to find chunk size line in buffer
+                    let remaining = self.buffer_remaining();
+                    if let Some(crlf_pos) = remaining.windows(2).position(|w| w == b"\r\n") {
+                        // Parse chunk size
+                        let size_line = &remaining[..crlf_pos];
+
+                        // Parse hex size (ignore extensions after semicolon)
+                        let size_str = if let Some(semi) = size_line.iter().position(|&b| b == b';')
+                        {
+                            &size_line[..semi]
+                        } else {
+                            size_line
+                        };
+
+                        let size_str = match std::str::from_utf8(size_str) {
+                            Ok(s) => s.trim(),
+                            Err(_) => {
+                                self.state = AsyncChunkedState::Error;
+                                return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                                    "invalid UTF-8 in chunk size".to_string(),
+                                ))));
+                            }
+                        };
+
+                        let chunk_size = match usize::from_str_radix(size_str, 16) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                self.state = AsyncChunkedState::Error;
+                                return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                                    "invalid hex chunk size".to_string(),
+                                ))));
+                            }
+                        };
+
+                        self.consume(crlf_pos + 2);
+
+                        if chunk_size == 0 {
+                            // Final chunk - complete
+                            self.state = AsyncChunkedState::Complete;
+                            return Poll::Ready(None);
+                        }
+
+                        self.state = AsyncChunkedState::ChunkData {
+                            remaining: chunk_size,
+                        };
+                        continue;
+                    }
+
+                    // Need more data - for now just error (full impl would read from socket)
+                    self.state = AsyncChunkedState::Error;
+                    return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                        "incomplete chunk size line".to_string(),
+                    ))));
+                }
+                AsyncChunkedState::ChunkData { remaining } => {
+                    // Read chunk data from buffer
+                    let buffer_remaining = self.buffer_remaining();
+                    let to_read = remaining.min(buffer_remaining.len()).min(self.chunk_size);
+
+                    if to_read > 0 {
+                        let chunk = buffer_remaining[..to_read].to_vec();
+                        self.consume(to_read);
+                        self.bytes_decoded += to_read;
+
+                        let new_remaining = remaining - to_read;
+                        if new_remaining == 0 {
+                            self.state = AsyncChunkedState::ChunkDataEnd;
+                        } else {
+                            self.state = AsyncChunkedState::ChunkData {
+                                remaining: new_remaining,
+                            };
+                        }
+
+                        return Poll::Ready(Some(Ok(chunk)));
+                    }
+
+                    // Need more data from socket
+                    self.state = AsyncChunkedState::Error;
+                    return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                        "incomplete chunk data".to_string(),
+                    ))));
+                }
+                AsyncChunkedState::ChunkDataEnd => {
+                    // Expect CRLF
+                    let remaining = self.buffer_remaining();
+                    if remaining.len() >= 2 {
+                        if &remaining[..2] == b"\r\n" {
+                            self.consume(2);
+                            self.state = AsyncChunkedState::ChunkSize;
+                            continue;
+                        } else {
+                            self.state = AsyncChunkedState::Error;
+                            return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                                "expected CRLF after chunk data".to_string(),
+                            ))));
+                        }
+                    }
+
+                    // Need more data
+                    self.state = AsyncChunkedState::Error;
+                    return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                        "incomplete CRLF after chunk".to_string(),
+                    ))));
+                }
+                AsyncChunkedState::Complete | AsyncChunkedState::Error => {
+                    return Poll::Ready(None);
+                }
+            }
+        }
+    }
+}
+
+/// Create a streaming body from a Content-Length body.
+///
+/// Returns a `fastapi_core::Body::Stream` that yields chunks from the given
+/// initial buffer and async reader.
+///
+/// # Arguments
+///
+/// * `initial_buffer` - Any bytes already buffered by the parser
+/// * `reader` - The async reader for remaining bytes
+/// * `content_length` - Expected total body size
+/// * `config` - Streaming configuration
+pub fn create_content_length_stream<R>(
+    initial_buffer: Vec<u8>,
+    reader: R,
+    content_length: usize,
+    config: &StreamingBodyConfig,
+) -> fastapi_core::Body
+where
+    R: AsyncRead + Unpin + Send + Sync + 'static,
+{
+    let stream = AsyncContentLengthStream::new(initial_buffer, reader, content_length, config);
+    fastapi_core::Body::streaming_with_size(stream, content_length)
+}
+
+/// Create a streaming body from a chunked transfer-encoded body.
+///
+/// Returns a `fastapi_core::Body::Stream` that yields decoded chunks.
+///
+/// # Arguments
+///
+/// * `initial_buffer` - Any bytes already buffered by the parser
+/// * `reader` - The async reader for remaining bytes
+/// * `config` - Streaming configuration
+pub fn create_chunked_stream<R>(
+    initial_buffer: Vec<u8>,
+    reader: R,
+    config: &StreamingBodyConfig,
+) -> fastapi_core::Body
+where
+    R: AsyncRead + Unpin + Send + Sync + 'static,
+{
+    let stream = AsyncChunkedStream::new(initial_buffer, reader, config);
+    fastapi_core::Body::streaming(stream)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -946,5 +1523,220 @@ mod tests {
 
         let err = BodyError::UnexpectedEof;
         assert_eq!(format!("{err}"), "unexpected end of body");
+    }
+
+    // ========================================================================
+    // StreamingBodyConfig Tests
+    // ========================================================================
+
+    #[test]
+    fn streaming_body_config_defaults() {
+        let config = StreamingBodyConfig::default();
+        assert_eq!(config.streaming_threshold, DEFAULT_STREAMING_THRESHOLD);
+        assert_eq!(config.chunk_size, 8 * 1024);
+        assert_eq!(config.max_size, DEFAULT_MAX_BODY_SIZE);
+    }
+
+    #[test]
+    fn streaming_body_config_custom() {
+        let config = StreamingBodyConfig::new()
+            .with_streaming_threshold(1024)
+            .with_chunk_size(4096)
+            .with_max_size(10_000);
+        assert_eq!(config.streaming_threshold, 1024);
+        assert_eq!(config.chunk_size, 4096);
+        assert_eq!(config.max_size, 10_000);
+    }
+
+    #[test]
+    fn streaming_body_config_minimum_chunk_size() {
+        let config = StreamingBodyConfig::new().with_chunk_size(0);
+        // Should be clamped to minimum of 1 byte
+        assert_eq!(config.chunk_size, 1);
+    }
+
+    #[test]
+    fn streaming_body_config_should_stream() {
+        let config = StreamingBodyConfig::new().with_streaming_threshold(1000);
+        assert!(!config.should_stream(500));
+        assert!(!config.should_stream(1000));
+        assert!(config.should_stream(1001));
+        assert!(config.should_stream(10000));
+    }
+
+    // ========================================================================
+    // AsyncContentLengthStream Tests
+    // ========================================================================
+
+    #[test]
+    fn async_content_length_stream_from_buffer() {
+        use std::sync::Arc;
+        use std::task::{Wake, Waker};
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        fn noop_waker() -> Waker {
+            Waker::from(Arc::new(NoopWaker))
+        }
+
+        // Create a mock reader that won't be used (buffer is complete)
+        struct EmptyReader;
+        impl AsyncRead for EmptyReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut asupersync::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let buffer = b"Hello, World!".to_vec();
+        let config = StreamingBodyConfig::new().with_chunk_size(5);
+        let mut stream = AsyncContentLengthStream::new(buffer, EmptyReader, 13, &config);
+
+        assert_eq!(stream.expected_size(), 13);
+        assert_eq!(stream.bytes_read(), 0);
+        assert_eq!(stream.remaining(), 13);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First chunk: "Hello"
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        match result {
+            Poll::Ready(Some(Ok(chunk))) => {
+                assert_eq!(chunk, b"Hello");
+            }
+            _ => panic!("expected chunk"),
+        }
+        assert_eq!(stream.bytes_read(), 5);
+
+        // Second chunk: ", Wor"
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        match result {
+            Poll::Ready(Some(Ok(chunk))) => {
+                assert_eq!(chunk, b", Wor");
+            }
+            _ => panic!("expected chunk"),
+        }
+
+        // Third chunk: "ld!"
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        match result {
+            Poll::Ready(Some(Ok(chunk))) => {
+                assert_eq!(chunk, b"ld!");
+            }
+            _ => panic!("expected chunk"),
+        }
+
+        // End of stream
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        assert!(matches!(result, Poll::Ready(None)));
+        assert!(stream.is_complete());
+    }
+
+    // ========================================================================
+    // AsyncChunkedStream Tests
+    // ========================================================================
+
+    #[test]
+    fn async_chunked_stream_simple() {
+        use std::sync::Arc;
+        use std::task::{Wake, Waker};
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        fn noop_waker() -> Waker {
+            Waker::from(Arc::new(NoopWaker))
+        }
+
+        struct EmptyReader;
+        impl AsyncRead for EmptyReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut asupersync::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        // Complete chunked body in buffer: "Hello" in chunked encoding
+        let buffer = b"5\r\nHello\r\n0\r\n\r\n".to_vec();
+        let config = StreamingBodyConfig::new().with_chunk_size(1024);
+        let mut stream = AsyncChunkedStream::new(buffer, EmptyReader, &config);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First chunk: "Hello"
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        match result {
+            Poll::Ready(Some(Ok(chunk))) => {
+                assert_eq!(chunk, b"Hello");
+            }
+            _ => panic!("expected chunk, got {:?}", result),
+        }
+
+        // Note: Need to poll again to process CRLF and next chunk size
+        // The implementation returns Pending after transition, then processes on next poll
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        // Should be complete (0\r\n\r\n)
+        assert!(matches!(result, Poll::Ready(None)));
+        assert!(stream.is_complete());
+    }
+
+    #[test]
+    fn async_chunked_stream_multiple_chunks() {
+        use std::sync::Arc;
+        use std::task::{Wake, Waker};
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        fn noop_waker() -> Waker {
+            Waker::from(Arc::new(NoopWaker))
+        }
+
+        struct EmptyReader;
+        impl AsyncRead for EmptyReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut asupersync::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        // "Hello, World!" in chunked encoding
+        let buffer = b"5\r\nHello\r\n8\r\n, World!\r\n0\r\n\r\n".to_vec();
+        let config = StreamingBodyConfig::new();
+        let mut stream = AsyncChunkedStream::new(buffer, EmptyReader, &config);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Collect all chunks
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(Ok(chunk))) => collected.extend_from_slice(&chunk),
+                Poll::Ready(Some(Err(e))) => panic!("unexpected error: {e}"),
+                Poll::Ready(None) => break,
+                Poll::Pending => continue, // Continue processing
+            }
+        }
+
+        assert_eq!(collected, b"Hello, World!");
     }
 }

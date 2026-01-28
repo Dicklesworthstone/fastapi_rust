@@ -23,7 +23,16 @@ pub struct OpenApi {
     /// API tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
+    /// Security requirements applied to all operations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub security: Vec<SecurityRequirement>,
 }
+
+/// Security requirement object.
+///
+/// Each key is a security scheme name, and the value is a list of scopes
+/// required for that scheme (empty for schemes that don't use scopes).
+pub type SecurityRequirement = HashMap<String, Vec<String>>;
 
 /// API information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +117,7 @@ pub struct PathItem {
 
 /// API operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Operation {
     /// Operation ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +142,11 @@ pub struct Operation {
     /// Deprecated flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub deprecated: bool,
+    /// Security requirements for this operation.
+    ///
+    /// Overrides the top-level security requirements when specified.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub security: Vec<SecurityRequirement>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -405,12 +420,118 @@ pub struct Response {
     pub content: HashMap<String, MediaType>,
 }
 
+/// Security scheme definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)] // OAuth2 variant is large but rarely copied
+pub enum SecurityScheme {
+    /// API key authentication.
+    #[serde(rename = "apiKey")]
+    ApiKey {
+        /// Parameter name.
+        name: String,
+        /// Location of the API key.
+        #[serde(rename = "in")]
+        location: ApiKeyLocation,
+        /// Description.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// HTTP authentication (Basic, Bearer, etc.).
+    #[serde(rename = "http")]
+    Http {
+        /// Authentication scheme (e.g., "basic", "bearer").
+        scheme: String,
+        /// Bearer token format (e.g., "JWT").
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "bearerFormat"
+        )]
+        bearer_format: Option<String>,
+        /// Description.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// OAuth 2.0 authentication.
+    #[serde(rename = "oauth2")]
+    OAuth2 {
+        /// OAuth 2.0 flows.
+        flows: OAuth2Flows,
+        /// Description.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// OpenID Connect authentication.
+    #[serde(rename = "openIdConnect")]
+    OpenIdConnect {
+        /// OpenID Connect discovery URL.
+        #[serde(rename = "openIdConnectUrl")]
+        open_id_connect_url: String,
+        /// Description.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+}
+
+/// Location of an API key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiKeyLocation {
+    /// API key in query parameter.
+    Query,
+    /// API key in header.
+    Header,
+    /// API key in cookie.
+    Cookie,
+}
+
+/// OAuth 2.0 flow configurations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuth2Flows {
+    /// Implicit flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implicit: Option<OAuth2Flow>,
+    /// Authorization code flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_code: Option<OAuth2Flow>,
+    /// Client credentials flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_credentials: Option<OAuth2Flow>,
+    /// Resource owner password flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<OAuth2Flow>,
+}
+
+/// OAuth 2.0 flow configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuth2Flow {
+    /// Authorization URL (for implicit and authorization_code flows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+    /// Token URL (for password, client_credentials, and authorization_code flows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_url: Option<String>,
+    /// Refresh URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
+    /// Available scopes.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub scopes: HashMap<String, String>,
+}
+
 /// Reusable components.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Components {
     /// Schema definitions.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub schemas: HashMap<String, Schema>,
+    /// Security scheme definitions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub security_schemes: HashMap<String, SecurityScheme>,
 }
 
 /// API tag.
@@ -745,9 +866,9 @@ mod serialization_tests {
         let builder = OpenApiBuilder::new("Test API", "1.0.0");
 
         // Register schemas via the registry
-        builder
-            .registry()
-            .register("User", Schema::object(
+        builder.registry().register(
+            "User",
+            Schema::object(
                 [
                     ("id".to_string(), Schema::integer(Some("int64"))),
                     ("name".to_string(), Schema::string()),
@@ -755,7 +876,8 @@ mod serialization_tests {
                 .into_iter()
                 .collect(),
                 vec!["id".to_string(), "name".to_string()],
-            ));
+            ),
+        );
 
         let doc = builder.build();
 
@@ -785,11 +907,13 @@ mod serialization_tests {
     fn openapi_builder_merges_registry_and_explicit_schemas() {
         use crate::schema::Schema;
 
-        let builder = OpenApiBuilder::new("Test API", "1.0.0")
-            .schema("ExplicitSchema", Schema::boolean());
+        let builder =
+            OpenApiBuilder::new("Test API", "1.0.0").schema("ExplicitSchema", Schema::boolean());
 
         // Also register via registry
-        builder.registry().register("RegistrySchema", Schema::string());
+        builder
+            .registry()
+            .register("RegistrySchema", Schema::string());
 
         let doc = builder.build();
 
@@ -874,6 +998,8 @@ pub struct OpenApiBuilder {
     paths: HashMap<String, PathItem>,
     components: Components,
     tags: Vec<Tag>,
+    /// Global security requirements.
+    security: Vec<SecurityRequirement>,
     /// Schema registry for collecting and deduplicating schemas.
     registry: SchemaRegistry,
 }
@@ -895,6 +1021,7 @@ impl OpenApiBuilder {
             paths: HashMap::new(),
             components: Components::default(),
             tags: Vec::new(),
+            security: Vec::new(),
             registry: SchemaRegistry::new(),
         }
     }
@@ -922,6 +1049,7 @@ impl OpenApiBuilder {
             paths: HashMap::new(),
             components: Components::default(),
             tags: Vec::new(),
+            security: Vec::new(),
             registry,
         }
     }
@@ -969,6 +1097,169 @@ impl OpenApiBuilder {
         self
     }
 
+    /// Add a security scheme.
+    ///
+    /// Security schemes define authentication methods used by the API.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_openapi::{OpenApiBuilder, SecurityScheme, ApiKeyLocation};
+    ///
+    /// let doc = OpenApiBuilder::new("My API", "1.0.0")
+    ///     .security_scheme("api_key", SecurityScheme::ApiKey {
+    ///         name: "X-API-Key".to_string(),
+    ///         location: ApiKeyLocation::Header,
+    ///         description: Some("API key for authentication".to_string()),
+    ///     })
+    ///     .security_scheme("bearer", SecurityScheme::Http {
+    ///         scheme: "bearer".to_string(),
+    ///         bearer_format: Some("JWT".to_string()),
+    ///         description: None,
+    ///     })
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn security_scheme(mut self, name: impl Into<String>, scheme: SecurityScheme) -> Self {
+        self.components.security_schemes.insert(name.into(), scheme);
+        self
+    }
+
+    /// Add a global security requirement.
+    ///
+    /// Global security requirements apply to all operations unless overridden
+    /// at the operation level.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_openapi::OpenApiBuilder;
+    ///
+    /// let doc = OpenApiBuilder::new("My API", "1.0.0")
+    ///     .security_scheme("api_key", /* ... */)
+    ///     .security_requirement("api_key", vec![])  // No scopes needed for API key
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn security_requirement(
+        mut self,
+        scheme: impl Into<String>,
+        scopes: Vec<String>,
+    ) -> Self {
+        let mut req = SecurityRequirement::new();
+        req.insert(scheme.into(), scopes);
+        self.security.push(req);
+        self
+    }
+
+    /// Add a route to the OpenAPI document.
+    ///
+    /// Converts a route's metadata into an OpenAPI Operation and adds it
+    /// to the appropriate path. Multiple routes on the same path with
+    /// different methods are merged into a single PathItem.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_openapi::OpenApiBuilder;
+    /// use fastapi_router::Router;
+    ///
+    /// let router = Router::new();
+    /// // ... add routes to router ...
+    ///
+    /// let mut builder = OpenApiBuilder::new("My API", "1.0.0");
+    /// for route in router.routes() {
+    ///     builder.add_route(route);
+    /// }
+    /// let doc = builder.build();
+    /// ```
+    pub fn add_route(&mut self, route: &Route) {
+        let operation = self.route_to_operation(route);
+        let path_item = self.paths.entry(route.path.clone()).or_default();
+
+        match route.method {
+            Method::Get => path_item.get = Some(operation),
+            Method::Post => path_item.post = Some(operation),
+            Method::Put => path_item.put = Some(operation),
+            Method::Delete => path_item.delete = Some(operation),
+            Method::Patch => path_item.patch = Some(operation),
+            Method::Options => path_item.options = Some(operation),
+            Method::Head => path_item.head = Some(operation),
+            Method::Trace => {
+                // OpenAPI PathItem doesn't have a trace field by default,
+                // but we could add it. For now, skip TRACE methods.
+            }
+        }
+    }
+
+    /// Add multiple routes to the OpenAPI document.
+    ///
+    /// Convenience method that calls `add_route` for each route.
+    pub fn add_routes(&mut self, routes: &[Route]) {
+        for route in routes {
+            self.add_route(route);
+        }
+    }
+
+    /// Convert a Route to an OpenAPI Operation.
+    #[allow(clippy::unused_self)] // Will use self.registry for schema lookups in future
+    fn route_to_operation(&self, route: &Route) -> Operation {
+        // Convert path parameters
+        let parameters: Vec<Parameter> = route
+            .path_params
+            .iter()
+            .map(param_info_to_parameter)
+            .collect();
+
+        // Build request body if present
+        let request_body = route.request_body_schema.as_ref().map(|schema_name| {
+            let content_type = route
+                .request_body_content_type
+                .as_deref()
+                .unwrap_or("application/json");
+
+            let mut content = HashMap::new();
+            content.insert(
+                content_type.to_string(),
+                MediaType {
+                    schema: Some(Schema::reference(schema_name)),
+                },
+            );
+
+            RequestBody {
+                required: route.request_body_required,
+                content,
+                description: None,
+            }
+        });
+
+        // Build a default 200 response (can be extended later with response metadata)
+        let mut responses = HashMap::new();
+        responses.insert(
+            "200".to_string(),
+            Response {
+                description: "Successful response".to_string(),
+                content: HashMap::new(),
+            },
+        );
+
+        Operation {
+            operation_id: if route.operation_id.is_empty() {
+                None
+            } else {
+                Some(route.operation_id.clone())
+            },
+            summary: route.summary.clone(),
+            description: route.description.clone(),
+            tags: route.tags.clone(),
+            parameters,
+            request_body,
+            responses,
+            deprecated: route.deprecated,
+            security: Vec::new(),
+        }
+    }
+
     /// Build the OpenAPI document.
     ///
     /// This merges all schemas from the registry into `components.schemas`.
@@ -986,12 +1277,902 @@ impl OpenApiBuilder {
             info: self.info,
             servers: self.servers,
             paths: self.paths,
-            components: if all_schemas.is_empty() {
+            components: if all_schemas.is_empty() && self.components.security_schemes.is_empty() {
                 None
             } else {
-                Some(Components { schemas: all_schemas })
+                Some(Components {
+                    schemas: all_schemas,
+                    security_schemes: self.components.security_schemes,
+                })
             },
             tags: self.tags,
+            security: self.security,
         }
+    }
+}
+
+// ============================================================================
+// Path Parameter Generation
+// ============================================================================
+
+use fastapi_core::Method;
+use fastapi_router::{Converter, ParamInfo, Route, extract_path_params};
+
+/// Convert a router `Converter` type to an OpenAPI `Schema`.
+///
+/// Maps path parameter type converters to appropriate JSON Schema types:
+/// - `Str` → string
+/// - `Int` → integer (int64)
+/// - `Float` → number (double)
+/// - `Uuid` → string (uuid format)
+/// - `Path` → string (catch-all wildcard)
+#[must_use]
+pub fn converter_to_schema(converter: &Converter) -> Schema {
+    match converter {
+        Converter::Int => Schema::integer(Some("int64")),
+        Converter::Float => Schema::number(Some("double")),
+        Converter::Uuid => Schema::Primitive(crate::schema::PrimitiveSchema {
+            schema_type: crate::schema::SchemaType::String,
+            format: Some("uuid".to_string()),
+            nullable: false,
+            minimum: None,
+            maximum: None,
+            exclusive_minimum: None,
+            exclusive_maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            enum_values: None,
+        }),
+        // Str and Path both map to string type
+        Converter::Str | Converter::Path => Schema::string(),
+    }
+}
+
+/// Convert a `ParamInfo` to an OpenAPI `Parameter` object.
+///
+/// Creates a path parameter with the appropriate schema type based on
+/// the converter. All path parameters are required. Metadata (title,
+/// description, deprecated, examples) is copied from the ParamInfo.
+#[must_use]
+pub fn param_info_to_parameter(param: &ParamInfo) -> Parameter {
+    // Convert named examples from Vec<(String, Value)> to HashMap<String, Example>
+    let examples: HashMap<String, Example> = param
+        .examples
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                Example {
+                    summary: None,
+                    description: None,
+                    value: Some(value.clone()),
+                    external_value: None,
+                },
+            )
+        })
+        .collect();
+
+    Parameter {
+        name: param.name.clone(),
+        location: ParameterLocation::Path,
+        required: true, // Path parameters are always required
+        schema: Some(converter_to_schema(&param.converter)),
+        title: param.title.clone(),
+        description: param.description.clone(),
+        deprecated: param.deprecated,
+        example: param.example.clone(),
+        examples,
+    }
+}
+
+/// Extract path parameters from a route path pattern and convert them to OpenAPI Parameters.
+///
+/// Parses a path pattern like `/users/{id}/posts/{post_id:int}` and returns
+/// OpenAPI Parameter objects for each path parameter.
+///
+/// # Examples
+///
+/// ```ignore
+/// use fastapi_openapi::path_params_to_parameters;
+///
+/// let params = path_params_to_parameters("/users/{id}");
+/// assert_eq!(params.len(), 1);
+/// assert_eq!(params[0].name, "id");
+///
+/// // Typed parameters map to appropriate schemas
+/// let params = path_params_to_parameters("/items/{item_id:int}");
+/// // item_id will have an integer schema with int64 format
+/// ```
+#[must_use]
+pub fn path_params_to_parameters(path: &str) -> Vec<Parameter> {
+    extract_path_params(path)
+        .iter()
+        .map(param_info_to_parameter)
+        .collect()
+}
+
+// ============================================================================
+// Path Parameter Tests
+// ============================================================================
+
+#[cfg(test)]
+mod path_param_tests {
+    use super::*;
+    use crate::schema::SchemaType;
+
+    #[test]
+    fn converter_to_schema_str() {
+        let schema = converter_to_schema(&Converter::Str);
+        if let Schema::Primitive(p) = schema {
+            assert!(matches!(p.schema_type, SchemaType::String));
+            assert!(p.format.is_none());
+        } else {
+            panic!("Expected primitive schema");
+        }
+    }
+
+    #[test]
+    fn converter_to_schema_int() {
+        let schema = converter_to_schema(&Converter::Int);
+        if let Schema::Primitive(p) = schema {
+            assert!(matches!(p.schema_type, SchemaType::Integer));
+            assert_eq!(p.format.as_deref(), Some("int64"));
+        } else {
+            panic!("Expected primitive schema");
+        }
+    }
+
+    #[test]
+    fn converter_to_schema_float() {
+        let schema = converter_to_schema(&Converter::Float);
+        if let Schema::Primitive(p) = schema {
+            assert!(matches!(p.schema_type, SchemaType::Number));
+            assert_eq!(p.format.as_deref(), Some("double"));
+        } else {
+            panic!("Expected primitive schema");
+        }
+    }
+
+    #[test]
+    fn converter_to_schema_uuid() {
+        let schema = converter_to_schema(&Converter::Uuid);
+        if let Schema::Primitive(p) = schema {
+            assert!(matches!(p.schema_type, SchemaType::String));
+            assert_eq!(p.format.as_deref(), Some("uuid"));
+        } else {
+            panic!("Expected primitive schema");
+        }
+    }
+
+    #[test]
+    fn converter_to_schema_path() {
+        let schema = converter_to_schema(&Converter::Path);
+        if let Schema::Primitive(p) = schema {
+            assert!(matches!(p.schema_type, SchemaType::String));
+        } else {
+            panic!("Expected primitive schema");
+        }
+    }
+
+    #[test]
+    fn param_info_to_parameter_basic() {
+        let param = param_info_to_parameter(&ParamInfo::new("id", Converter::Str));
+
+        assert_eq!(param.name, "id");
+        assert!(matches!(param.location, ParameterLocation::Path));
+        assert!(param.required);
+        assert!(param.schema.is_some());
+    }
+
+    #[test]
+    fn param_info_to_parameter_int() {
+        let param = param_info_to_parameter(&ParamInfo::new("item_id", Converter::Int));
+
+        assert_eq!(param.name, "item_id");
+        assert!(param.required);
+        if let Some(Schema::Primitive(p)) = &param.schema {
+            assert!(matches!(p.schema_type, SchemaType::Integer));
+            assert_eq!(p.format.as_deref(), Some("int64"));
+        } else {
+            panic!("Expected integer schema");
+        }
+    }
+
+    #[test]
+    fn path_params_to_parameters_simple() {
+        let params = path_params_to_parameters("/users/{id}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "id");
+        assert!(matches!(params[0].location, ParameterLocation::Path));
+        assert!(params[0].required);
+    }
+
+    #[test]
+    fn path_params_to_parameters_multiple() {
+        let params = path_params_to_parameters("/users/{user_id}/posts/{post_id}");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "user_id");
+        assert_eq!(params[1].name, "post_id");
+    }
+
+    #[test]
+    fn path_params_to_parameters_typed() {
+        let params = path_params_to_parameters("/items/{id:int}/price/{value:float}");
+        assert_eq!(params.len(), 2);
+
+        // First param should be integer
+        if let Some(Schema::Primitive(p)) = &params[0].schema {
+            assert!(matches!(p.schema_type, SchemaType::Integer));
+        } else {
+            panic!("Expected integer schema for id");
+        }
+
+        // Second param should be number
+        if let Some(Schema::Primitive(p)) = &params[1].schema {
+            assert!(matches!(p.schema_type, SchemaType::Number));
+        } else {
+            panic!("Expected number schema for value");
+        }
+    }
+
+    #[test]
+    fn path_params_to_parameters_uuid() {
+        let params = path_params_to_parameters("/resources/{uuid:uuid}");
+        assert_eq!(params.len(), 1);
+
+        if let Some(Schema::Primitive(p)) = &params[0].schema {
+            assert!(matches!(p.schema_type, SchemaType::String));
+            assert_eq!(p.format.as_deref(), Some("uuid"));
+        } else {
+            panic!("Expected string/uuid schema");
+        }
+    }
+
+    #[test]
+    fn path_params_to_parameters_wildcard() {
+        let params = path_params_to_parameters("/files/{*filepath}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "filepath");
+
+        if let Some(Schema::Primitive(p)) = &params[0].schema {
+            assert!(matches!(p.schema_type, SchemaType::String));
+        } else {
+            panic!("Expected string schema for wildcard");
+        }
+    }
+
+    #[test]
+    fn path_params_to_parameters_no_params() {
+        let params = path_params_to_parameters("/static/path");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn path_params_to_parameters_serialization() {
+        let params = path_params_to_parameters("/users/{id:int}");
+        let json = serde_json::to_string(&params[0]).unwrap();
+
+        // Should have path location
+        assert!(json.contains(r#""in":"path""#));
+        // Should be required
+        assert!(json.contains(r#""required":true"#));
+        // Should have integer schema
+        assert!(json.contains(r#""type":"integer""#));
+        assert!(json.contains(r#""format":"int64""#));
+    }
+
+    #[test]
+    fn path_params_complex_route() {
+        let params = path_params_to_parameters("/api/v1/users/{user_id:int}/files/{*path}");
+        assert_eq!(params.len(), 2);
+
+        // user_id is integer
+        assert_eq!(params[0].name, "user_id");
+        if let Some(Schema::Primitive(p)) = &params[0].schema {
+            assert!(matches!(p.schema_type, SchemaType::Integer));
+        } else {
+            panic!("Expected integer schema");
+        }
+
+        // path is string (wildcard)
+        assert_eq!(params[1].name, "path");
+        if let Some(Schema::Primitive(p)) = &params[1].schema {
+            assert!(matches!(p.schema_type, SchemaType::String));
+        } else {
+            panic!("Expected string schema");
+        }
+    }
+
+    // =========================================================================
+    // PARAMETER METADATA TESTS
+    // =========================================================================
+
+    #[test]
+    fn param_info_with_title() {
+        let info = ParamInfo::new("user_id", Converter::Int).with_title("User ID");
+        let param = param_info_to_parameter(&info);
+
+        assert_eq!(param.title.as_deref(), Some("User ID"));
+    }
+
+    #[test]
+    fn param_info_with_description() {
+        let info =
+            ParamInfo::new("page", Converter::Int).with_description("Page number for pagination");
+        let param = param_info_to_parameter(&info);
+
+        assert_eq!(
+            param.description.as_deref(),
+            Some("Page number for pagination")
+        );
+    }
+
+    #[test]
+    fn param_info_deprecated() {
+        let info = ParamInfo::new("old_id", Converter::Str).deprecated();
+        let param = param_info_to_parameter(&info);
+
+        assert!(param.deprecated);
+    }
+
+    #[test]
+    fn param_info_with_example() {
+        let info = ParamInfo::new("user_id", Converter::Int).with_example(serde_json::json!(42));
+        let param = param_info_to_parameter(&info);
+
+        assert_eq!(param.example, Some(serde_json::json!(42)));
+    }
+
+    #[test]
+    fn param_info_with_named_examples() {
+        let info = ParamInfo::new("status", Converter::Str)
+            .with_named_example("active", serde_json::json!("active"))
+            .with_named_example("inactive", serde_json::json!("inactive"));
+        let param = param_info_to_parameter(&info);
+
+        assert_eq!(param.examples.len(), 2);
+        assert!(param.examples.contains_key("active"));
+        assert!(param.examples.contains_key("inactive"));
+        assert_eq!(
+            param.examples.get("active").unwrap().value,
+            Some(serde_json::json!("active"))
+        );
+    }
+
+    #[test]
+    fn param_info_all_metadata() {
+        let info = ParamInfo::new("item_id", Converter::Int)
+            .with_title("Item ID")
+            .with_description("The unique identifier for the item")
+            .deprecated()
+            .with_example(serde_json::json!(123))
+            .with_named_example("first", serde_json::json!(1))
+            .with_named_example("last", serde_json::json!(999));
+        let param = param_info_to_parameter(&info);
+
+        assert_eq!(param.name, "item_id");
+        assert_eq!(param.title.as_deref(), Some("Item ID"));
+        assert_eq!(
+            param.description.as_deref(),
+            Some("The unique identifier for the item")
+        );
+        assert!(param.deprecated);
+        assert_eq!(param.example, Some(serde_json::json!(123)));
+        assert_eq!(param.examples.len(), 2);
+    }
+
+    #[test]
+    fn param_info_metadata_serialization() {
+        let info = ParamInfo::new("id", Converter::Int)
+            .with_title("ID")
+            .with_description("Resource identifier")
+            .deprecated();
+        let param = param_info_to_parameter(&info);
+        let json = serde_json::to_string(&param).unwrap();
+
+        assert!(json.contains(r#""title":"ID""#));
+        assert!(json.contains(r#""description":"Resource identifier""#));
+        assert!(json.contains(r#""deprecated":true"#));
+    }
+
+    #[test]
+    fn param_info_no_metadata_skips_fields() {
+        let info = ParamInfo::new("id", Converter::Str);
+        let param = param_info_to_parameter(&info);
+        let json = serde_json::to_string(&param).unwrap();
+
+        // Fields with None/false/empty should be skipped
+        assert!(!json.contains("title"));
+        assert!(!json.contains("description"));
+        assert!(!json.contains("deprecated"));
+        assert!(!json.contains("example"));
+    }
+}
+
+// ============================================================================
+// Route-to-OpenAPI Conversion Tests
+// ============================================================================
+
+#[cfg(test)]
+mod route_conversion_tests {
+    use super::*;
+    use crate::schema::SchemaType;
+    use fastapi_router::Route;
+
+    fn make_test_route(path: &str, method: Method) -> Route {
+        Route::with_placeholder_handler(method, path).operation_id("test_operation")
+    }
+
+    fn make_full_route() -> Route {
+        Route::with_placeholder_handler(Method::Get, "/users/{id:int}/posts/{post_id:int}")
+            .operation_id("get_user_post")
+            .summary("Get a user's post")
+            .description("Retrieves a specific post by a user")
+            .tag("users")
+            .tag("posts")
+            .deprecated()
+    }
+
+    #[test]
+    fn add_route_creates_operation_for_get() {
+        let route = make_test_route("/users", Method::Get);
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        assert!(doc.paths.contains_key("/users"));
+        let path_item = &doc.paths["/users"];
+        assert!(path_item.get.is_some());
+        assert!(path_item.post.is_none());
+    }
+
+    #[test]
+    fn add_route_creates_operation_for_post() {
+        let route = make_test_route("/users", Method::Post);
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let path_item = &doc.paths["/users"];
+        assert!(path_item.post.is_some());
+        assert!(path_item.get.is_none());
+    }
+
+    #[test]
+    fn add_route_merges_methods_on_same_path() {
+        let get_route = make_test_route("/users", Method::Get);
+        let post_route = make_test_route("/users", Method::Post);
+
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&get_route);
+        builder.add_route(&post_route);
+        let doc = builder.build();
+
+        let path_item = &doc.paths["/users"];
+        assert!(path_item.get.is_some());
+        assert!(path_item.post.is_some());
+    }
+
+    #[test]
+    fn add_routes_batch_adds_multiple() {
+        let routes = vec![
+            make_test_route("/users", Method::Get),
+            make_test_route("/users", Method::Post),
+            make_test_route("/items", Method::Get),
+        ];
+
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_routes(&routes);
+        let doc = builder.build();
+
+        assert!(doc.paths.contains_key("/users"));
+        assert!(doc.paths.contains_key("/items"));
+        assert!(doc.paths["/users"].get.is_some());
+        assert!(doc.paths["/users"].post.is_some());
+        assert!(doc.paths["/items"].get.is_some());
+    }
+
+    #[test]
+    fn route_operation_id_is_preserved() {
+        let route = Route::with_placeholder_handler(Method::Get, "/test")
+            .operation_id("my_custom_operation");
+
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/test"].get.as_ref().unwrap();
+        assert_eq!(op.operation_id.as_deref(), Some("my_custom_operation"));
+    }
+
+    #[test]
+    fn route_summary_and_description_preserved() {
+        let route = make_full_route();
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/users/{id:int}/posts/{post_id:int}"]
+            .get
+            .as_ref()
+            .unwrap();
+        assert_eq!(op.summary.as_deref(), Some("Get a user's post"));
+        assert_eq!(
+            op.description.as_deref(),
+            Some("Retrieves a specific post by a user")
+        );
+    }
+
+    #[test]
+    fn route_tags_preserved() {
+        let route = make_full_route();
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/users/{id:int}/posts/{post_id:int}"]
+            .get
+            .as_ref()
+            .unwrap();
+        assert!(op.tags.contains(&"users".to_string()));
+        assert!(op.tags.contains(&"posts".to_string()));
+    }
+
+    #[test]
+    fn route_deprecated_preserved() {
+        let route = make_full_route();
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/users/{id:int}/posts/{post_id:int}"]
+            .get
+            .as_ref()
+            .unwrap();
+        assert!(op.deprecated);
+    }
+
+    #[test]
+    fn route_path_params_converted_to_parameters() {
+        let route = make_full_route();
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/users/{id:int}/posts/{post_id:int}"]
+            .get
+            .as_ref()
+            .unwrap();
+
+        // Should have two path parameters
+        assert_eq!(op.parameters.len(), 2);
+        assert_eq!(op.parameters[0].name, "id");
+        assert_eq!(op.parameters[1].name, "post_id");
+
+        // Both should be path parameters and required
+        assert!(matches!(op.parameters[0].location, ParameterLocation::Path));
+        assert!(matches!(op.parameters[1].location, ParameterLocation::Path));
+        assert!(op.parameters[0].required);
+        assert!(op.parameters[1].required);
+
+        // Both should have integer schemas
+        if let Some(Schema::Primitive(p)) = &op.parameters[0].schema {
+            assert!(matches!(p.schema_type, SchemaType::Integer));
+        } else {
+            panic!("Expected integer schema for id");
+        }
+    }
+
+    #[test]
+    fn route_with_request_body() {
+        let route = Route::with_placeholder_handler(Method::Post, "/users")
+            .operation_id("create_user")
+            .request_body("CreateUserRequest", "application/json", true);
+
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/users"].post.as_ref().unwrap();
+        let body = op.request_body.as_ref().expect("Expected request body");
+
+        assert!(body.required);
+        assert!(body.content.contains_key("application/json"));
+
+        let media_type = &body.content["application/json"];
+        if let Some(Schema::Ref(ref_schema)) = &media_type.schema {
+            assert_eq!(
+                ref_schema.reference,
+                "#/components/schemas/CreateUserRequest"
+            );
+        } else {
+            panic!("Expected $ref schema for request body");
+        }
+    }
+
+    #[test]
+    fn route_with_custom_content_type() {
+        let route = Route::with_placeholder_handler(Method::Post, "/upload")
+            .operation_id("upload_file")
+            .request_body("FileUpload", "multipart/form-data", false);
+
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/upload"].post.as_ref().unwrap();
+        let body = op.request_body.as_ref().unwrap();
+        assert!(body.content.contains_key("multipart/form-data"));
+    }
+
+    #[test]
+    fn route_without_request_body() {
+        let route = make_test_route("/users", Method::Get);
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/users"].get.as_ref().unwrap();
+        assert!(op.request_body.is_none());
+    }
+
+    #[test]
+    fn all_http_methods_supported() {
+        let methods = [
+            Method::Get,
+            Method::Post,
+            Method::Put,
+            Method::Delete,
+            Method::Patch,
+            Method::Options,
+            Method::Head,
+        ];
+
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        for method in methods {
+            builder.add_route(&make_test_route("/test", method));
+        }
+        let doc = builder.build();
+
+        let path_item = &doc.paths["/test"];
+        assert!(path_item.get.is_some());
+        assert!(path_item.post.is_some());
+        assert!(path_item.put.is_some());
+        assert!(path_item.delete.is_some());
+        assert!(path_item.patch.is_some());
+        assert!(path_item.options.is_some());
+        assert!(path_item.head.is_some());
+    }
+
+    #[test]
+    fn default_response_is_added() {
+        let route = make_test_route("/users", Method::Get);
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/users"].get.as_ref().unwrap();
+        assert!(op.responses.contains_key("200"));
+        assert_eq!(op.responses["200"].description, "Successful response");
+    }
+
+    #[test]
+    fn route_conversion_serializes_to_valid_json() {
+        let route = make_full_route();
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        // Use compact JSON for easier substring matching
+        let json = serde_json::to_string(&doc).unwrap();
+
+        // Verify key elements are in the JSON (camelCase per OpenAPI spec)
+        assert!(json.contains(r#""operationId":"get_user_post""#));
+        assert!(json.contains(r#""summary":"Get a user's post""#));
+        assert!(json.contains(r#""deprecated":true"#));
+        assert!(json.contains(r#""in":"path""#));
+        assert!(json.contains(r#""required":true"#));
+    }
+
+    #[test]
+    fn empty_operation_id_becomes_none() {
+        let route = Route::with_placeholder_handler(Method::Get, "/test").operation_id("");
+
+        let mut builder = OpenApiBuilder::new("Test API", "1.0.0");
+        builder.add_route(&route);
+        let doc = builder.build();
+
+        let op = doc.paths["/test"].get.as_ref().unwrap();
+        assert!(op.operation_id.is_none());
+
+        // Verify it doesn't appear in serialized JSON
+        let json = serde_json::to_string(&doc).unwrap();
+        assert!(!json.contains("operationId"));
+    }
+}
+
+// ============================================================================
+// Security Scheme Tests
+// ============================================================================
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn api_key_header_security_scheme() {
+        let scheme = SecurityScheme::ApiKey {
+            name: "X-API-Key".to_string(),
+            location: ApiKeyLocation::Header,
+            description: Some("API key for authentication".to_string()),
+        };
+
+        let json = serde_json::to_string(&scheme).unwrap();
+        assert!(json.contains(r#""type":"apiKey""#));
+        assert!(json.contains(r#""name":"X-API-Key""#));
+        assert!(json.contains(r#""in":"header""#));
+        assert!(json.contains(r#""description":"API key for authentication""#));
+    }
+
+    #[test]
+    fn api_key_query_security_scheme() {
+        let scheme = SecurityScheme::ApiKey {
+            name: "api_key".to_string(),
+            location: ApiKeyLocation::Query,
+            description: None,
+        };
+
+        let json = serde_json::to_string(&scheme).unwrap();
+        assert!(json.contains(r#""type":"apiKey""#));
+        assert!(json.contains(r#""in":"query""#));
+        assert!(!json.contains("description"));
+    }
+
+    #[test]
+    fn http_bearer_security_scheme() {
+        let scheme = SecurityScheme::Http {
+            scheme: "bearer".to_string(),
+            bearer_format: Some("JWT".to_string()),
+            description: None,
+        };
+
+        let json = serde_json::to_string(&scheme).unwrap();
+        assert!(json.contains(r#""type":"http""#));
+        assert!(json.contains(r#""scheme":"bearer""#));
+        assert!(json.contains(r#""bearerFormat":"JWT""#));
+    }
+
+    #[test]
+    fn http_basic_security_scheme() {
+        let scheme = SecurityScheme::Http {
+            scheme: "basic".to_string(),
+            bearer_format: None,
+            description: Some("Basic HTTP authentication".to_string()),
+        };
+
+        let json = serde_json::to_string(&scheme).unwrap();
+        assert!(json.contains(r#""type":"http""#));
+        assert!(json.contains(r#""scheme":"basic""#));
+        assert!(!json.contains("bearerFormat"));
+    }
+
+    #[test]
+    fn oauth2_security_scheme() {
+        let mut scopes = HashMap::new();
+        scopes.insert("read:users".to_string(), "Read user data".to_string());
+        scopes.insert("write:users".to_string(), "Modify user data".to_string());
+
+        let scheme = SecurityScheme::OAuth2 {
+            flows: OAuth2Flows {
+                authorization_code: Some(OAuth2Flow {
+                    authorization_url: Some("https://example.com/oauth/authorize".to_string()),
+                    token_url: Some("https://example.com/oauth/token".to_string()),
+                    refresh_url: None,
+                    scopes,
+                }),
+                ..Default::default()
+            },
+            description: None,
+        };
+
+        let json = serde_json::to_string(&scheme).unwrap();
+        assert!(json.contains(r#""type":"oauth2""#));
+        assert!(json.contains(r#""authorizationCode""#));
+        assert!(json.contains(r#""authorizationUrl""#));
+        assert!(json.contains(r#""tokenUrl""#));
+        assert!(json.contains(r#""read:users""#));
+    }
+
+    #[test]
+    fn openid_connect_security_scheme() {
+        let scheme = SecurityScheme::OpenIdConnect {
+            open_id_connect_url: "https://example.com/.well-known/openid-configuration".to_string(),
+            description: Some("OpenID Connect authentication".to_string()),
+        };
+
+        let json = serde_json::to_string(&scheme).unwrap();
+        assert!(json.contains(r#""type":"openIdConnect""#));
+        assert!(json.contains(r#""openIdConnectUrl""#));
+    }
+
+    #[test]
+    fn builder_adds_security_scheme() {
+        let doc = OpenApiBuilder::new("Test API", "1.0.0")
+            .security_scheme(
+                "api_key",
+                SecurityScheme::ApiKey {
+                    name: "X-API-Key".to_string(),
+                    location: ApiKeyLocation::Header,
+                    description: None,
+                },
+            )
+            .build();
+
+        assert!(doc.components.is_some());
+        let components = doc.components.as_ref().unwrap();
+        assert!(components.security_schemes.contains_key("api_key"));
+    }
+
+    #[test]
+    fn builder_adds_global_security_requirement() {
+        let doc = OpenApiBuilder::new("Test API", "1.0.0")
+            .security_scheme(
+                "bearer",
+                SecurityScheme::Http {
+                    scheme: "bearer".to_string(),
+                    bearer_format: Some("JWT".to_string()),
+                    description: None,
+                },
+            )
+            .security_requirement("bearer", vec![])
+            .build();
+
+        assert_eq!(doc.security.len(), 1);
+        assert!(doc.security[0].contains_key("bearer"));
+    }
+
+    #[test]
+    fn builder_adds_security_with_scopes() {
+        let doc = OpenApiBuilder::new("Test API", "1.0.0")
+            .security_requirement("oauth2", vec!["read:users".to_string(), "write:users".to_string()])
+            .build();
+
+        assert_eq!(doc.security.len(), 1);
+        let scopes = doc.security[0].get("oauth2").unwrap();
+        assert_eq!(scopes.len(), 2);
+        assert!(scopes.contains(&"read:users".to_string()));
+        assert!(scopes.contains(&"write:users".to_string()));
+    }
+
+    #[test]
+    fn full_security_document_serializes() {
+        let doc = OpenApiBuilder::new("Secure API", "1.0.0")
+            .security_scheme(
+                "api_key",
+                SecurityScheme::ApiKey {
+                    name: "X-API-Key".to_string(),
+                    location: ApiKeyLocation::Header,
+                    description: Some("API key authentication".to_string()),
+                },
+            )
+            .security_scheme(
+                "bearer",
+                SecurityScheme::Http {
+                    scheme: "bearer".to_string(),
+                    bearer_format: Some("JWT".to_string()),
+                    description: None,
+                },
+            )
+            .security_requirement("api_key", vec![])
+            .build();
+
+        let json = serde_json::to_string_pretty(&doc).unwrap();
+
+        // Verify the document structure
+        assert!(json.contains(r#""securitySchemes""#));
+        assert!(json.contains(r#""api_key""#));
+        assert!(json.contains(r#""bearer""#));
+        assert!(json.contains(r#""security""#));
     }
 }

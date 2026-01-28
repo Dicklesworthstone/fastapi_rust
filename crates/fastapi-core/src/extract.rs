@@ -221,6 +221,8 @@ pub enum JsonExtractError {
         /// Column number where error occurred (if available).
         column: Option<usize>,
     },
+    /// Streaming request bodies are not supported.
+    StreamingNotSupported,
 }
 
 impl std::fmt::Display for JsonExtractError {
@@ -249,6 +251,12 @@ impl std::fmt::Display for JsonExtractError {
                 } else {
                     write!(f, "JSON parse error: {message}")
                 }
+            }
+            Self::StreamingNotSupported => {
+                write!(
+                    f,
+                    "Streaming request bodies are not supported for JSON extraction"
+                )
             }
         }
     }
@@ -291,6 +299,9 @@ impl IntoResponse for JsonExtractError {
                 ))
                 .into_response()
             }
+            Self::StreamingNotSupported => HttpError::bad_request()
+                .with_detail("Streaming request bodies are not supported for JSON extraction")
+                .into_response(),
         }
     }
 }
@@ -325,6 +336,10 @@ impl<T: DeserializeOwned> FromRequest for Json<T> {
         let bytes = match body {
             Body::Empty => Vec::new(),
             Body::Bytes(b) => b,
+            Body::Stream(_) => {
+                // Streaming bodies not yet supported in Json extractor
+                return Err(JsonExtractError::StreamingNotSupported);
+            }
         };
 
         // Check size limit using the configured limit from RequestContext.

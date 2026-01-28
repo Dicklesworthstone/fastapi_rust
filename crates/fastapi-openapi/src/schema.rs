@@ -597,7 +597,9 @@ impl SchemaRegistry {
     pub fn merge(&self, other: &SchemaRegistry) {
         let mut schemas = self.schemas.borrow_mut();
         for (name, schema) in other.schemas.borrow().iter() {
-            schemas.entry(name.clone()).or_insert_with(|| schema.clone());
+            schemas
+                .entry(name.clone())
+                .or_insert_with(|| schema.clone());
         }
     }
 }

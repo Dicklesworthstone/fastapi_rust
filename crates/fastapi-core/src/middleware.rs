@@ -1249,6 +1249,7 @@ fn body_len(body: &Body) -> usize {
     match body {
         Body::Empty => 0,
         Body::Bytes(bytes) => bytes.len(),
+        Body::Stream(_) => 0, // Length unknown for streaming bodies
     }
 }
 
@@ -1265,6 +1266,7 @@ fn preview_body(body: &Body, max_bytes: usize) -> Option<String> {
                 Some(format_bytes(bytes, max_bytes))
             }
         }
+        Body::Stream(_) => None, // Cannot preview streaming body
     }
 }
 

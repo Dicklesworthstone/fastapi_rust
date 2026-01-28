@@ -72,31 +72,64 @@ pub use fastapi_core::{
 
 // Re-export extractors
 pub use fastapi_core::{
-    // Body extractors
-    Json, JsonConfig, JsonExtractError,
-    // Path parameters
-    Path, PathExtractError, PathParams,
-    // Query string
-    Query, QueryExtractError, QueryParams,
-    // Headers
-    Header, HeaderExtractError, HeaderValues, NamedHeader,
     // Common header types
-    Accept, Authorization, ContentType, Host, UserAgent, XRequestId,
-    // Cookies
-    Cookie, CookiePrefix, CookiePrefixError, RequestCookies, SameSite,
-    // State
-    State, AppState,
-    // Auth extractors
-    BasicAuth, BasicAuthError, BearerToken, BearerTokenError,
-    OAuth2PasswordBearer, OAuth2PasswordBearerConfig, OAuth2BearerError,
-    // Pagination
-    Pagination, PaginationConfig, Page, DEFAULT_PAGE, DEFAULT_PER_PAGE, MAX_PER_PAGE,
+    Accept,
+    AddResponseHeader,
+    AppState,
+    Authorization,
     // Background tasks
-    BackgroundTasks, BackgroundTasksInner,
-    // Response mutations
-    ResponseMut, ResponseMutations, AddResponseHeader,
+    BackgroundTasks,
+    BackgroundTasksInner,
+    // Auth extractors
+    BasicAuth,
+    BasicAuthError,
+    BearerToken,
+    BearerTokenError,
+    ContentType,
+    // Cookies
+    Cookie,
+    CookiePrefix,
+    CookiePrefixError,
+    DEFAULT_PAGE,
+    DEFAULT_PER_PAGE,
+    // Headers
+    Header,
+    HeaderExtractError,
+    HeaderValues,
+    Host,
+    // Body extractors
+    Json,
+    JsonConfig,
+    JsonExtractError,
+    MAX_PER_PAGE,
+    NamedHeader,
+    OAuth2BearerError,
+    OAuth2PasswordBearer,
+    OAuth2PasswordBearerConfig,
+    Page,
+    // Pagination
+    Pagination,
+    PaginationConfig,
+    // Path parameters
+    Path,
+    PathExtractError,
+    PathParams,
+    // Query string
+    Query,
+    QueryExtractError,
+    QueryParams,
+    RequestContext,
+    RequestCookies,
     // Request utilities
-    RequestRef, RequestContext,
+    RequestRef,
+    // Response mutations
+    ResponseMut,
+    ResponseMutations,
+    SameSite,
+    // State
+    State,
+    UserAgent,
+    XRequestId,
 };
 
 // Re-export testing utilities
@@ -104,45 +137,93 @@ pub use fastapi_core::{CookieJar, RequestBuilder, TestClient, TestResponse};
 pub use fastapi_macros::{JsonSchema, Validate, delete, get, head, options, patch, post, put};
 pub use fastapi_openapi::{OpenApi, OpenApiBuilder, SchemaRegistry};
 pub use fastapi_router::{
-    // Core router types
-    Route, Router,
     // Route matching
-    AllowedMethods, RouteLookup, RouteMatch,
+    AllowedMethods,
+    ConversionError,
     // Path parameter types
-    Converter, ConversionError, ParamInfo, ParamValue,
+    Converter,
     // Error types
-    InvalidRouteError, RouteAddError, RouteConflictError,
+    InvalidRouteError,
+    ParamInfo,
+    ParamValue,
+    // Core router types
+    Route,
+    RouteAddError,
+    RouteConflictError,
+    RouteLookup,
+    RouteMatch,
+    Router,
 };
 
 // Re-export HTTP server types
 pub use fastapi_http::{
-    Server, ServerConfig, TcpServer,
-    ServeError, ServerError,
-    serve, serve_with_config,
-    GracefulOutcome, ShutdownController, ShutdownReceiver,
+    GracefulOutcome, ServeError, Server, ServerConfig, ServerError, ShutdownController,
+    ShutdownReceiver, TcpServer, serve, serve_with_config,
 };
 
 /// Prelude module for convenient imports.
 pub mod prelude {
     pub use crate::{
         // Core types
-        App, AppBuilder, AppConfig, ConfigError, Cors, CorsConfig, DefaultConfig,
-        DefaultDependencyConfig, DependencyOverrides, DependencyScope, Depends, DependsConfig,
-        FromDependency, FromRequest, HttpError, IntoResponse, Method, NoCache,
-        Request, RequestContext, RequestId, RequestIdMiddleware, Response, Route, Router,
-        StatusCode, ValidationError, ValidationErrors,
-        // Extractors
-        Json, Path, Query, Header, Cookie, State,
+        App,
+        AppBuilder,
+        AppConfig,
         // Auth
-        BasicAuth, BearerToken, OAuth2PasswordBearer,
-        // Pagination
-        Pagination, Page,
+        BasicAuth,
+        BearerToken,
+        ConfigError,
+        Cookie,
+        Cors,
+        CorsConfig,
+        DefaultConfig,
+        DefaultDependencyConfig,
+        DependencyOverrides,
+        DependencyScope,
+        Depends,
+        DependsConfig,
+        FromDependency,
+        FromRequest,
+        Header,
+        HttpError,
+        IntoResponse,
+        // Extractors
+        Json,
         // Macros
-        JsonSchema, Validate, delete, get, head, options, patch, post, put,
+        JsonSchema,
+        Method,
+        NoCache,
+        OAuth2PasswordBearer,
         // OpenAPI
-        OpenApi, OpenApiBuilder,
+        OpenApi,
+        OpenApiBuilder,
+        Page,
+        // Pagination
+        Pagination,
+        Path,
+        Query,
+        Request,
+        RequestContext,
+        RequestId,
+        RequestIdMiddleware,
+        Response,
+        Route,
+        Router,
         // Server
-        Server, ServerConfig, serve,
+        Server,
+        ServerConfig,
+        State,
+        StatusCode,
+        Validate,
+        ValidationError,
+        ValidationErrors,
+        delete,
+        get,
+        head,
+        options,
+        patch,
+        post,
+        put,
+        serve,
     };
     pub use serde::{Deserialize, Serialize};
 }
@@ -155,27 +236,36 @@ pub mod testing {
 /// Extractors module for type-safe request data extraction.
 pub mod extractors {
     pub use fastapi_core::{
-        Accept, AppState, Authorization, BackgroundTasks, BasicAuth, BearerToken,
-        ContentType, Cookie, Header, HeaderValues, Host, Json, JsonConfig, NamedHeader,
-        OAuth2PasswordBearer, Page, Pagination, PaginationConfig, Path, PathParams, Query,
-        QueryParams, RequestRef, ResponseMut, ResponseMutations, State, UserAgent, XRequestId,
+        Accept, AppState, Authorization, BackgroundTasks, BasicAuth, BearerToken, ContentType,
+        Cookie, Header, HeaderValues, Host, Json, JsonConfig, NamedHeader, OAuth2PasswordBearer,
+        Page, Pagination, PaginationConfig, Path, PathParams, Query, QueryParams, RequestRef,
+        ResponseMut, ResponseMutations, State, UserAgent, XRequestId,
     };
 }
 
 /// HTTP server module with server types and configuration.
 pub mod server {
     pub use fastapi_http::{
-        // Server types
-        Server, ServerConfig, TcpServer,
-        // Server functions
-        serve, serve_with_config,
-        // Error types
-        ServeError, ServerError,
-        // Shutdown coordination
-        GracefulOutcome, ShutdownController, ShutdownReceiver,
         // Configuration constants
-        DEFAULT_DRAIN_TIMEOUT_SECS, DEFAULT_KEEP_ALIVE_TIMEOUT_SECS,
-        DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_REQUESTS_PER_CONNECTION,
-        DEFAULT_READ_BUFFER_SIZE, DEFAULT_REQUEST_TIMEOUT_SECS,
+        DEFAULT_DRAIN_TIMEOUT_SECS,
+        DEFAULT_KEEP_ALIVE_TIMEOUT_SECS,
+        DEFAULT_MAX_CONNECTIONS,
+        DEFAULT_MAX_REQUESTS_PER_CONNECTION,
+        DEFAULT_READ_BUFFER_SIZE,
+        DEFAULT_REQUEST_TIMEOUT_SECS,
+        // Shutdown coordination
+        GracefulOutcome,
+        // Error types
+        ServeError,
+        // Server types
+        Server,
+        ServerConfig,
+        ServerError,
+        ShutdownController,
+        ShutdownReceiver,
+        TcpServer,
+        // Server functions
+        serve,
+        serve_with_config,
     };
 }

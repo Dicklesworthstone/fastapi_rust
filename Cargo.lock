@@ -448,6 +448,7 @@ version = "0.1.0"
 dependencies = [
  "fastapi-core",
  "fastapi-macros",
+ "fastapi-router",
  "serde",
  "serde_json",
 ]
@@ -469,6 +470,7 @@ name = "fastapi-router"
 version = "0.1.0"
 dependencies = [
  "fastapi-core",
+ "serde_json",
 ]
 
 [[package]]

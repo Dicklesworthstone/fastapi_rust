@@ -188,23 +188,274 @@ pub enum Body {
     Empty,
     /// Bytes body.
     Bytes(Vec<u8>),
-    // TODO: Stream variant for large bodies
+    /// Streaming body for large uploads.
+    ///
+    /// This variant enables memory-efficient handling of large request bodies
+    /// by yielding chunks incrementally rather than buffering the entire content.
+    ///
+    /// The stream yields `Result<Vec<u8>, RequestBodyStreamError>` chunks.
+    Stream(RequestBodyStream),
+}
+
+/// Error type for streaming body operations.
+#[derive(Debug)]
+pub enum RequestBodyStreamError {
+    /// Connection was closed before body was complete.
+    ConnectionClosed,
+    /// Timeout while waiting for body data.
+    Timeout,
+    /// Body exceeded configured size limit.
+    TooLarge { received: usize, max: usize },
+    /// I/O error during streaming.
+    Io(String),
+}
+
+impl std::fmt::Display for RequestBodyStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConnectionClosed => write!(f, "connection closed"),
+            Self::Timeout => write!(f, "timeout waiting for body data"),
+            Self::TooLarge { received, max } => {
+                write!(f, "body too large: {received} bytes exceeds limit of {max}")
+            }
+            Self::Io(msg) => write!(f, "I/O error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for RequestBodyStreamError {}
+
+/// A streaming request body.
+///
+/// This provides an async interface for reading request body chunks
+/// without buffering the entire body in memory.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::{Body, RequestBodyStream};
+///
+/// async fn handle_upload(body: Body) -> Vec<u8> {
+///     match body {
+///         Body::Stream(mut stream) => {
+///             let mut buffer = Vec::new();
+///             while let Some(chunk) = stream.next().await {
+///                 buffer.extend_from_slice(&chunk?);
+///             }
+///             buffer
+///         }
+///         Body::Bytes(bytes) => bytes,
+///         Body::Empty => Vec::new(),
+///     }
+/// }
+/// ```
+pub struct RequestBodyStream {
+    /// The inner stream of chunks.
+    inner: std::pin::Pin<
+        Box<
+            dyn asupersync::stream::Stream<Item = Result<Vec<u8>, RequestBodyStreamError>>
+                + Send
+                + Sync,
+        >,
+    >,
+    /// Total bytes received so far.
+    bytes_received: usize,
+    /// Expected total size (from Content-Length), if known.
+    expected_size: Option<usize>,
+    /// Whether the stream is complete.
+    complete: bool,
+}
+
+impl std::fmt::Debug for RequestBodyStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestBodyStream")
+            .field("bytes_received", &self.bytes_received)
+            .field("expected_size", &self.expected_size)
+            .field("complete", &self.complete)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RequestBodyStream {
+    /// Create a new body stream from an async stream of chunks.
+    pub fn new<S>(stream: S) -> Self
+    where
+        S: asupersync::stream::Stream<Item = Result<Vec<u8>, RequestBodyStreamError>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            inner: Box::pin(stream),
+            bytes_received: 0,
+            expected_size: None,
+            complete: false,
+        }
+    }
+
+    /// Create a body stream with a known expected size.
+    pub fn with_expected_size<S>(stream: S, expected_size: usize) -> Self
+    where
+        S: asupersync::stream::Stream<Item = Result<Vec<u8>, RequestBodyStreamError>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            inner: Box::pin(stream),
+            bytes_received: 0,
+            expected_size: Some(expected_size),
+            complete: false,
+        }
+    }
+
+    /// Returns the number of bytes received so far.
+    #[must_use]
+    pub fn bytes_received(&self) -> usize {
+        self.bytes_received
+    }
+
+    /// Returns the expected total size, if known.
+    #[must_use]
+    pub fn expected_size(&self) -> Option<usize> {
+        self.expected_size
+    }
+
+    /// Returns true if the stream is complete.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    /// Collect all chunks into a single buffer.
+    ///
+    /// This consumes the stream and buffers the entire body in memory.
+    /// Use this for small bodies or when the full content is needed.
+    ///
+    /// For large bodies, prefer processing chunks individually via `next()`.
+    pub async fn collect(mut self) -> Result<Vec<u8>, RequestBodyStreamError> {
+        use asupersync::stream::StreamExt;
+
+        let capacity = self.expected_size.unwrap_or(4096);
+        let mut buffer = Vec::with_capacity(capacity);
+
+        while let Some(chunk) = self.inner.next().await {
+            buffer.extend_from_slice(&chunk?);
+            self.bytes_received = buffer.len();
+        }
+
+        self.complete = true;
+        Ok(buffer)
+    }
+}
+
+impl asupersync::stream::Stream for RequestBodyStream {
+    type Item = Result<Vec<u8>, RequestBodyStreamError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        if self.complete {
+            return std::task::Poll::Ready(None);
+        }
+
+        match self.inner.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(chunk))) => {
+                self.bytes_received += chunk.len();
+                std::task::Poll::Ready(Some(Ok(chunk)))
+            }
+            std::task::Poll::Ready(Some(Err(e))) => std::task::Poll::Ready(Some(Err(e))),
+            std::task::Poll::Ready(None) => {
+                self.complete = true;
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
 }
 
 impl Body {
     /// Get body as bytes, consuming it.
+    ///
+    /// For `Body::Stream`, this will panic. Use `into_bytes_async()` instead
+    /// for streaming bodies, or check with `is_streaming()` first.
     #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         match self {
             Self::Empty => Vec::new(),
             Self::Bytes(b) => b,
+            Self::Stream(_) => panic!(
+                "cannot synchronously convert streaming body to bytes; use into_bytes_async()"
+            ),
+        }
+    }
+
+    /// Get body as bytes asynchronously, consuming it.
+    ///
+    /// This works for all body types:
+    /// - `Empty` returns an empty Vec
+    /// - `Bytes` returns the bytes
+    /// - `Stream` collects all chunks into a Vec
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream encounters an error while reading.
+    pub async fn into_bytes_async(self) -> Result<Vec<u8>, RequestBodyStreamError> {
+        match self {
+            Self::Empty => Ok(Vec::new()),
+            Self::Bytes(b) => Ok(b),
+            Self::Stream(stream) => stream.collect().await,
         }
     }
 
     /// Check if body is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty) || matches!(self, Self::Bytes(b) if b.is_empty())
+        match self {
+            Self::Empty => true,
+            Self::Bytes(b) => b.is_empty(),
+            Self::Stream(s) => s.is_complete() && s.bytes_received() == 0,
+        }
+    }
+
+    /// Check if body is a streaming body.
+    #[must_use]
+    pub fn is_streaming(&self) -> bool {
+        matches!(self, Self::Stream(_))
+    }
+
+    /// Take the body stream, if this is a streaming body.
+    ///
+    /// Returns `None` for `Empty` and `Bytes` variants.
+    #[must_use]
+    pub fn take_stream(self) -> Option<RequestBodyStream> {
+        match self {
+            Self::Stream(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Create a streaming body.
+    pub fn streaming<S>(stream: S) -> Self
+    where
+        S: asupersync::stream::Stream<Item = Result<Vec<u8>, RequestBodyStreamError>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::Stream(RequestBodyStream::new(stream))
+    }
+
+    /// Create a streaming body with a known size.
+    pub fn streaming_with_size<S>(stream: S, size: usize) -> Self
+    where
+        S: asupersync::stream::Stream<Item = Result<Vec<u8>, RequestBodyStreamError>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::Stream(RequestBodyStream::with_expected_size(stream, size))
     }
 }
 

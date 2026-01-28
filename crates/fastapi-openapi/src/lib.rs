@@ -42,6 +42,31 @@ pub use schema::{
     RefSchema, Schema, SchemaRegistry, SchemaType, StringEnumSchema,
 };
 pub use spec::{
-    Components, Example, HasParamMeta, Info, MediaType, OpenApi, OpenApiBuilder, Operation,
-    ParamMeta, Parameter, ParameterLocation, PathItem, RequestBody, Response, Server, Tag,
+    // Security types
+    ApiKeyLocation,
+    OAuth2Flow,
+    OAuth2Flows,
+    SecurityRequirement,
+    SecurityScheme,
+    // Core document types
+    Components,
+    Example,
+    HasParamMeta,
+    Info,
+    MediaType,
+    OpenApi,
+    OpenApiBuilder,
+    Operation,
+    ParamMeta,
+    Parameter,
+    ParameterLocation,
+    PathItem,
+    RequestBody,
+    Response,
+    Server,
+    Tag,
+    // Path parameter generation
+    converter_to_schema,
+    param_info_to_parameter,
+    path_params_to_parameters,
 };

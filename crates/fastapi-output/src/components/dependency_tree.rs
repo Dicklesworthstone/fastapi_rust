@@ -508,10 +508,12 @@ mod tests {
 
     #[test]
     fn test_deep_nesting() {
-        let roots = vec![DependencyNode::new("Level0")
-            .child(DependencyNode::new("Level1").child(
-                DependencyNode::new("Level2").child(DependencyNode::new("Level3")),
-            ))];
+        let roots = vec![
+            DependencyNode::new("Level0").child(
+                DependencyNode::new("Level1")
+                    .child(DependencyNode::new("Level2").child(DependencyNode::new("Level3"))),
+            ),
+        ];
         let display = DependencyTreeDisplay::new(OutputMode::Plain, roots);
         let output = display.render();
 
@@ -560,9 +562,11 @@ mod tests {
 
     #[test]
     fn test_multiple_cycle_paths() {
-        let roots = vec![DependencyNode::new("A")
-            .child(DependencyNode::new("B").cycle())
-            .child(DependencyNode::new("C").cycle())];
+        let roots = vec![
+            DependencyNode::new("A")
+                .child(DependencyNode::new("B").cycle())
+                .child(DependencyNode::new("C").cycle()),
+        ];
         let display = DependencyTreeDisplay::new(OutputMode::Plain, roots)
             .with_cycle_path(vec!["A".into(), "B".into(), "A".into()])
             .with_cycle_path(vec!["A".into(), "C".into(), "A".into()]);
@@ -575,8 +579,7 @@ mod tests {
     #[test]
     fn test_empty_cycle_path_ignored() {
         let roots = vec![DependencyNode::new("Root")];
-        let display =
-            DependencyTreeDisplay::new(OutputMode::Plain, roots).with_cycle_path(vec![]);
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots).with_cycle_path(vec![]);
         let output = display.render();
 
         // Empty cycle path should not add cycles section
@@ -589,11 +592,13 @@ mod tests {
 
     #[test]
     fn test_node_with_all_annotations() {
-        let roots = vec![DependencyNode::new("FullAnnotated")
-            .cached()
-            .scope("singleton")
-            .note("Main dependency")
-            .cycle()];
+        let roots = vec![
+            DependencyNode::new("FullAnnotated")
+                .cached()
+                .scope("singleton")
+                .note("Main dependency")
+                .cycle(),
+        ];
         let display = DependencyTreeDisplay::new(OutputMode::Plain, roots);
         let output = display.render();
 
