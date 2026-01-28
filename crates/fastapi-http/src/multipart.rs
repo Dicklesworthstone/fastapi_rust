@@ -140,7 +140,10 @@ impl std::fmt::Display for MultipartError {
                 write!(f, "file too large: {size} bytes exceeds limit of {max}")
             }
             Self::TotalTooLarge { size, max } => {
-                write!(f, "total upload too large: {size} bytes exceeds limit of {max}")
+                write!(
+                    f,
+                    "total upload too large: {size} bytes exceeds limit of {max}"
+                )
             }
             Self::TooManyFields { count, max } => {
                 write!(f, "too many fields: {count} exceeds limit of {max}")
@@ -228,7 +231,9 @@ impl UploadFile {
         Some(Self {
             field_name: part.name,
             filename,
-            content_type: part.content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+            content_type: part
+                .content_type
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
             data: part.data,
         })
     }
@@ -242,7 +247,10 @@ impl UploadFile {
     /// Get the file extension from the filename.
     #[must_use]
     pub fn extension(&self) -> Option<&str> {
-        self.filename.rsplit('.').next().filter(|ext| !ext.is_empty() && *ext != self.filename)
+        self.filename
+            .rsplit('.')
+            .next()
+            .filter(|ext| !ext.is_empty() && *ext != self.filename)
     }
 }
 
@@ -260,7 +268,10 @@ pub fn parse_boundary(content_type: &str) -> Result<String, MultipartError> {
     // Find boundary parameter
     for part in content_type.split(';') {
         let part = part.trim();
-        if let Some(boundary) = part.strip_prefix("boundary=").or_else(|| part.strip_prefix("BOUNDARY=")) {
+        if let Some(boundary) = part
+            .strip_prefix("boundary=")
+            .or_else(|| part.strip_prefix("BOUNDARY="))
+        {
             // Remove quotes if present
             let boundary = boundary.trim_matches('"').trim_matches('\'');
             if boundary.is_empty() {
@@ -431,9 +442,10 @@ impl MultipartParser {
             }
 
             // Parse header line
-            let line_str = std::str::from_utf8(line).map_err(|_| MultipartError::InvalidPartHeaders {
-                detail: "invalid UTF-8 in header".to_string(),
-            })?;
+            let line_str =
+                std::str::from_utf8(line).map_err(|_| MultipartError::InvalidPartHeaders {
+                    detail: "invalid UTF-8 in header".to_string(),
+                })?;
 
             if let Some((name, value)) = line_str.split_once(':') {
                 let name = name.trim().to_ascii_lowercase();
@@ -470,9 +482,15 @@ fn parse_content_disposition(value: &str) -> Result<(String, Option<String>), Mu
             continue;
         }
 
-        if let Some(n) = part.strip_prefix("name=").or_else(|| part.strip_prefix("NAME=")) {
+        if let Some(n) = part
+            .strip_prefix("name=")
+            .or_else(|| part.strip_prefix("NAME="))
+        {
             name = Some(unquote(n));
-        } else if let Some(f) = part.strip_prefix("filename=").or_else(|| part.strip_prefix("FILENAME=")) {
+        } else if let Some(f) = part
+            .strip_prefix("filename=")
+            .or_else(|| part.strip_prefix("FILENAME="))
+        {
             filename = Some(unquote(f));
         }
     }
@@ -826,15 +844,12 @@ mod tests {
 
     #[test]
     fn test_content_disposition_parsing() {
-        let (name, filename) = parse_content_disposition(
-            r#"form-data; name="field"; filename="test.txt""#
-        ).unwrap();
+        let (name, filename) =
+            parse_content_disposition(r#"form-data; name="field"; filename="test.txt""#).unwrap();
         assert_eq!(name, "field");
         assert_eq!(filename, Some("test.txt".to_string()));
 
-        let (name, filename) = parse_content_disposition(
-            "form-data; name=simple"
-        ).unwrap();
+        let (name, filename) = parse_content_disposition("form-data; name=simple").unwrap();
         assert_eq!(name, "simple");
         assert_eq!(filename, None);
     }

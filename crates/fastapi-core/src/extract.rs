@@ -994,7 +994,10 @@ impl std::fmt::Display for MultipartExtractError {
                 write!(f, "File too large: {size} bytes exceeds limit of {limit}")
             }
             Self::TotalTooLarge { size, limit } => {
-                write!(f, "Total upload too large: {size} bytes exceeds limit of {limit}")
+                write!(
+                    f,
+                    "Total upload too large: {size} bytes exceeds limit of {limit}"
+                )
             }
             Self::TooManyFields { count, limit } => {
                 write!(f, "Too many fields: {count} exceeds limit of {limit}")
@@ -1020,36 +1023,24 @@ impl IntoResponse for MultipartExtractError {
             MultipartExtractError::UnsupportedMediaType { .. } => {
                 HttpError::unsupported_media_type().into_response()
             }
-            MultipartExtractError::MissingBoundary => {
-                HttpError::bad_request()
-                    .with_detail("Missing boundary in multipart Content-Type")
-                    .into_response()
-            }
-            MultipartExtractError::FileTooLarge { size, limit } => {
-                HttpError::payload_too_large()
-                    .with_detail(format!("File {size} bytes > {limit} limit"))
-                    .into_response()
-            }
-            MultipartExtractError::TotalTooLarge { size, limit } => {
-                HttpError::payload_too_large()
-                    .with_detail(format!("Total {size} bytes > {limit} limit"))
-                    .into_response()
-            }
-            MultipartExtractError::TooManyFields { count, limit } => {
-                HttpError::bad_request()
-                    .with_detail(format!("Too many fields: {count} > {limit}"))
-                    .into_response()
-            }
-            MultipartExtractError::InvalidFormat { detail } => {
-                HttpError::bad_request()
-                    .with_detail(format!("Invalid multipart: {detail}"))
-                    .into_response()
-            }
-            MultipartExtractError::StreamingNotSupported => {
-                HttpError::bad_request()
-                    .with_detail("Streaming body not supported")
-                    .into_response()
-            }
+            MultipartExtractError::MissingBoundary => HttpError::bad_request()
+                .with_detail("Missing boundary in multipart Content-Type")
+                .into_response(),
+            MultipartExtractError::FileTooLarge { size, limit } => HttpError::payload_too_large()
+                .with_detail(format!("File {size} bytes > {limit} limit"))
+                .into_response(),
+            MultipartExtractError::TotalTooLarge { size, limit } => HttpError::payload_too_large()
+                .with_detail(format!("Total {size} bytes > {limit} limit"))
+                .into_response(),
+            MultipartExtractError::TooManyFields { count, limit } => HttpError::bad_request()
+                .with_detail(format!("Too many fields: {count} > {limit}"))
+                .into_response(),
+            MultipartExtractError::InvalidFormat { detail } => HttpError::bad_request()
+                .with_detail(format!("Invalid multipart: {detail}"))
+                .into_response(),
+            MultipartExtractError::StreamingNotSupported => HttpError::bad_request()
+                .with_detail("Streaming body not supported")
+                .into_response(),
             MultipartExtractError::FileNotFound { field_name } => {
                 use crate::error::error_types;
                 ValidationErrors::single(
@@ -1130,7 +1121,9 @@ impl Multipart {
                 UploadedFile::new(
                     p.name.clone(),
                     p.filename.clone().unwrap_or_default(),
-                    p.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+                    p.content_type
+                        .clone()
+                        .unwrap_or_else(|| "application/octet-stream".to_string()),
                     p.data.clone(),
                 )
             })
@@ -1146,7 +1139,9 @@ impl Multipart {
                 UploadedFile::new(
                     p.name.clone(),
                     p.filename.clone().unwrap_or_default(),
-                    p.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+                    p.content_type
+                        .clone()
+                        .unwrap_or_else(|| "application/octet-stream".to_string()),
                     p.data.clone(),
                 )
             })
@@ -1163,7 +1158,9 @@ impl Multipart {
                 UploadedFile::new(
                     p.name.clone(),
                     p.filename.clone().unwrap_or_default(),
-                    p.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+                    p.content_type
+                        .clone()
+                        .unwrap_or_else(|| "application/octet-stream".to_string()),
                     p.data.clone(),
                 )
             })
@@ -1210,9 +1207,9 @@ impl FromRequest for Multipart {
             .and_then(|v| std::str::from_utf8(v).ok())
             .map(String::from);
 
-        let ct = content_type.as_deref().ok_or_else(|| MultipartExtractError::UnsupportedMediaType {
-            actual: None,
-        })?;
+        let ct = content_type
+            .as_deref()
+            .ok_or(MultipartExtractError::UnsupportedMediaType { actual: None })?;
 
         if !ct.to_ascii_lowercase().starts_with("multipart/form-data") {
             return Err(MultipartExtractError::UnsupportedMediaType {
@@ -1331,9 +1328,9 @@ impl FromRequest for File {
 
         let multipart = Multipart::from_request(ctx, req).await?;
 
-        let file = multipart.get_file(&field_name).ok_or_else(|| {
-            MultipartExtractError::FileNotFound { field_name }
-        })?;
+        let file = multipart
+            .get_file(&field_name)
+            .ok_or(MultipartExtractError::FileNotFound { field_name })?;
 
         Ok(File(file))
     }
@@ -1343,7 +1340,10 @@ impl FromRequest for File {
 fn parse_multipart_boundary(content_type: &str) -> Result<String, MultipartExtractError> {
     for part in content_type.split(';') {
         let part = part.trim();
-        if let Some(boundary) = part.strip_prefix("boundary=").or_else(|| part.strip_prefix("BOUNDARY=")) {
+        if let Some(boundary) = part
+            .strip_prefix("boundary=")
+            .or_else(|| part.strip_prefix("BOUNDARY="))
+        {
             let boundary = boundary.trim_matches('"').trim_matches('\'');
             if boundary.is_empty() {
                 return Err(MultipartExtractError::MissingBoundary);
@@ -1407,11 +1407,10 @@ fn parse_multipart_body(
         let mut content_type = None;
 
         loop {
-            let line_end = find_crlf(body, pos).ok_or_else(|| {
-                MultipartExtractError::InvalidFormat {
+            let line_end =
+                find_crlf(body, pos).ok_or_else(|| MultipartExtractError::InvalidFormat {
                     detail: "unterminated headers".to_string(),
-                }
-            })?;
+                })?;
 
             let line = &body[pos..line_end];
             if line.is_empty() {
@@ -1512,9 +1511,15 @@ fn parse_content_disposition_header(value: &str) -> (Option<String>, Option<Stri
 
     for part in value.split(';') {
         let part = part.trim();
-        if let Some(n) = part.strip_prefix("name=").or_else(|| part.strip_prefix("NAME=")) {
+        if let Some(n) = part
+            .strip_prefix("name=")
+            .or_else(|| part.strip_prefix("NAME="))
+        {
             name = Some(unquote_param(n));
-        } else if let Some(f) = part.strip_prefix("filename=").or_else(|| part.strip_prefix("FILENAME=")) {
+        } else if let Some(f) = part
+            .strip_prefix("filename=")
+            .or_else(|| part.strip_prefix("FILENAME="))
+        {
             filename = Some(unquote_param(f));
         }
     }
@@ -1535,8 +1540,8 @@ fn unquote_param(s: &str) -> String {
 #[cfg(test)]
 mod multipart_tests {
     use super::*;
-    use crate::request::Method;
     use crate::RequestContext;
+    use crate::request::Method;
     use asupersync::Cx;
 
     fn test_context() -> RequestContext {
@@ -1561,7 +1566,10 @@ mod multipart_tests {
     fn test_parse_boundary_missing() {
         let ct = "multipart/form-data";
         let result = parse_multipart_boundary(ct);
-        assert!(matches!(result, Err(MultipartExtractError::MissingBoundary)));
+        assert!(matches!(
+            result,
+            Err(MultipartExtractError::MissingBoundary)
+        ));
     }
 
     #[test]
@@ -1653,7 +1661,10 @@ mod multipart_tests {
         let config = MultipartConfig::default().max_file_size(100);
         let result = parse_multipart_body(body.as_bytes(), boundary, &config);
 
-        assert!(matches!(result, Err(MultipartExtractError::FileTooLarge { .. })));
+        assert!(matches!(
+            result,
+            Err(MultipartExtractError::FileTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -1678,7 +1689,10 @@ mod multipart_tests {
             .max_total_size(800);
         let result = parse_multipart_body(body.as_bytes(), boundary, &config);
 
-        assert!(matches!(result, Err(MultipartExtractError::TotalTooLarge { .. })));
+        assert!(matches!(
+            result,
+            Err(MultipartExtractError::TotalTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -1699,7 +1713,10 @@ mod multipart_tests {
         let config = MultipartConfig::default().max_fields(3);
         let result = parse_multipart_body(body.as_bytes(), boundary, &config);
 
-        assert!(matches!(result, Err(MultipartExtractError::TooManyFields { .. })));
+        assert!(matches!(
+            result,
+            Err(MultipartExtractError::TooManyFields { .. })
+        ));
     }
 
     #[test]

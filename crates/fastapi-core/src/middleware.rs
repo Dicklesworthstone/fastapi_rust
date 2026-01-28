@@ -4589,17 +4589,8 @@ mod tests {
         assert_eq!(
             execution_log,
             vec![
-                "a:before",
-                "b:before",
-                "c:before",
-                "d:before",
-                "e:before",
-                "handler",
-                "e:after",
-                "d:after",
-                "c:after",
-                "b:after",
-                "a:after",
+                "a:before", "b:before", "c:before", "d:before", "e:before", "handler", "e:after",
+                "d:after", "c:after", "b:after", "a:after",
             ]
         );
     }
