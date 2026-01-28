@@ -132,6 +132,8 @@
 //! - [`DependencyTreeDisplay`] - Dependency injection tree
 //! - [`ShutdownProgressDisplay`] - Graceful shutdown progress
 //! - [`TestReportDisplay`] - Test results formatting
+//! - [`OpenApiDisplay`] - OpenAPI endpoint table and schema visualization (Phase 5)
+//! - [`HelpDisplay`] - Help and usage display (Phase 5)
 
 // SAFETY: We use deny instead of forbid to allow unsafe in test modules.
 // The only unsafe code is for env::set_var/remove_var in tests, which
@@ -165,11 +167,20 @@ pub use themes::{FastApiTheme, ThemePreset};
 pub use components::banner::{Banner, BannerConfig, ServerInfo};
 pub use components::dependency_tree::{DependencyNode, DependencyTreeDisplay};
 pub use components::errors::{
-    ErrorFormatter, FormattedError, HttpErrorInfo, LocItem, ValidationErrorDetail,
+    ErrorFormatter, FormattedError, HttpErrorInfo, LocItem, ValidationContext,
+    ValidationErrorDetail,
 };
+pub use components::help_display::{ArgGroup, ArgInfo, CommandInfo, HelpDisplay, HelpInfo};
+pub use components::http_inspector::{RequestInfo, RequestInspector, ResponseInfo, ResponseInspector};
 pub use components::logging::{HttpMethod, LogEntry, RequestLogger, ResponseTiming};
 pub use components::middleware_stack::{MiddlewareInfo, MiddlewareStackDisplay};
+pub use components::openapi_display::{
+    EndpointInfo, OpenApiDisplay, OpenApiDisplayConfig, OpenApiSummary, PropertyInfo, SchemaType,
+};
 pub use components::routes::{RouteDisplay, RouteEntry, RouteTableConfig};
+pub use components::routing_debug::{
+    CandidateRoute, ExtractedParams, MatchResult, RoutingDebug, RoutingDebugInfo,
+};
 pub use components::shutdown_progress::{ShutdownPhase, ShutdownProgress, ShutdownProgressDisplay};
 pub use components::test_results::{
     TestCaseResult, TestModuleResult, TestReport, TestReportDisplay, TestStatus,
@@ -181,11 +192,25 @@ pub mod prelude {
     pub use crate::components::banner::{Banner, BannerConfig, ServerInfo};
     pub use crate::components::dependency_tree::{DependencyNode, DependencyTreeDisplay};
     pub use crate::components::errors::{
-        ErrorFormatter, FormattedError, HttpErrorInfo, LocItem, ValidationErrorDetail,
+        ErrorFormatter, FormattedError, HttpErrorInfo, LocItem, ValidationContext,
+        ValidationErrorDetail,
+    };
+    pub use crate::components::help_display::{
+        ArgGroup, ArgInfo, CommandInfo, HelpDisplay, HelpInfo,
+    };
+    pub use crate::components::http_inspector::{
+        RequestInfo, RequestInspector, ResponseInfo, ResponseInspector,
     };
     pub use crate::components::logging::{HttpMethod, LogEntry, RequestLogger, ResponseTiming};
     pub use crate::components::middleware_stack::{MiddlewareInfo, MiddlewareStackDisplay};
+    pub use crate::components::openapi_display::{
+        EndpointInfo, OpenApiDisplay, OpenApiDisplayConfig, OpenApiSummary, PropertyInfo,
+        SchemaType,
+    };
     pub use crate::components::routes::{RouteDisplay, RouteEntry, RouteTableConfig};
+    pub use crate::components::routing_debug::{
+        CandidateRoute, ExtractedParams, MatchResult, RoutingDebug, RoutingDebugInfo,
+    };
     pub use crate::components::shutdown_progress::{
         ShutdownPhase, ShutdownProgress, ShutdownProgressDisplay,
     };

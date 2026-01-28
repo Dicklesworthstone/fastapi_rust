@@ -51,6 +51,102 @@ pub struct ValidationErrorDetail {
     pub msg: String,
     /// Error type (e.g., "value_error", "type_error").
     pub error_type: String,
+    /// The actual input value that caused the error.
+    pub input: Option<String>,
+    /// Expected value or constraint (e.g., "integer", "min: 1", "email format").
+    pub expected: Option<String>,
+    /// Context information (e.g., constraint values).
+    pub ctx: Option<ValidationContext>,
+}
+
+/// Context information for validation errors.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationContext {
+    /// Minimum constraint value.
+    pub min: Option<String>,
+    /// Maximum constraint value.
+    pub max: Option<String>,
+    /// Pattern that was expected.
+    pub pattern: Option<String>,
+    /// Expected type name.
+    pub expected_type: Option<String>,
+    /// Additional context key-value pairs.
+    pub extra: Vec<(String, String)>,
+}
+
+impl ValidationContext {
+    /// Create a new empty context.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set minimum constraint.
+    #[must_use]
+    pub fn min(mut self, min: impl Into<String>) -> Self {
+        self.min = Some(min.into());
+        self
+    }
+
+    /// Set maximum constraint.
+    #[must_use]
+    pub fn max(mut self, max: impl Into<String>) -> Self {
+        self.max = Some(max.into());
+        self
+    }
+
+    /// Set pattern constraint.
+    #[must_use]
+    pub fn pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.pattern = Some(pattern.into());
+        self
+    }
+
+    /// Set expected type.
+    #[must_use]
+    pub fn expected_type(mut self, expected: impl Into<String>) -> Self {
+        self.expected_type = Some(expected.into());
+        self
+    }
+
+    /// Add extra context.
+    #[must_use]
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra.push((key.into(), value.into()));
+        self
+    }
+
+    /// Check if context has any values.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.min.is_none()
+            && self.max.is_none()
+            && self.pattern.is_none()
+            && self.expected_type.is_none()
+            && self.extra.is_empty()
+    }
+
+    /// Format context as a string.
+    #[must_use]
+    pub fn format(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(min) = &self.min {
+            parts.push(format!("min={min}"));
+        }
+        if let Some(max) = &self.max {
+            parts.push(format!("max={max}"));
+        }
+        if let Some(pattern) = &self.pattern {
+            parts.push(format!("pattern={pattern}"));
+        }
+        if let Some(expected) = &self.expected_type {
+            parts.push(format!("expected={expected}"));
+        }
+        for (k, v) in &self.extra {
+            parts.push(format!("{k}={v}"));
+        }
+        parts.join(", ")
+    }
 }
 
 impl ValidationErrorDetail {
@@ -61,7 +157,31 @@ impl ValidationErrorDetail {
             loc,
             msg: msg.into(),
             error_type: error_type.into(),
+            input: None,
+            expected: None,
+            ctx: None,
         }
+    }
+
+    /// Set the input value that caused the error.
+    #[must_use]
+    pub fn input(mut self, input: impl Into<String>) -> Self {
+        self.input = Some(input.into());
+        self
+    }
+
+    /// Set the expected value or constraint.
+    #[must_use]
+    pub fn expected(mut self, expected: impl Into<String>) -> Self {
+        self.expected = Some(expected.into());
+        self
+    }
+
+    /// Set the validation context.
+    #[must_use]
+    pub fn ctx(mut self, ctx: ValidationContext) -> Self {
+        self.ctx = Some(ctx);
+        self
     }
 
     /// Format the location path as a string.
@@ -236,6 +356,23 @@ impl ErrorFormatter {
                 lines.push(format!("  - {loc}: {msg}", msg = error.msg));
             }
 
+            // Show input value if present
+            if let Some(input) = &error.input {
+                lines.push(format!("    Input: {input}"));
+            }
+
+            // Show expected value if present
+            if let Some(expected) = &error.expected {
+                lines.push(format!("    Expected: {expected}"));
+            }
+
+            // Show context if present
+            if let Some(ctx) = &error.ctx {
+                if !ctx.is_empty() {
+                    lines.push(format!("    Context: {}", ctx.format()));
+                }
+            }
+
             if self.show_codes {
                 lines.push(format!(
                     "    [type: {error_type}]",
@@ -253,6 +390,7 @@ impl ErrorFormatter {
         let muted = self.theme.muted.to_ansi_fg();
         let accent = self.theme.accent.to_ansi_fg();
         let warning = self.theme.warning.to_ansi_fg();
+        let info = self.theme.info.to_ansi_fg();
 
         // Header
         lines.push(format!(
@@ -272,6 +410,30 @@ impl ErrorFormatter {
                     "  {warning}●{ANSI_RESET} {accent}{loc}{ANSI_RESET}: {msg}",
                     msg = error.msg
                 ));
+            }
+
+            // Show input vs expected comparison
+            if error.input.is_some() || error.expected.is_some() {
+                if let Some(input) = &error.input {
+                    lines.push(format!(
+                        "    {muted}Got:{ANSI_RESET}      {error_color}{input}{ANSI_RESET}"
+                    ));
+                }
+                if let Some(expected) = &error.expected {
+                    lines.push(format!(
+                        "    {muted}Expected:{ANSI_RESET} {info}{expected}{ANSI_RESET}"
+                    ));
+                }
+            }
+
+            // Show context if present
+            if let Some(ctx) = &error.ctx {
+                if !ctx.is_empty() {
+                    lines.push(format!(
+                        "    {muted}Constraints: {}{ANSI_RESET}",
+                        ctx.format()
+                    ));
+                }
             }
 
             // Error type
