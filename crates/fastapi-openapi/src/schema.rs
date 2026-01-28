@@ -286,18 +286,10 @@ pub struct PrimitiveSchema {
     )]
     pub exclusive_maximum: Option<i64>,
     /// Minimum length constraint (for strings).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "minLength"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "minLength")]
     pub min_length: Option<usize>,
     /// Maximum length constraint (for strings).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "maxLength"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxLength")]
     pub max_length: Option<usize>,
     /// Pattern constraint (regex for strings).
     #[serde(default, skip_serializing_if = "Option::is_none")]

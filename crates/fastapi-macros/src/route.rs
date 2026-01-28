@@ -12,8 +12,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::{
-    FnArg, GenericArgument, ItemFn, LitStr, PathArguments, ReturnType, Token, Type,
-    parse::Parse, parse::ParseStream, parse_macro_input, punctuated::Punctuated,
+    FnArg, GenericArgument, ItemFn, LitStr, PathArguments, ReturnType, Token, Type, parse::Parse,
+    parse::ParseStream, parse_macro_input, punctuated::Punctuated,
 };
 
 /// Parsed route attributes from `#[get("/path", summary = "...", ...)]`.
@@ -208,6 +208,92 @@ fn get_extractable_types(
             Some(ty)
         })
         .collect()
+}
+
+/// Body extractor information for OpenAPI request body generation.
+struct BodyExtractorInfo {
+    /// The inner type name (e.g., "CreateUser" from Json<CreateUser>).
+    type_name: String,
+    /// The content type (e.g., "application/json").
+    content_type: &'static str,
+    /// Whether the body is required (not Option<Json<T>>).
+    required: bool,
+}
+
+/// Check if a type is a body extractor (Json<T>) and extract its info.
+///
+/// Returns None if the type is not a body extractor.
+/// Handles both `Json<T>` and `Option<Json<T>>`.
+fn extract_body_info(ty: &Type) -> Option<BodyExtractorInfo> {
+    // Check for Option<Json<T>> first
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Option" {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                        if let Some(mut info) = extract_json_info(inner_ty) {
+                            info.required = false;
+                            return Some(info);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for Json<T> directly
+    extract_json_info(ty)
+}
+
+/// Extract type info from a Json<T> type.
+fn extract_json_info(ty: &Type) -> Option<BodyExtractorInfo> {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Json" {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                        let type_name = extract_type_name(inner_ty);
+                        return Some(BodyExtractorInfo {
+                            type_name,
+                            content_type: "application/json",
+                            required: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract a simple type name from a Type.
+///
+/// For complex types like `Vec<Item>`, returns the full string representation.
+fn extract_type_name(ty: &Type) -> String {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                segment.ident.to_string()
+            } else {
+                quote::quote!(#ty).to_string()
+            }
+        }
+        _ => quote::quote!(#ty).to_string(),
+    }
+}
+
+/// Find the first body extractor in function arguments and return its info.
+fn find_body_extractor(
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
+) -> Option<BodyExtractorInfo> {
+    for arg in inputs {
+        if let Some(ty) = extract_param_type(arg) {
+            if let Some(info) = extract_body_info(ty) {
+                return Some(info);
+            }
+        }
+    }
+    None
 }
 
 /// Extract the inner type from Result<T, E> or impl Trait return types.
@@ -581,7 +667,8 @@ mod tests {
 
     #[test]
     fn test_route_attrs_with_description() {
-        let attrs: RouteAttrs = syn::parse_quote! { "/users", description = "A detailed description" };
+        let attrs: RouteAttrs =
+            syn::parse_quote! { "/users", description = "A detailed description" };
         assert_eq!(attrs.path.value(), "/users");
         assert_eq!(attrs.description.as_deref(), Some("A detailed description"));
     }

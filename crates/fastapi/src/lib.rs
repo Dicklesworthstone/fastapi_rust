@@ -75,7 +75,7 @@ pub use fastapi_core::{
     // Body extractors
     Json, JsonConfig, JsonExtractError,
     // Path parameters
-    Path, PathExtractError, PathParams, PathParamsDeserializer,
+    Path, PathExtractError, PathParams,
     // Query string
     Query, QueryExtractError, QueryParams,
     // Headers
@@ -83,7 +83,7 @@ pub use fastapi_core::{
     // Common header types
     Accept, Authorization, ContentType, Host, UserAgent, XRequestId,
     // Cookies
-    Cookie, CookiePrefix, CookiePrefixError, ResponseCookies, SameSite,
+    Cookie, CookiePrefix, CookiePrefixError, RequestCookies, SameSite,
     // State
     State, AppState,
     // Auth extractors
@@ -94,7 +94,7 @@ pub use fastapi_core::{
     // Background tasks
     BackgroundTasks, BackgroundTasksInner,
     // Response mutations
-    ResponseMut, ResponseMutations, SetResponseHeader,
+    ResponseMut, ResponseMutations, AddResponseHeader,
     // Request utilities
     RequestRef, RequestContext,
 };

@@ -397,6 +397,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastapi"
+version = "0.1.0"
+dependencies = [
+ "fastapi-core",
+ "fastapi-http",
+ "fastapi-macros",
+ "fastapi-openapi",
+ "fastapi-output",
+ "fastapi-router",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fastapi-core"
 version = "0.1.0"
 dependencies = [

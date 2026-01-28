@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    # "crates/fastapi",  # Disabled - fastapi-router Route struct has missing fields
+    "crates/fastapi",
     "crates/fastapi-core",
     "crates/fastapi-http",
     "crates/fastapi-router",

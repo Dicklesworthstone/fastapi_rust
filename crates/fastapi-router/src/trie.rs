@@ -266,6 +266,12 @@ pub struct Route {
     pub tags: Vec<String>,
     /// Whether this route is deprecated.
     pub deprecated: bool,
+    /// Request body schema type name for OpenAPI documentation (e.g., "CreateUser").
+    pub request_body_schema: Option<String>,
+    /// Request body content type for OpenAPI documentation (e.g., "application/json").
+    pub request_body_content_type: Option<String>,
+    /// Whether the request body is required.
+    pub request_body_required: bool,
     /// Handler function that processes matching requests.
     handler: Arc<dyn Handler>,
 }
@@ -287,6 +293,15 @@ impl fmt::Debug for Route {
         }
         if self.deprecated {
             s.field("deprecated", &self.deprecated);
+        }
+        if let Some(ref schema) = self.request_body_schema {
+            s.field("request_body_schema", schema);
+        }
+        if let Some(ref content_type) = self.request_body_content_type {
+            s.field("request_body_content_type", content_type);
+        }
+        if self.request_body_required {
+            s.field("request_body_required", &self.request_body_required);
         }
         s.field("handler", &"<handler>").finish()
     }
@@ -413,6 +428,9 @@ impl Route {
             description: None,
             tags: Vec::new(),
             deprecated: false,
+            request_body_schema: None,
+            request_body_content_type: None,
+            request_body_required: false,
             handler: Arc::new(handler),
         }
     }
@@ -435,6 +453,9 @@ impl Route {
             description: None,
             tags: Vec::new(),
             deprecated: false,
+            request_body_schema: None,
+            request_body_content_type: None,
+            request_body_required: false,
             handler,
         }
     }
@@ -497,6 +518,29 @@ impl Route {
     pub fn deprecated(mut self) -> Self {
         self.deprecated = true;
         self
+    }
+
+    /// Set the request body schema for OpenAPI documentation.
+    ///
+    /// The schema name will be used to generate a `$ref` to the schema
+    /// in the components section.
+    #[must_use]
+    pub fn request_body(
+        mut self,
+        schema: impl Into<String>,
+        content_type: impl Into<String>,
+        required: bool,
+    ) -> Self {
+        self.request_body_schema = Some(schema.into());
+        self.request_body_content_type = Some(content_type.into());
+        self.request_body_required = required;
+        self
+    }
+
+    /// Check if this route has a request body defined.
+    #[must_use]
+    pub fn has_request_body(&self) -> bool {
+        self.request_body_schema.is_some()
     }
 }
 
@@ -2363,5 +2407,205 @@ mod tests {
         // Float variants
         assert_eq!(m.get_param_float("id"), Some(Ok(12345.0f64)));
         assert_eq!(m.get_param_f32("id"), Some(Ok(12345.0f32)));
+    }
+
+    // =========================================================================
+    // SUB-ROUTER MOUNTING TESTS
+    // =========================================================================
+
+    #[test]
+    fn mount_basic() {
+        let mut child = Router::new();
+        child.add(route(Method::Get, "/users")).unwrap();
+        child.add(route(Method::Get, "/items")).unwrap();
+
+        let parent = Router::new().mount("/api/v1", child).unwrap();
+
+        // Routes should be accessible at prefixed paths
+        let m = parent.match_path("/api/v1/users", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/v1/users");
+
+        let m = parent.match_path("/api/v1/items", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/v1/items");
+    }
+
+    #[test]
+    fn mount_with_params() {
+        let mut child = Router::new();
+        child.add(route(Method::Get, "/users/{id}")).unwrap();
+        child
+            .add(route(Method::Get, "/users/{id}/posts/{post_id}"))
+            .unwrap();
+
+        let parent = Router::new().mount("/api", child).unwrap();
+
+        // Path parameters work with prefix
+        let m = parent.match_path("/api/users/42", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/users/{id}");
+        assert_eq!(m.params[0], ("id", "42"));
+
+        let m = parent
+            .match_path("/api/users/1/posts/99", Method::Get)
+            .unwrap();
+        assert_eq!(m.params.len(), 2);
+        assert_eq!(m.params[0], ("id", "1"));
+        assert_eq!(m.params[1], ("post_id", "99"));
+    }
+
+    #[test]
+    fn mount_preserves_methods() {
+        let mut child = Router::new();
+        child.add(route(Method::Get, "/resource")).unwrap();
+        child.add(route(Method::Post, "/resource")).unwrap();
+        child.add(route(Method::Delete, "/resource")).unwrap();
+
+        let parent = Router::new().mount("/api", child).unwrap();
+
+        // All methods should work
+        let m = parent.match_path("/api/resource", Method::Get).unwrap();
+        assert_eq!(m.route.method, Method::Get);
+
+        let m = parent.match_path("/api/resource", Method::Post).unwrap();
+        assert_eq!(m.route.method, Method::Post);
+
+        let m = parent.match_path("/api/resource", Method::Delete).unwrap();
+        assert_eq!(m.route.method, Method::Delete);
+    }
+
+    #[test]
+    fn mount_root_route() {
+        let mut child = Router::new();
+        child.add(route(Method::Get, "/")).unwrap();
+
+        let parent = Router::new().mount("/api", child).unwrap();
+
+        // Root of child is at prefix
+        let m = parent.match_path("/api", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api");
+    }
+
+    #[test]
+    fn mount_trailing_slash_prefix() {
+        let mut child = Router::new();
+        child.add(route(Method::Get, "/users")).unwrap();
+
+        // Trailing slash should be normalized
+        let parent = Router::new().mount("/api/", child).unwrap();
+
+        let m = parent.match_path("/api/users", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/users");
+    }
+
+    #[test]
+    fn mount_empty_prefix() {
+        let mut child = Router::new();
+        child.add(route(Method::Get, "/users")).unwrap();
+
+        let parent = Router::new().mount("", child).unwrap();
+
+        let m = parent.match_path("/users", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/users");
+    }
+
+    #[test]
+    fn mount_nested() {
+        // Build innermost router
+        let mut inner = Router::new();
+        inner.add(route(Method::Get, "/items")).unwrap();
+
+        // Mount inner into middle
+        let middle = Router::new().mount("/v1", inner).unwrap();
+
+        // Mount middle into outer
+        let outer = Router::new().mount("/api", middle).unwrap();
+
+        // Nested path should work
+        let m = outer.match_path("/api/v1/items", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/v1/items");
+    }
+
+    #[test]
+    fn mount_conflict_detection() {
+        let mut child1 = Router::new();
+        child1.add(route(Method::Get, "/users")).unwrap();
+
+        let mut child2 = Router::new();
+        child2.add(route(Method::Get, "/users")).unwrap();
+
+        let parent = Router::new().mount("/api", child1).unwrap();
+
+        // Mounting another router with conflicting routes should fail
+        let result = parent.mount("/api", child2);
+        assert!(matches!(result, Err(RouteAddError::Conflict(_))));
+    }
+
+    #[test]
+    fn mount_no_conflict_different_prefixes() {
+        let mut child1 = Router::new();
+        child1.add(route(Method::Get, "/users")).unwrap();
+
+        let mut child2 = Router::new();
+        child2.add(route(Method::Get, "/users")).unwrap();
+
+        let parent = Router::new()
+            .mount("/api/v1", child1)
+            .unwrap()
+            .mount("/api/v2", child2)
+            .unwrap();
+
+        // Different prefixes don't conflict
+        let m = parent.match_path("/api/v1/users", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/v1/users");
+
+        let m = parent.match_path("/api/v2/users", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/v2/users");
+    }
+
+    #[test]
+    #[should_panic(expected = "route conflict when nesting router")]
+    fn nest_panics_on_conflict() {
+        let mut child1 = Router::new();
+        child1.add(route(Method::Get, "/users")).unwrap();
+
+        let mut child2 = Router::new();
+        child2.add(route(Method::Get, "/users")).unwrap();
+
+        let parent = Router::new().nest("/api", child1);
+
+        // nest() should panic on conflict
+        let _ = parent.nest("/api", child2);
+    }
+
+    #[test]
+    fn mount_with_wildcard() {
+        let mut child = Router::new();
+        child.add(route(Method::Get, "/files/{*path}")).unwrap();
+
+        let parent = Router::new().mount("/static", child).unwrap();
+
+        // Wildcard works with prefix
+        let m = parent
+            .match_path("/static/files/css/style.css", Method::Get)
+            .unwrap();
+        assert_eq!(m.route.path, "/static/files/{*path}");
+        assert_eq!(m.params[0], ("path", "css/style.css"));
+    }
+
+    #[test]
+    fn mount_parent_and_child_routes() {
+        let mut parent = Router::new();
+        parent.add(route(Method::Get, "/health")).unwrap();
+
+        let mut child = Router::new();
+        child.add(route(Method::Get, "/users")).unwrap();
+
+        let app = parent.mount("/api", child).unwrap();
+
+        // Both parent and child routes accessible
+        let m = app.match_path("/health", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/health");
+
+        let m = app.match_path("/api/users", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/users");
     }
 }
