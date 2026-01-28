@@ -61,6 +61,7 @@ pub mod body;
 pub mod connection;
 mod parser;
 mod query;
+pub mod range;
 mod response;
 mod server;
 pub mod streaming;
@@ -80,6 +81,10 @@ pub use parser::{
     RequestLine, StatefulParser,
 };
 pub use query::{QueryString, percent_decode};
+pub use range::{
+    ByteRange, IfRangeResult, RangeError, RangeSpec, accept_ranges_bytes, check_if_range,
+    content_range_unsatisfiable, parse_range_header, parse_range_spec, supports_ranges,
+};
 pub use response::{ChunkedEncoder, ResponseWrite, ResponseWriter};
 pub use server::{
     AppServeExt, DEFAULT_DRAIN_TIMEOUT_SECS, DEFAULT_KEEP_ALIVE_TIMEOUT_SECS,

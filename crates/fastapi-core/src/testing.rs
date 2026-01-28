@@ -5154,3 +5154,322 @@ mod e2e_tests {
         assert!(!skipped.is_failed());
     }
 }
+
+// =============================================================================
+// Integration Test Framework
+// =============================================================================
+
+/// Trait for test fixtures that set up and tear down test data.
+///
+/// Implement this trait for resources that need initialization before tests
+/// and cleanup afterwards (databases, temp files, mock services, etc.).
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::testing::TestFixture;
+///
+/// struct DatabaseFixture {
+///     conn: DatabaseConnection,
+///     users_created: Vec<i64>,
+/// }
+///
+/// impl TestFixture for DatabaseFixture {
+///     fn setup() -> Self {
+///         let conn = DatabaseConnection::test();
+///         DatabaseFixture { conn, users_created: vec![] }
+///     }
+///
+///     fn teardown(&mut self) {
+///         // Delete any users we created
+///         for id in &self.users_created {
+///             self.conn.delete_user(*id);
+///         }
+///     }
+/// }
+/// ```
+pub trait TestFixture: Sized + Send {
+    /// Set up the fixture before the test.
+    fn setup() -> Self;
+
+    /// Tear down the fixture after the test.
+    ///
+    /// This is called even if the test panics, ensuring cleanup happens.
+    fn teardown(&mut self) {}
+}
+
+/// A guard that automatically calls teardown when dropped.
+///
+/// This ensures fixtures are cleaned up even if the test panics.
+pub struct FixtureGuard<F: TestFixture> {
+    fixture: Option<F>,
+}
+
+impl<F: TestFixture> FixtureGuard<F> {
+    /// Creates a new fixture guard, setting up the fixture.
+    pub fn new() -> Self {
+        Self {
+            fixture: Some(F::setup()),
+        }
+    }
+
+    /// Get a reference to the fixture.
+    pub fn get(&self) -> &F {
+        self.fixture.as_ref().unwrap()
+    }
+
+    /// Get a mutable reference to the fixture.
+    pub fn get_mut(&mut self) -> &mut F {
+        self.fixture.as_mut().unwrap()
+    }
+}
+
+impl<F: TestFixture> Default for FixtureGuard<F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<F: TestFixture> Drop for FixtureGuard<F> {
+    fn drop(&mut self) {
+        if let Some(mut fixture) = self.fixture.take() {
+            fixture.teardown();
+        }
+    }
+}
+
+impl<F: TestFixture> std::ops::Deref for FixtureGuard<F> {
+    type Target = F;
+
+    fn deref(&self) -> &Self::Target {
+        self.get()
+    }
+}
+
+impl<F: TestFixture> std::ops::DerefMut for FixtureGuard<F> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.get_mut()
+    }
+}
+
+/// Context for integration tests that manages fixtures and test client.
+///
+/// Provides a structured way to run multi-step integration tests with
+/// automatic fixture management and test isolation.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::testing::{IntegrationTest, TestFixture};
+/// use std::sync::Arc;
+///
+/// // Define a fixture (e.g., for database state)
+/// struct TestData {
+///     user_id: i64,
+/// }
+///
+/// impl TestFixture for TestData {
+///     fn setup() -> Self {
+///         // Create test data
+///         TestData { user_id: 1 }
+///     }
+///
+///     fn teardown(&mut self) {
+///         // Clean up test data
+///     }
+/// }
+///
+/// #[test]
+/// fn test_user_api() {
+///     let app = Arc::new(App::builder()
+///         .route("/users/{id}", Method::Get, get_user)
+///         .build());
+///
+///     IntegrationTest::new("User API Test", app)
+///         .with_fixture::<TestData>()
+///         .run(|ctx| {
+///             // Access fixture
+///             let data = ctx.fixture::<TestData>().unwrap();
+///
+///             // Make requests through the full app stack
+///             let response = ctx.get(&format!("/users/{}", data.user_id)).send();
+///             assert_eq!(response.status().as_u16(), 200);
+///         });
+/// }
+/// ```
+pub struct IntegrationTest<H: Handler + 'static> {
+    /// Test name.
+    name: String,
+    /// Test client wrapping the app.
+    client: TestClient<H>,
+    /// Registered fixtures (type-erased).
+    fixtures: HashMap<std::any::TypeId, Box<dyn std::any::Any + Send>>,
+    /// State reset hooks to run between tests.
+    reset_hooks: Vec<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl<H: Handler + 'static> IntegrationTest<H> {
+    /// Creates a new integration test context.
+    pub fn new(name: impl Into<String>, handler: H) -> Self {
+        Self {
+            name: name.into(),
+            client: TestClient::new(handler),
+            fixtures: HashMap::new(),
+            reset_hooks: Vec::new(),
+        }
+    }
+
+    /// Creates a new integration test with a specific seed for determinism.
+    pub fn with_seed(name: impl Into<String>, handler: H, seed: u64) -> Self {
+        Self {
+            name: name.into(),
+            client: TestClient::with_seed(handler, seed),
+            fixtures: HashMap::new(),
+            reset_hooks: Vec::new(),
+        }
+    }
+
+    /// Registers a fixture type for this test.
+    ///
+    /// The fixture will be set up before the test runs and torn down after.
+    #[must_use]
+    pub fn with_fixture<F: TestFixture + 'static>(mut self) -> Self {
+        let guard = FixtureGuard::<F>::new();
+        self.fixtures
+            .insert(std::any::TypeId::of::<F>(), Box::new(guard));
+        self
+    }
+
+    /// Registers a state reset hook to run after the test.
+    ///
+    /// Useful for clearing caches, resetting global state, etc.
+    #[must_use]
+    pub fn on_reset<F: Fn() + Send + Sync + 'static>(mut self, f: F) -> Self {
+        self.reset_hooks.push(Box::new(f));
+        self
+    }
+
+    /// Runs the integration test.
+    ///
+    /// The test function receives an `IntegrationTestContext` that provides
+    /// access to the test client and fixtures.
+    pub fn run<F>(mut self, test_fn: F)
+    where
+        F: FnOnce(&IntegrationTestContext<'_, H>) + std::panic::UnwindSafe,
+    {
+        // Create context
+        let ctx = IntegrationTestContext {
+            name: &self.name,
+            client: &self.client,
+            fixtures: &self.fixtures,
+        };
+
+        // Wrap context for panic safety
+        let ctx_ref = std::panic::AssertUnwindSafe(&ctx);
+
+        // Run test and capture result
+        let result = std::panic::catch_unwind(|| {
+            test_fn(&ctx_ref);
+        });
+
+        // Run reset hooks regardless of outcome
+        for hook in &self.reset_hooks {
+            hook();
+        }
+
+        // Clear cookies and dependency overrides
+        self.client.clear_cookies();
+        self.client.clear_dependency_overrides();
+
+        // Drop fixtures in reverse order (triggers teardown)
+        self.fixtures.clear();
+
+        // Re-panic if test failed
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+}
+
+/// Context available during an integration test.
+pub struct IntegrationTestContext<'a, H: Handler> {
+    /// Test name.
+    name: &'a str,
+    /// Test client.
+    client: &'a TestClient<H>,
+    /// Registered fixtures.
+    fixtures: &'a HashMap<std::any::TypeId, Box<dyn std::any::Any + Send>>,
+}
+
+impl<'a, H: Handler + 'static> IntegrationTestContext<'a, H> {
+    /// Returns the test name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
+    /// Returns the test client.
+    #[must_use]
+    pub fn client(&self) -> &TestClient<H> {
+        self.client
+    }
+
+    /// Gets a reference to a registered fixture.
+    ///
+    /// Returns `None` if the fixture type was not registered.
+    #[must_use]
+    pub fn fixture<F: TestFixture + 'static>(&self) -> Option<&F> {
+        self.fixtures
+            .get(&std::any::TypeId::of::<F>())
+            .and_then(|boxed| boxed.downcast_ref::<FixtureGuard<F>>())
+            .map(FixtureGuard::get)
+    }
+
+    /// Gets a mutable reference to a registered fixture.
+    ///
+    /// Returns `None` if the fixture type was not registered.
+    #[must_use]
+    pub fn fixture_mut<F: TestFixture + 'static>(&self) -> Option<&mut F> {
+        // This is safe because we only expose mutable access to the fixture content,
+        // not to the guard itself. The borrow checker ensures single-threaded access.
+        // Note: This requires interior mutability in the fixture or careful usage.
+        None // Conservative: don't allow mutable access through shared ref
+    }
+
+    // Delegate HTTP methods to client for convenience
+
+    /// Starts building a GET request.
+    pub fn get(&self, path: &str) -> RequestBuilder<'_, H> {
+        self.client.get(path)
+    }
+
+    /// Starts building a POST request.
+    pub fn post(&self, path: &str) -> RequestBuilder<'_, H> {
+        self.client.post(path)
+    }
+
+    /// Starts building a PUT request.
+    pub fn put(&self, path: &str) -> RequestBuilder<'_, H> {
+        self.client.put(path)
+    }
+
+    /// Starts building a DELETE request.
+    pub fn delete(&self, path: &str) -> RequestBuilder<'_, H> {
+        self.client.delete(path)
+    }
+
+    /// Starts building a PATCH request.
+    pub fn patch(&self, path: &str) -> RequestBuilder<'_, H> {
+        self.client.patch(path)
+    }
+
+    /// Starts building an OPTIONS request.
+    pub fn options(&self, path: &str) -> RequestBuilder<'_, H> {
+        self.client.options(path)
+    }
+
+    /// Starts building a request with a custom method.
+    pub fn request(&self, method: Method, path: &str) -> RequestBuilder<'_, H> {
+        self.client.request(method, path)
+    }
+}

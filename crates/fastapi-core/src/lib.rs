@@ -110,8 +110,9 @@ pub use asupersync::{Budget, Cx, Outcome, RegionId, TaskId};
 
 // Re-export testing utilities
 pub use testing::{
-    CapturedLog, CookieJar, E2ECapture, E2EReport, E2EScenario, E2EStep, E2EStepResult, LogCapture,
-    RequestBuilder, ResponseDiff, TestClient, TestLogger, TestResponse, TestTimings, json_contains,
+    CapturedLog, CookieJar, E2ECapture, E2EReport, E2EScenario, E2EStep, E2EStepResult,
+    FixtureGuard, IntegrationTest, IntegrationTestContext, LogCapture, RequestBuilder,
+    ResponseDiff, TestClient, TestFixture, TestLogger, TestResponse, TestTimings, json_contains,
 };
 // Note: e2e_test!, assert_with_logs!, assert_eq_with_logs! macros are automatically exported
 // at crate root via #[macro_export]

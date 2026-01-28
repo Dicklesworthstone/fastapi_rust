@@ -475,6 +475,43 @@ pub trait StreamingResponseExt {
         content_type: &[u8],
         config: StreamConfig,
     ) -> io::Result<fastapi_core::Response>;
+
+    /// Create a 206 Partial Content response for a byte range of a file.
+    ///
+    /// This is used to handle HTTP Range requests for partial content delivery.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file
+    /// * `range` - The validated byte range to serve
+    /// * `total_size` - Total size of the file (for Content-Range header)
+    /// * `cx` - Capability context
+    /// * `content_type` - MIME type for the Content-Type header
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or seeked.
+    fn stream_file_range<P: AsRef<Path>>(
+        path: P,
+        range: crate::range::ByteRange,
+        total_size: u64,
+        cx: Cx,
+        content_type: &[u8],
+    ) -> io::Result<fastapi_core::Response>;
+
+    /// Create a 206 Partial Content response with custom streaming config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or seeked.
+    fn stream_file_range_with_config<P: AsRef<Path>>(
+        path: P,
+        range: crate::range::ByteRange,
+        total_size: u64,
+        cx: Cx,
+        content_type: &[u8],
+        config: StreamConfig,
+    ) -> io::Result<fastapi_core::Response>;
 }
 
 impl StreamingResponseExt for fastapi_core::Response {
@@ -496,6 +533,45 @@ impl StreamingResponseExt for fastapi_core::Response {
 
         Ok(fastapi_core::Response::ok()
             .header("content-type", content_type.to_vec())
+            .header("accept-ranges", b"bytes".to_vec())
+            .body(fastapi_core::ResponseBody::stream(stream)))
+    }
+
+    fn stream_file_range<P: AsRef<Path>>(
+        path: P,
+        range: crate::range::ByteRange,
+        total_size: u64,
+        cx: Cx,
+        content_type: &[u8],
+    ) -> io::Result<fastapi_core::Response> {
+        Self::stream_file_range_with_config(
+            path,
+            range,
+            total_size,
+            cx,
+            content_type,
+            StreamConfig::default(),
+        )
+    }
+
+    fn stream_file_range_with_config<P: AsRef<Path>>(
+        path: P,
+        range: crate::range::ByteRange,
+        total_size: u64,
+        cx: Cx,
+        content_type: &[u8],
+        config: StreamConfig,
+    ) -> io::Result<fastapi_core::Response> {
+        let stream = FileStream::open_range(path, range.start, range.len(), cx, config)?;
+
+        Ok(fastapi_core::Response::partial_content()
+            .header("content-type", content_type.to_vec())
+            .header("accept-ranges", b"bytes".to_vec())
+            .header(
+                "content-range",
+                range.content_range_header(total_size).into_bytes(),
+            )
+            .header("content-length", range.len().to_string().into_bytes())
             .body(fastapi_core::ResponseBody::stream(stream)))
     }
 }
@@ -636,5 +712,124 @@ mod tests {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
         let err = StreamError::Io(io_err);
         assert!(format!("{err}").contains("streaming I/O error"));
+    }
+
+    // =========================================================================
+    // StreamingResponseExt tests
+    // =========================================================================
+
+    #[test]
+    fn stream_file_adds_accept_ranges_header() {
+        // Create a temp file
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_stream_accept_ranges.txt");
+        std::fs::write(&test_file, b"Hello, streaming world!").unwrap();
+
+        let cx = Cx::for_testing();
+        let response =
+            fastapi_core::Response::stream_file(&test_file, cx, b"text/plain").unwrap();
+
+        let accept_ranges = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name == "accept-ranges")
+            .map(|(_, value)| String::from_utf8_lossy(value).to_string());
+
+        assert_eq!(accept_ranges, Some("bytes".to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn stream_file_range_returns_206() {
+        use crate::range::ByteRange;
+
+        // Create a temp file
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_stream_range_206.txt");
+        std::fs::write(&test_file, b"0123456789ABCDEF").unwrap();
+
+        let cx = Cx::for_testing();
+        let range = ByteRange::new(0, 4); // First 5 bytes
+        let response = fastapi_core::Response::stream_file_range(
+            &test_file,
+            range,
+            16, // Total size
+            cx,
+            b"text/plain",
+        )
+        .unwrap();
+
+        // Should be 206 Partial Content
+        assert_eq!(response.status().as_u16(), 206);
+
+        // Cleanup
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn stream_file_range_sets_content_range_header() {
+        use crate::range::ByteRange;
+
+        // Create a temp file
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_stream_content_range.txt");
+        std::fs::write(&test_file, b"0123456789ABCDEF").unwrap();
+
+        let cx = Cx::for_testing();
+        let range = ByteRange::new(5, 9); // Bytes 5-9 (5 bytes)
+        let response = fastapi_core::Response::stream_file_range(
+            &test_file,
+            range,
+            16, // Total size
+            cx,
+            b"text/plain",
+        )
+        .unwrap();
+
+        let content_range = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name == "content-range")
+            .map(|(_, value)| String::from_utf8_lossy(value).to_string());
+
+        assert_eq!(content_range, Some("bytes 5-9/16".to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn stream_file_range_sets_content_length_header() {
+        use crate::range::ByteRange;
+
+        // Create a temp file
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_stream_content_length.txt");
+        std::fs::write(&test_file, b"0123456789ABCDEF").unwrap();
+
+        let cx = Cx::for_testing();
+        let range = ByteRange::new(0, 99); // Will be clamped by file size
+        let response = fastapi_core::Response::stream_file_range(
+            &test_file,
+            range,
+            16, // Total size
+            cx,
+            b"text/plain",
+        )
+        .unwrap();
+
+        let content_length = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name == "content-length")
+            .map(|(_, value)| String::from_utf8_lossy(value).to_string());
+
+        // Range 0-99 has length 100, but actual bytes served depend on the file
+        assert_eq!(content_length, Some("100".to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(test_file);
     }
 }

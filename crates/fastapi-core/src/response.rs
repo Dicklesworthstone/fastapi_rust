@@ -31,6 +31,8 @@ impl StatusCode {
     pub const ACCEPTED: Self = Self(202);
     /// 204 No Content
     pub const NO_CONTENT: Self = Self(204);
+    /// 206 Partial Content
+    pub const PARTIAL_CONTENT: Self = Self(206);
 
     // Redirection
     /// 301 Moved Permanently
@@ -61,6 +63,8 @@ impl StatusCode {
     pub const PAYLOAD_TOO_LARGE: Self = Self(413);
     /// 415 Unsupported Media Type
     pub const UNSUPPORTED_MEDIA_TYPE: Self = Self(415);
+    /// 416 Range Not Satisfiable
+    pub const RANGE_NOT_SATISFIABLE: Self = Self(416);
     /// 422 Unprocessable Entity
     pub const UNPROCESSABLE_ENTITY: Self = Self(422);
     /// 429 Too Many Requests
@@ -104,6 +108,7 @@ impl StatusCode {
             201 => "Created",
             202 => "Accepted",
             204 => "No Content",
+            206 => "Partial Content",
             301 => "Moved Permanently",
             302 => "Found",
             303 => "See Other",
@@ -117,6 +122,7 @@ impl StatusCode {
             405 => "Method Not Allowed",
             413 => "Payload Too Large",
             415 => "Unsupported Media Type",
+            416 => "Range Not Satisfiable",
             422 => "Unprocessable Entity",
             429 => "Too Many Requests",
             499 => "Client Closed Request",
@@ -248,6 +254,43 @@ impl Response {
     #[must_use]
     pub fn internal_error() -> Self {
         Self::with_status(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    /// Create a 206 Partial Content response.
+    ///
+    /// Used for range requests. You should also set the `Content-Range` header.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::{Response, ResponseBody};
+    ///
+    /// let response = Response::partial_content()
+    ///     .header("Content-Range", b"bytes 0-499/1000".to_vec())
+    ///     .header("Accept-Ranges", b"bytes".to_vec())
+    ///     .body(ResponseBody::Bytes(partial_data));
+    /// ```
+    #[must_use]
+    pub fn partial_content() -> Self {
+        Self::with_status(StatusCode::PARTIAL_CONTENT)
+    }
+
+    /// Create a 416 Range Not Satisfiable response.
+    ///
+    /// Used when a Range header specifies a range that cannot be satisfied.
+    /// You should also set the `Content-Range` header with the resource size.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::Response;
+    ///
+    /// let response = Response::range_not_satisfiable()
+    ///     .header("Content-Range", b"bytes */1000".to_vec());
+    /// ```
+    #[must_use]
+    pub fn range_not_satisfiable() -> Self {
+        Self::with_status(StatusCode::RANGE_NOT_SATISFIABLE)
     }
 
     /// Add a header.
@@ -833,6 +876,7 @@ impl FileResponse {
                         "content-disposition",
                         self.content_disposition().into_bytes(),
                     )
+                    .header("accept-ranges", b"bytes".to_vec())
                     .body(ResponseBody::Bytes(contents))
             }
             Err(_) => Response::with_status(StatusCode::NOT_FOUND),
@@ -1480,6 +1524,28 @@ mod tests {
     }
 
     #[test]
+    fn file_response_includes_accept_ranges_header() {
+        // Create a temp file for testing
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_accept_ranges.txt");
+        std::fs::write(&test_file, b"test content for range support").unwrap();
+
+        let file = FileResponse::new(&test_file);
+        let response = file.into_response();
+
+        let accept_ranges = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name == "accept-ranges")
+            .map(|(_, value)| String::from_utf8_lossy(value).to_string());
+
+        assert_eq!(accept_ranges, Some("bytes".to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
     fn file_response_not_found_returns_404() {
         let file = FileResponse::new("/nonexistent/path/file.txt");
         let response = file.into_response();
@@ -1533,6 +1599,41 @@ mod tests {
     #[test]
     fn status_code_see_other_canonical_reason() {
         assert_eq!(StatusCode::SEE_OTHER.canonical_reason(), "See Other");
+    }
+
+    #[test]
+    fn status_code_partial_content_is_206() {
+        assert_eq!(StatusCode::PARTIAL_CONTENT.as_u16(), 206);
+    }
+
+    #[test]
+    fn status_code_partial_content_canonical_reason() {
+        assert_eq!(StatusCode::PARTIAL_CONTENT.canonical_reason(), "Partial Content");
+    }
+
+    #[test]
+    fn status_code_range_not_satisfiable_is_416() {
+        assert_eq!(StatusCode::RANGE_NOT_SATISFIABLE.as_u16(), 416);
+    }
+
+    #[test]
+    fn status_code_range_not_satisfiable_canonical_reason() {
+        assert_eq!(
+            StatusCode::RANGE_NOT_SATISFIABLE.canonical_reason(),
+            "Range Not Satisfiable"
+        );
+    }
+
+    #[test]
+    fn response_partial_content_returns_206() {
+        let response = Response::partial_content();
+        assert_eq!(response.status().as_u16(), 206);
+    }
+
+    #[test]
+    fn response_range_not_satisfiable_returns_416() {
+        let response = Response::range_not_satisfiable();
+        assert_eq!(response.status().as_u16(), 416);
     }
 
     // =========================================================================

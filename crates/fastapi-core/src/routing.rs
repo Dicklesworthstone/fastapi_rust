@@ -3,8 +3,44 @@
 //! This module provides path parameter extraction with type converters,
 //! similar to FastAPI's path converters: `{id:int}`, `{value:float}`,
 //! `{uuid:uuid}`, `{path:path}`.
+//!
+//! # Trailing Slash Handling
+//!
+//! This module also handles trailing slash normalization via [`TrailingSlashMode`]:
+//! - `Strict`: Exact match required (default)
+//! - `Redirect`: 308 redirect to canonical form (no trailing slash)
+//! - `RedirectWithSlash`: 308 redirect to form with trailing slash
+//! - `MatchBoth`: Accept both forms without redirect
 
 use crate::request::Method;
+
+/// Trailing slash handling mode.
+///
+/// Controls how the router handles trailing slashes in URLs.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::routing::TrailingSlashMode;
+///
+/// // Redirect /users/ to /users
+/// let mode = TrailingSlashMode::Redirect;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrailingSlashMode {
+    /// Exact match required - `/users` and `/users/` are different routes.
+    #[default]
+    Strict,
+    /// Redirect trailing slash to no trailing slash (308 Permanent Redirect).
+    /// `/users/` redirects to `/users`.
+    Redirect,
+    /// Redirect no trailing slash to with trailing slash (308 Permanent Redirect).
+    /// `/users` redirects to `/users/`.
+    RedirectWithSlash,
+    /// Accept both forms without redirect.
+    /// Both `/users` and `/users/` match the route.
+    MatchBoth,
+}
 
 /// Path parameter type converter.
 ///
@@ -261,6 +297,13 @@ pub enum RouteLookup<'a, T> {
         /// Methods that are allowed for this path.
         allowed: Vec<Method>,
     },
+    /// Redirect to a different path (308 Permanent Redirect).
+    ///
+    /// Used for trailing slash normalization.
+    Redirect {
+        /// The path to redirect to.
+        target: String,
+    },
     /// No route matched.
     NotFound,
 }
@@ -328,13 +371,116 @@ impl<T> RouteTable<T> {
                 allowed_methods.push(Method::Head);
             }
             // Sort methods for consistent output
-            allowed_methods.sort_by_key(method_order);
+            allowed_methods.sort_by_key(|m| method_order(*m));
             return RouteLookup::MethodNotAllowed {
                 allowed: allowed_methods,
             };
         }
 
         RouteLookup::NotFound
+    }
+
+    /// Look up a route by path and method, with trailing slash handling.
+    ///
+    /// This extends `lookup` with trailing slash normalization based on the mode:
+    /// - `Strict`: Exact match required
+    /// - `Redirect`: Redirect trailing slash to no trailing slash
+    /// - `RedirectWithSlash`: Redirect no trailing slash to with trailing slash
+    /// - `MatchBoth`: Accept both forms without redirect
+    #[must_use]
+    pub fn lookup_with_trailing_slash(
+        &self,
+        path: &str,
+        method: Method,
+        mode: TrailingSlashMode,
+    ) -> RouteLookup<'_, T> {
+        // First, try exact match
+        let result = self.lookup(path, method);
+        if !matches!(result, RouteLookup::NotFound) {
+            return result;
+        }
+
+        // If strict mode or no trailing slash handling, return the result
+        if mode == TrailingSlashMode::Strict {
+            return result;
+        }
+
+        // Try alternate path (toggle trailing slash)
+        let has_trailing_slash = path.len() > 1 && path.ends_with('/');
+        let alt_path = if has_trailing_slash {
+            // Remove trailing slash
+            &path[..path.len() - 1]
+        } else {
+            // Need to allocate for adding trailing slash
+            return self.lookup_with_trailing_slash_add(path, method, mode);
+        };
+
+        let alt_result = self.lookup(alt_path, method);
+        match (&alt_result, mode) {
+            (RouteLookup::Match { .. }, TrailingSlashMode::Redirect) => {
+                // Path has trailing slash but route matches without it - redirect
+                RouteLookup::Redirect {
+                    target: alt_path.to_string(),
+                }
+            }
+            (RouteLookup::Match { route, params }, TrailingSlashMode::MatchBoth) => {
+                // Match both - return the match directly
+                RouteLookup::Match {
+                    route,
+                    params: params.clone(),
+                }
+            }
+            (RouteLookup::MethodNotAllowed { allowed }, TrailingSlashMode::Redirect) => {
+                // Path has trailing slash, route exists without it - redirect
+                RouteLookup::Redirect {
+                    target: alt_path.to_string(),
+                }
+            }
+            (RouteLookup::MethodNotAllowed { allowed }, TrailingSlashMode::MatchBoth) => {
+                // Return method not allowed for the alt path
+                RouteLookup::MethodNotAllowed {
+                    allowed: allowed.clone(),
+                }
+            }
+            _ => result, // NotFound or other modes
+        }
+    }
+
+    /// Helper for lookup_with_trailing_slash when we need to add a trailing slash.
+    fn lookup_with_trailing_slash_add(
+        &self,
+        path: &str,
+        method: Method,
+        mode: TrailingSlashMode,
+    ) -> RouteLookup<'_, T> {
+        // Path doesn't have trailing slash, try with it
+        let with_slash = format!("{}/", path);
+        let alt_result = self.lookup(&with_slash, method);
+
+        match (&alt_result, mode) {
+            (RouteLookup::Match { .. }, TrailingSlashMode::RedirectWithSlash) => {
+                // Path doesn't have trailing slash but route matches with it - redirect
+                RouteLookup::Redirect { target: with_slash }
+            }
+            (RouteLookup::Match { route, params }, TrailingSlashMode::MatchBoth) => {
+                // Match both - return the match directly
+                RouteLookup::Match {
+                    route,
+                    params: params.clone(),
+                }
+            }
+            (RouteLookup::MethodNotAllowed { allowed }, TrailingSlashMode::RedirectWithSlash) => {
+                // Route exists with trailing slash - redirect
+                RouteLookup::Redirect { target: with_slash }
+            }
+            (RouteLookup::MethodNotAllowed { allowed }, TrailingSlashMode::MatchBoth) => {
+                // Return method not allowed for the alt path
+                RouteLookup::MethodNotAllowed {
+                    allowed: allowed.clone(),
+                }
+            }
+            _ => RouteLookup::NotFound,
+        }
     }
 
     /// Get the number of routes.
@@ -356,9 +502,12 @@ impl<T> Default for RouteTable<T> {
     }
 }
 
-// Takes a reference because it's used with sort_by_key which passes references
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn method_order(method: &Method) -> u8 {
+/// Get the sort order for an HTTP method.
+///
+/// Used to produce consistent ordering in Allow headers:
+/// GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, TRACE
+#[must_use]
+pub fn method_order(method: Method) -> u8 {
     match method {
         Method::Get => 0,
         Method::Head => 1,
@@ -564,5 +713,56 @@ mod tests {
     fn format_allow_header_formats_methods() {
         let methods = vec![Method::Get, Method::Head, Method::Post];
         assert_eq!(format_allow_header(&methods), "GET, HEAD, POST");
+    }
+
+    #[test]
+    fn options_request_returns_method_not_allowed_with_allowed_methods() {
+        let mut table: RouteTable<&str> = RouteTable::new();
+        table.add(Method::Get, "/users", "get_users");
+        table.add(Method::Post, "/users", "create_user");
+
+        // OPTIONS should return MethodNotAllowed with the allowed methods
+        // (The app layer handles converting this to a 204 response)
+        match table.lookup("/users", Method::Options) {
+            RouteLookup::MethodNotAllowed { allowed } => {
+                assert!(allowed.contains(&Method::Get));
+                assert!(allowed.contains(&Method::Head));
+                assert!(allowed.contains(&Method::Post));
+            }
+            _ => panic!("Expected MethodNotAllowed for OPTIONS request"),
+        }
+    }
+
+    #[test]
+    fn options_request_on_nonexistent_path_returns_not_found() {
+        let mut table: RouteTable<&str> = RouteTable::new();
+        table.add(Method::Get, "/users", "get_users");
+
+        match table.lookup("/items", Method::Options) {
+            RouteLookup::NotFound => {}
+            _ => panic!("Expected NotFound for OPTIONS on non-existent path"),
+        }
+    }
+
+    #[test]
+    fn explicit_options_handler_matches() {
+        let mut table: RouteTable<&str> = RouteTable::new();
+        table.add(Method::Get, "/api/resource", "get_resource");
+        table.add(Method::Options, "/api/resource", "options_resource");
+
+        match table.lookup("/api/resource", Method::Options) {
+            RouteLookup::Match { route, .. } => {
+                assert_eq!(*route, "options_resource");
+            }
+            _ => panic!("Expected match for explicit OPTIONS handler"),
+        }
+    }
+
+    #[test]
+    fn method_order_returns_expected_ordering() {
+        assert!(method_order(Method::Get) < method_order(Method::Post));
+        assert!(method_order(Method::Head) < method_order(Method::Post));
+        assert!(method_order(Method::Options) < method_order(Method::Trace));
+        assert!(method_order(Method::Delete) < method_order(Method::Options));
     }
 }

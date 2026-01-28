@@ -48,7 +48,7 @@ use crate::extract::PathParams;
 use crate::middleware::{BoxFuture, Handler, Middleware, MiddlewareStack};
 use crate::request::{Method, Request};
 use crate::response::{Response, StatusCode};
-use crate::routing::{RouteLookup, RouteTable, format_allow_header};
+use crate::routing::{RouteLookup, RouteTable, format_allow_header, method_order};
 use crate::shutdown::ShutdownController;
 use serde::Deserialize;
 
@@ -1989,7 +1989,19 @@ impl App {
                     response
                 }
             }
-            RouteLookup::MethodNotAllowed { allowed } => {
+            RouteLookup::MethodNotAllowed { mut allowed } => {
+                // Auto-handle OPTIONS requests: return 204 No Content with Allow header
+                // listing all methods available for this path (including OPTIONS)
+                if req.method() == Method::Options {
+                    // Add OPTIONS to allowed methods if not already present
+                    if !allowed.contains(&Method::Options) {
+                        allowed.push(Method::Options);
+                        // Re-sort to maintain consistent ordering
+                        allowed.sort_by_key(|m| method_order(*m));
+                    }
+                    return Response::with_status(StatusCode::NO_CONTENT)
+                        .header("Allow", format_allow_header(&allowed).into_bytes());
+                }
                 Response::with_status(StatusCode::METHOD_NOT_ALLOWED)
                     .header("Allow", format_allow_header(&allowed).into_bytes())
             }
@@ -2151,6 +2163,59 @@ impl App {
     pub fn pending_shutdown_hooks(&self) -> usize {
         self.shutdown_hooks.lock().len() + self.async_shutdown_hooks.lock().len()
     }
+
+    // =========================================================================
+    // Testing Support
+    // =========================================================================
+
+    /// Creates a [`TestClient`] for this application.
+    ///
+    /// The test client provides in-process testing without network overhead,
+    /// simulating HTTP requests against the full application stack including
+    /// middleware, routing, and handlers.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::{App, Request, Response, RequestContext, Method};
+    ///
+    /// async fn hello(ctx: &RequestContext, req: &mut Request) -> Response {
+    ///     Response::ok().body_text("Hello!")
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .route("/hello", Method::Get, hello)
+    ///     .build();
+    ///
+    /// // Create test client from app
+    /// let client = app.test_client();
+    ///
+    /// // Make requests
+    /// let response = client.get("/hello").send();
+    /// assert_eq!(response.status().as_u16(), 200);
+    /// assert_eq!(response.text(), "Hello!");
+    /// ```
+    #[must_use]
+    pub fn test_client(self: Arc<Self>) -> crate::testing::TestClient<Arc<App>> {
+        crate::testing::TestClient::new(self)
+    }
+
+    /// Creates a [`TestClient`] with a specific seed for deterministic testing.
+    ///
+    /// Using the same seed produces reproducible behavior for tests involving
+    /// concurrent operations or random elements.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let app = Arc::new(App::builder().build());
+    /// let client = app.test_client_with_seed(42);
+    /// // Tests will be deterministic with this seed
+    /// ```
+    #[must_use]
+    pub fn test_client_with_seed(self: Arc<Self>, seed: u64) -> crate::testing::TestClient<Arc<App>> {
+        crate::testing::TestClient::with_seed(self, seed)
+    }
 }
 
 impl std::fmt::Debug for App {
@@ -2169,6 +2234,20 @@ impl std::fmt::Debug for App {
 }
 
 impl Handler for App {
+    fn call<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> BoxFuture<'a, Response> {
+        Box::pin(async move { self.handle(ctx, req).await })
+    }
+
+    fn dependency_overrides(&self) -> Option<Arc<DependencyOverrides>> {
+        Some(Arc::clone(&self.dependency_overrides))
+    }
+}
+
+impl Handler for Arc<App> {
     fn call<'a>(
         &'a self,
         ctx: &'a RequestContext,
