@@ -50,6 +50,7 @@ use crate::response::{ResponseWrite, ResponseWriter};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::stream::Stream;
+use asupersync::time::timeout;
 use asupersync::{Budget, Cx, Time};
 use fastapi_core::app::App;
 use fastapi_core::{Request, RequestContext, Response, StatusCode};
@@ -57,10 +58,29 @@ use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 use std::time::{Duration, Instant};
+
+/// Global start time for computing asupersync Time values.
+/// This is lazily initialized on first use.
+static START_TIME: OnceLock<Instant> = OnceLock::new();
+
+/// Returns the current time as an asupersync Time value.
+///
+/// This uses wall clock time relative to a lazily-initialized start point,
+/// which is compatible with asupersync's standalone timer mechanism.
+fn current_time() -> Time {
+    let start = START_TIME.get_or_init(Instant::now);
+    let now = Instant::now();
+    if now < *start {
+        Time::ZERO
+    } else {
+        let elapsed = now.duration_since(*start);
+        Time::from_nanos(elapsed.as_nanos() as u64)
+    }
+}
 
 /// Default request timeout in seconds.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -1009,14 +1029,15 @@ async fn read_into_buffer(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Resu
 
 /// Reads data from a TCP stream with a timeout.
 ///
-/// This function polls the stream for data, tracking elapsed time. If no data
-/// arrives within the specified timeout, returns `io::ErrorKind::TimedOut`.
+/// Uses asupersync's timer system for proper async timeout handling.
+/// The timeout is implemented using asupersync's `timeout` future wrapper,
+/// which properly integrates with the async runtime's timer driver.
 ///
 /// # Arguments
 ///
 /// * `stream` - The TCP stream to read from
 /// * `buffer` - The buffer to read into
-/// * `timeout` - Maximum time to wait for data
+/// * `timeout_duration` - Maximum time to wait for data
 ///
 /// # Returns
 ///
@@ -1026,36 +1047,22 @@ async fn read_into_buffer(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Resu
 async fn read_with_timeout(
     stream: &mut TcpStream,
     buffer: &mut [u8],
-    timeout: Duration,
+    timeout_duration: Duration,
 ) -> io::Result<usize> {
-    use std::future::poll_fn;
+    // Get current time for the timeout calculation
+    let now = current_time();
 
-    let deadline = Instant::now() + timeout;
+    // Create the read future - we need to box it for Unpin
+    let read_future = Box::pin(read_into_buffer(stream, buffer));
 
-    poll_fn(|cx| {
-        // Check if we've exceeded the timeout
-        if Instant::now() >= deadline {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "keep-alive timeout expired",
-            )));
-        }
-
-        let mut read_buf = ReadBuf::new(buffer);
-        match Pin::new(&mut *stream).poll_read(cx, &mut read_buf) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => {
-                // Schedule a wakeup when the timeout expires
-                // Note: This is a simplified implementation. In production,
-                // this should use proper async timer integration with the runtime.
-                // For now, we rely on the waker being called by the stream.
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        }
-    })
-    .await
+    // Wrap with asupersync timeout
+    match timeout(now, timeout_duration, read_future).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "keep-alive timeout expired",
+        )),
+    }
 }
 
 /// Writes a response to a TCP stream.
@@ -1726,4 +1733,226 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         assert!(Instant::now() >= deadline);
     }
+}
+
+// ============================================================================
+// App Serve Extension
+// ============================================================================
+
+/// Extension trait to add serve capability to [`App`].
+///
+/// This trait provides the `serve()` method that wires an App to the HTTP server,
+/// enabling it to handle incoming HTTP requests.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi::prelude::*;
+/// use fastapi_http::AppServeExt;
+///
+/// let app = App::builder()
+///     .get("/", |_, _| async { Response::ok().body_text("Hello!") })
+///     .build();
+///
+/// // Run the server
+/// app.serve("0.0.0.0:8080").await?;
+/// ```
+pub trait AppServeExt {
+    /// Starts the HTTP server and begins accepting connections.
+    ///
+    /// This method:
+    /// 1. Runs all registered startup hooks
+    /// 2. Binds to the specified address
+    /// 3. Accepts connections and routes requests to handlers
+    /// 4. Runs shutdown hooks when the server stops
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address to bind to (e.g., "0.0.0.0:8080" or "127.0.0.1:3000")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A startup hook fails with `abort: true`
+    /// - Binding to the address fails
+    /// - An unrecoverable IO error occurs
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi::prelude::*;
+    /// use fastapi_http::AppServeExt;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let app = App::builder()
+    ///         .get("/health", |_, _| async { Response::ok() })
+    ///         .build();
+    ///
+    ///     app.serve("0.0.0.0:8080").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    fn serve(
+        self,
+        addr: impl Into<String>,
+    ) -> impl Future<Output = Result<(), ServeError>> + Send;
+
+    /// Starts the HTTP server with custom configuration.
+    ///
+    /// This method allows fine-grained control over server behavior including
+    /// timeouts, connection limits, and keep-alive settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Server configuration options
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi::prelude::*;
+    /// use fastapi_http::{AppServeExt, ServerConfig};
+    ///
+    /// let config = ServerConfig::new("0.0.0.0:8080")
+    ///     .with_request_timeout_secs(60)
+    ///     .with_max_connections(1000)
+    ///     .with_keep_alive_timeout_secs(120);
+    ///
+    /// app.serve_with_config(config).await?;
+    /// ```
+    fn serve_with_config(
+        self,
+        config: ServerConfig,
+    ) -> impl Future<Output = Result<(), ServeError>> + Send;
+}
+
+/// Error returned when starting or running the server fails.
+#[derive(Debug)]
+pub enum ServeError {
+    /// A startup hook failed with abort.
+    Startup(fastapi_core::StartupHookError),
+    /// Server error during operation.
+    Server(ServerError),
+}
+
+impl std::fmt::Display for ServeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Startup(e) => write!(f, "startup hook failed: {}", e.message),
+            Self::Server(e) => write!(f, "server error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ServeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Startup(_) => None,
+            Self::Server(e) => Some(e),
+        }
+    }
+}
+
+impl From<ServerError> for ServeError {
+    fn from(e: ServerError) -> Self {
+        Self::Server(e)
+    }
+}
+
+impl AppServeExt for App {
+    fn serve(
+        self,
+        addr: impl Into<String>,
+    ) -> impl Future<Output = Result<(), ServeError>> + Send {
+        let config = ServerConfig::new(addr);
+        self.serve_with_config(config)
+    }
+
+    fn serve_with_config(
+        self,
+        config: ServerConfig,
+    ) -> impl Future<Output = Result<(), ServeError>> + Send {
+        async move {
+            // Run startup hooks
+            match self.run_startup_hooks().await {
+                fastapi_core::StartupOutcome::Success => {}
+                fastapi_core::StartupOutcome::PartialSuccess { warnings } => {
+                    // Log warnings but continue (non-fatal)
+                    eprintln!("Warning: {warnings} startup hook(s) had non-fatal errors");
+                }
+                fastapi_core::StartupOutcome::Aborted(e) => {
+                    return Err(ServeError::Startup(e));
+                }
+            }
+
+            // Create the TCP server
+            let server = TcpServer::new(config);
+
+            // Wrap app in Arc for sharing with handler
+            let app = Arc::new(self);
+
+            // Create a root Cx for the server
+            let cx = Cx::for_testing();
+
+            // Print startup banner
+            let bind_addr = &server.config().bind_addr;
+            println!("🚀 Server starting on http://{bind_addr}");
+
+            // Run the server with a handler that delegates to App::handle
+            let app_ref = Arc::clone(&app);
+            let result = server
+                .serve(&cx, move |ctx, req| {
+                    let app = Arc::clone(&app_ref);
+                    async move { app.handle(&ctx, req).await }
+                })
+                .await;
+
+            // Run shutdown hooks
+            app.run_shutdown_hooks().await;
+
+            result.map_err(ServeError::from)
+        }
+    }
+}
+
+/// Convenience function to serve an App on the given address.
+///
+/// This is equivalent to calling `app.serve(addr)` but can be more
+/// ergonomic in some contexts.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi::prelude::*;
+/// use fastapi_http::serve;
+///
+/// let app = App::builder()
+///     .get("/", |_, _| async { Response::ok() })
+///     .build();
+///
+/// serve(app, "0.0.0.0:8080").await?;
+/// ```
+pub async fn serve(app: App, addr: impl Into<String>) -> Result<(), ServeError> {
+    app.serve(addr).await
+}
+
+/// Convenience function to serve an App with custom configuration.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi::prelude::*;
+/// use fastapi_http::{serve_with_config, ServerConfig};
+///
+/// let app = App::builder()
+///     .get("/", |_, _| async { Response::ok() })
+///     .build();
+///
+/// let config = ServerConfig::new("0.0.0.0:8080")
+///     .with_max_connections(500);
+///
+/// serve_with_config(app, config).await?;
+/// ```
+pub async fn serve_with_config(app: App, config: ServerConfig) -> Result<(), ServeError> {
+    app.serve_with_config(config).await
 }

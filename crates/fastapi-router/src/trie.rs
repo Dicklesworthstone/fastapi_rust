@@ -269,10 +269,8 @@ impl Handler for PlaceholderHandler {
         _req: &'a mut fastapi_core::Request,
     ) -> fastapi_core::BoxFuture<'a, fastapi_core::Response> {
         Box::pin(async {
-            fastapi_core::Response::builder()
-                .status(fastapi_core::StatusCode::NOT_IMPLEMENTED)
-                .body("Handler not implemented")
-                .build()
+            // 501 Not Implemented
+            fastapi_core::Response::with_status(fastapi_core::StatusCode::from_u16(501))
         })
     }
 }
