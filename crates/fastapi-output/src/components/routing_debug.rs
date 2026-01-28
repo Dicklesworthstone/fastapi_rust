@@ -314,7 +314,10 @@ impl RoutingDebug {
 
         // Header
         lines.push("=== Routing Debug ===".to_string());
-        lines.push(format!("Request: {} {}", info.request_method, info.request_path));
+        lines.push(format!(
+            "Request: {} {}",
+            info.request_method, info.request_path
+        ));
 
         if let Some(duration) = info.routing_time {
             lines.push(format!("Routing time: {}", format_duration(duration)));
@@ -343,12 +346,12 @@ impl RoutingDebug {
                     "[SKIP]"
                 };
                 let methods = candidate.methods.join(", ");
-                lines.push(format!(
-                    "  {status} {} [{methods}]",
-                    candidate.pattern
-                ));
+                lines.push(format!("  {status} {} [{methods}]", candidate.pattern));
                 if !candidate.result.is_match() {
-                    lines.push(format!("        Reason: {}", candidate.result.description()));
+                    lines.push(format!(
+                        "        Reason: {}",
+                        candidate.result.description()
+                    ));
                 }
             }
         }
@@ -506,11 +509,11 @@ impl RoutingDebug {
 
             for candidate in &info.candidates {
                 let (icon, color) = if candidate.result.is_match() {
-                    ("✓", success)
+                    ("✓", &success)
                 } else if candidate.partial_match {
-                    ("◐", warning)
+                    ("◐", &warning)
                 } else {
-                    ("○", muted)
+                    ("○", &muted)
                 };
                 let methods = candidate.methods.join("|");
                 lines.push(format!(
@@ -522,7 +525,9 @@ impl RoutingDebug {
                         String::new()
                     }
                 ));
-                if !candidate.result.is_match() && !matches!(candidate.result, MatchResult::PathMismatch) {
+                if !candidate.result.is_match()
+                    && !matches!(candidate.result, MatchResult::PathMismatch)
+                {
                     lines.push(format!(
                         "{border}│{ANSI_RESET}     {muted}{}{ANSI_RESET}",
                         candidate.result.description()
@@ -662,7 +667,10 @@ mod tests {
     #[test]
     fn test_match_result_description() {
         assert_eq!(MatchResult::Matched.description(), "Matched");
-        assert_eq!(MatchResult::PathMismatch.description(), "Path did not match");
+        assert_eq!(
+            MatchResult::PathMismatch.description(),
+            "Path did not match"
+        );
         assert_eq!(
             MatchResult::ParamTypeMismatch {
                 param_name: "id".to_string(),

@@ -157,7 +157,10 @@ impl SchemaType {
     #[must_use]
     pub fn short_description(&self) -> String {
         match self {
-            Self::String { format, enum_values } => {
+            Self::String {
+                format,
+                enum_values,
+            } => {
                 if !enum_values.is_empty() {
                     format!("enum[{}]", enum_values.len())
                 } else if let Some(fmt) = format {
@@ -553,10 +556,7 @@ impl OpenApiDisplay {
         let table_width = 9 + path_width + summary_width + 4; // method(9) + path + summary + borders
 
         // Top border with title
-        lines.push(format!(
-            "{border}┌{}┐{ANSI_RESET}",
-            "─".repeat(table_width)
-        ));
+        lines.push(format!("{border}┌{}┐{ANSI_RESET}", "─".repeat(table_width)));
 
         // Title row
         let title_text = format!("{} v{}", summary.title, summary.version);
@@ -581,10 +581,7 @@ impl OpenApiDisplay {
             ));
         }
 
-        lines.push(format!(
-            "{border}├{}┤{ANSI_RESET}",
-            "─".repeat(table_width)
-        ));
+        lines.push(format!("{border}├{}┤{ANSI_RESET}", "─".repeat(table_width)));
 
         // Column headers
         lines.push(format!(
@@ -595,10 +592,7 @@ impl OpenApiDisplay {
             pwidth = path_width,
             swidth = summary_width
         ));
-        lines.push(format!(
-            "{border}├{}┤{ANSI_RESET}",
-            "─".repeat(table_width)
-        ));
+        lines.push(format!("{border}├{}┤{ANSI_RESET}", "─".repeat(table_width)));
 
         // Endpoint rows
         let endpoints = if self.config.max_endpoints > 0 {
@@ -649,10 +643,7 @@ impl OpenApiDisplay {
         }
 
         // Bottom border
-        lines.push(format!(
-            "{border}└{}┘{ANSI_RESET}",
-            "─".repeat(table_width)
-        ));
+        lines.push(format!("{border}└{}┘{ANSI_RESET}", "─".repeat(table_width)));
 
         // Summary line
         lines.push(format!(
@@ -673,7 +664,12 @@ impl OpenApiDisplay {
         }
     }
 
-    fn render_schema_plain(&self, schema: &SchemaType, title: Option<&str>, indent: usize) -> String {
+    fn render_schema_plain(
+        &self,
+        schema: &SchemaType,
+        title: Option<&str>,
+        indent: usize,
+    ) -> String {
         let mut lines = Vec::new();
         let prefix = " ".repeat(indent);
 
@@ -682,7 +678,10 @@ impl OpenApiDisplay {
         }
 
         match schema {
-            SchemaType::Object { properties, required } => {
+            SchemaType::Object {
+                properties,
+                required,
+            } => {
                 lines.push(format!("{prefix}{{"));
                 for prop in properties {
                     let required_marker = if prop.required || required.contains(&prop.name) {
@@ -704,10 +703,7 @@ impl OpenApiDisplay {
                 lines.push(format!("{prefix}]"));
             }
             SchemaType::String { enum_values, .. } if !enum_values.is_empty() => {
-                lines.push(format!(
-                    "{prefix}enum: [{}]",
-                    enum_values.join(", ")
-                ));
+                lines.push(format!("{prefix}enum: [{}]", enum_values.join(", ")));
             }
             _ => {
                 lines.push(format!("{prefix}{}", schema.short_description()));
@@ -717,7 +713,12 @@ impl OpenApiDisplay {
         lines.join("\n")
     }
 
-    fn render_schema_minimal(&self, schema: &SchemaType, title: Option<&str>, indent: usize) -> String {
+    fn render_schema_minimal(
+        &self,
+        schema: &SchemaType,
+        title: Option<&str>,
+        indent: usize,
+    ) -> String {
         let muted = self.theme.muted.to_ansi_fg();
         let accent = self.theme.accent.to_ansi_fg();
         let info = self.theme.info.to_ansi_fg();
@@ -730,7 +731,10 @@ impl OpenApiDisplay {
         }
 
         match schema {
-            SchemaType::Object { properties, required } => {
+            SchemaType::Object {
+                properties,
+                required,
+            } => {
                 lines.push(format!("{prefix}{muted}{{{ANSI_RESET}"));
                 for prop in properties {
                     let required_marker = if prop.required || required.contains(&prop.name) {
@@ -785,7 +789,10 @@ impl OpenApiDisplay {
         }
 
         match schema {
-            SchemaType::Object { properties, required } => {
+            SchemaType::Object {
+                properties,
+                required,
+            } => {
                 for prop in properties {
                     let required_marker = if prop.required || required.contains(&prop.name) {
                         format!(" {warning}*{ANSI_RESET}")
@@ -888,19 +895,45 @@ mod tests {
     fn sample_schema() -> SchemaType {
         SchemaType::Object {
             properties: vec![
-                PropertyInfo::new("id", SchemaType::Integer { format: Some("int64".to_string()), minimum: None, maximum: None })
-                    .description("Unique identifier")
-                    .required(true),
-                PropertyInfo::new("name", SchemaType::String { format: None, enum_values: vec![] })
-                    .description("User's full name")
-                    .required(true),
-                PropertyInfo::new("email", SchemaType::String { format: Some("email".to_string()), enum_values: vec![] })
-                    .description("Email address"),
-                PropertyInfo::new("status", SchemaType::String {
-                    format: None,
-                    enum_values: vec!["active".to_string(), "inactive".to_string(), "pending".to_string()]
-                })
-                    .default("pending"),
+                PropertyInfo::new(
+                    "id",
+                    SchemaType::Integer {
+                        format: Some("int64".to_string()),
+                        minimum: None,
+                        maximum: None,
+                    },
+                )
+                .description("Unique identifier")
+                .required(true),
+                PropertyInfo::new(
+                    "name",
+                    SchemaType::String {
+                        format: None,
+                        enum_values: vec![],
+                    },
+                )
+                .description("User's full name")
+                .required(true),
+                PropertyInfo::new(
+                    "email",
+                    SchemaType::String {
+                        format: Some("email".to_string()),
+                        enum_values: vec![],
+                    },
+                )
+                .description("Email address"),
+                PropertyInfo::new(
+                    "status",
+                    SchemaType::String {
+                        format: None,
+                        enum_values: vec![
+                            "active".to_string(),
+                            "inactive".to_string(),
+                            "pending".to_string(),
+                        ],
+                    },
+                )
+                .default("pending"),
             ],
             required: vec!["id".to_string(), "name".to_string()],
         }
@@ -923,11 +956,18 @@ mod tests {
     fn test_schema_type_description() {
         assert_eq!(SchemaType::Boolean.short_description(), "boolean");
         assert_eq!(
-            SchemaType::String { format: Some("email".to_string()), enum_values: vec![] }.short_description(),
+            SchemaType::String {
+                format: Some("email".to_string()),
+                enum_values: vec![]
+            }
+            .short_description(),
             "string<email>"
         );
         assert_eq!(
-            SchemaType::Array { items: Box::new(SchemaType::Boolean) }.short_description(),
+            SchemaType::Array {
+                items: Box::new(SchemaType::Boolean)
+            }
+            .short_description(),
             "array[boolean]"
         );
     }

@@ -7,7 +7,7 @@ members = [
     "crates/fastapi-router",
     "crates/fastapi-macros",
     "crates/fastapi-openapi",
-    # "crates/fastapi-output",  # Temporarily disabled - rich_rust not available
+    "crates/fastapi-output",  # Re-enabled - rich_rust path fixed (bd-3jgt)
 ]
 
 [workspace.package]

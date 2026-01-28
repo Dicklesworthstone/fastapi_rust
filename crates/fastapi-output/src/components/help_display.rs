@@ -375,7 +375,11 @@ impl HelpDisplay {
 
             for arg in &group.args {
                 let name = arg.full_name();
-                let value_part = arg.value.as_ref().map(|v| format!(" {v}")).unwrap_or_default();
+                let value_part = arg
+                    .value
+                    .as_ref()
+                    .map(|v| format!(" {v}"))
+                    .unwrap_or_default();
 
                 let mut line = format!("    {name}{value_part}");
 
@@ -469,11 +473,18 @@ impl HelpDisplay {
         // Argument groups
         for group in &help.groups {
             lines.push(String::new());
-            lines.push(format!("{header}{}:{ANSI_RESET}", group.name.to_uppercase()));
+            lines.push(format!(
+                "{header}{}:{ANSI_RESET}",
+                group.name.to_uppercase()
+            ));
 
             for arg in &group.args {
                 let name = arg.full_name();
-                let value_part = arg.value.as_ref().map(|v| format!(" {accent}{v}{ANSI_RESET}")).unwrap_or_default();
+                let value_part = arg
+                    .value
+                    .as_ref()
+                    .map(|v| format!(" {accent}{v}{ANSI_RESET}"))
+                    .unwrap_or_default();
 
                 let mut line = format!("    {success}{name}{ANSI_RESET}{value_part}");
                 lines.push(line);
@@ -522,12 +533,20 @@ impl HelpDisplay {
         if let Some(version) = &help.version {
             name_line.push_str(&format!(" {muted}v{version}{ANSI_RESET}"));
         }
-        let name_pad = (title_width - help.name.len() - help.version.as_ref().map(|v| v.len() + 2).unwrap_or(0)) / 2;
+        let name_pad = (title_width
+            - help.name.len()
+            - help.version.as_ref().map(|v| v.len() + 2).unwrap_or(0))
+            / 2;
         lines.push(format!(
             "{border}│{ANSI_RESET}{}{}{}",
             " ".repeat(name_pad),
             name_line,
-            " ".repeat(title_width - name_pad - help.name.len() - help.version.as_ref().map(|v| v.len() + 2).unwrap_or(0))
+            " ".repeat(
+                title_width
+                    - name_pad
+                    - help.name.len()
+                    - help.version.as_ref().map(|v| v.len() + 2).unwrap_or(0)
+            )
         ));
 
         if let Some(about) = &help.about {
@@ -551,12 +570,27 @@ impl HelpDisplay {
         // Arguments
         for group in &help.groups {
             lines.push(String::new());
-            lines.push(format!("{header_style}{ANSI_BOLD}{}{ANSI_RESET}", group.name.to_uppercase()));
+            lines.push(format!(
+                "{header_style}{ANSI_BOLD}{}{ANSI_RESET}",
+                group.name.to_uppercase()
+            ));
 
             for arg in &group.args {
-                let short = arg.short.as_ref().map(|s| format!("{success}{s}{ANSI_RESET}, ")).unwrap_or_default();
-                let long = arg.long.as_ref().map(|l| format!("{success}{l}{ANSI_RESET}")).unwrap_or_default();
-                let value = arg.value.as_ref().map(|v| format!(" {accent}{v}{ANSI_RESET}")).unwrap_or_default();
+                let short = arg
+                    .short
+                    .as_ref()
+                    .map(|s| format!("{success}{s}{ANSI_RESET}, "))
+                    .unwrap_or_default();
+                let long = arg
+                    .long
+                    .as_ref()
+                    .map(|l| format!("{success}{l}{ANSI_RESET}"))
+                    .unwrap_or_default();
+                let value = arg
+                    .value
+                    .as_ref()
+                    .map(|v| format!(" {accent}{v}{ANSI_RESET}"))
+                    .unwrap_or_default();
 
                 lines.push(format!("  {short}{long}{value}"));
                 lines.push(format!("      {muted}{}{ANSI_RESET}", arg.description));
@@ -573,7 +607,10 @@ impl HelpDisplay {
                     }
                 }
                 if !meta_parts.is_empty() {
-                    lines.push(format!("      {muted}[{}]{ANSI_RESET}", meta_parts.join(", ")));
+                    lines.push(format!(
+                        "      {muted}[{}]{ANSI_RESET}",
+                        meta_parts.join(", ")
+                    ));
                 }
             }
         }
@@ -589,10 +626,7 @@ impl HelpDisplay {
                 } else {
                     format!(" {muted}({}){ANSI_RESET}", cmd.aliases.join(", "))
                 };
-                lines.push(format!(
-                    "  {success}{}{ANSI_RESET}{aliases}",
-                    cmd.name
-                ));
+                lines.push(format!("  {success}{}{ANSI_RESET}{aliases}", cmd.name));
                 lines.push(format!("      {muted}{}{ANSI_RESET}", cmd.description));
             }
         }
@@ -646,18 +680,21 @@ mod tests {
             .usage("myapp [OPTIONS] <COMMAND>")
             .group(
                 ArgGroup::new("Options")
-                    .arg(ArgInfo::new("--host", "Host to bind to")
-                        .short("-h")
-                        .value("<HOST>")
-                        .default("127.0.0.1")
-                        .env("MYAPP_HOST"))
-                    .arg(ArgInfo::new("--port", "Port to listen on")
-                        .short("-p")
-                        .value("<PORT>")
-                        .default("8000")
-                        .env("MYAPP_PORT"))
-                    .arg(ArgInfo::new("--verbose", "Enable verbose output")
-                        .short("-v"))
+                    .arg(
+                        ArgInfo::new("--host", "Host to bind to")
+                            .short("-h")
+                            .value("<HOST>")
+                            .default("127.0.0.1")
+                            .env("MYAPP_HOST"),
+                    )
+                    .arg(
+                        ArgInfo::new("--port", "Port to listen on")
+                            .short("-p")
+                            .value("<PORT>")
+                            .default("8000")
+                            .env("MYAPP_PORT"),
+                    )
+                    .arg(ArgInfo::new("--verbose", "Enable verbose output").short("-v")),
             )
             .command(CommandInfo::new("serve", "Start the server").alias("s"))
             .command(CommandInfo::new("init", "Initialize configuration"))
@@ -680,8 +717,7 @@ mod tests {
 
     #[test]
     fn test_arg_full_name() {
-        let arg = ArgInfo::new("--verbose", "Enable verbose")
-            .short("-v");
+        let arg = ArgInfo::new("--verbose", "Enable verbose").short("-v");
         assert_eq!(arg.full_name(), "-v, --verbose");
 
         let positional = ArgInfo::positional("<INPUT>", "Input file");

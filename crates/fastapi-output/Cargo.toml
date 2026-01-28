@@ -16,7 +16,8 @@ regex = "1"
 unicode-width = "0.2"
 
 # Rich output library (optional)
-rich_rust = { path = "/dp/rich_rust", optional = true }
+# Uses git until published to crates.io
+rich_rust = { git = "https://github.com/Dicklesworthstone/rich_rust.git", optional = true }
 
 [features]
 default = ["rich"]

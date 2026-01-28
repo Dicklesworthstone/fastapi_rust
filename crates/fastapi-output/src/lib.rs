@@ -171,7 +171,9 @@ pub use components::errors::{
     ValidationErrorDetail,
 };
 pub use components::help_display::{ArgGroup, ArgInfo, CommandInfo, HelpDisplay, HelpInfo};
-pub use components::http_inspector::{RequestInfo, RequestInspector, ResponseInfo, ResponseInspector};
+pub use components::http_inspector::{
+    RequestInfo, RequestInspector, ResponseInfo, ResponseInspector,
+};
 pub use components::logging::{HttpMethod, LogEntry, RequestLogger, ResponseTiming};
 pub use components::middleware_stack::{MiddlewareInfo, MiddlewareStackDisplay};
 pub use components::openapi_display::{

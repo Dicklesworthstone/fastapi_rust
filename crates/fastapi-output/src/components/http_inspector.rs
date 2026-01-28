@@ -328,7 +328,10 @@ impl RequestInspector {
             Some(q) => format!("{}?{}", info.path, q),
             None => info.path.clone(),
         };
-        lines.push(format!("{} {} {}", info.method, full_path, info.http_version));
+        lines.push(format!(
+            "{} {} {}",
+            info.method, full_path, info.http_version
+        ));
 
         // Metadata
         if let Some(ip) = &info.client_ip {
@@ -388,7 +391,9 @@ impl RequestInspector {
 
         // Metadata
         if let Some(id) = &info.request_id {
-            lines.push(format!("{muted}Request-ID:{ANSI_RESET} {accent}{id}{ANSI_RESET}"));
+            lines.push(format!(
+                "{muted}Request-ID:{ANSI_RESET} {accent}{id}{ANSI_RESET}"
+            ));
         }
         if self.show_timing {
             if let Some(duration) = info.parse_duration {
@@ -401,7 +406,10 @@ impl RequestInspector {
 
         // Headers (condensed)
         if !info.headers.is_empty() {
-            lines.push(format!("{muted}Headers ({}):{ANSI_RESET}", info.headers.len()));
+            lines.push(format!(
+                "{muted}Headers ({}):{ANSI_RESET}",
+                info.headers.len()
+            ));
             for (name, value) in &info.headers {
                 lines.push(format!("  {accent}{name}:{ANSI_RESET} {value}"));
             }
@@ -521,7 +529,9 @@ impl RequestInspector {
                 } else {
                     line.to_string()
                 };
-                lines.push(format!("{border}│{ANSI_RESET}   {ANSI_DIM}{truncated}{ANSI_RESET}"));
+                lines.push(format!(
+                    "{border}│{ANSI_RESET}   {ANSI_DIM}{truncated}{ANSI_RESET}"
+                ));
             }
         }
 
@@ -765,7 +775,9 @@ impl ResponseInspector {
                 } else {
                     line.to_string()
                 };
-                lines.push(format!("{border}│{ANSI_RESET}   {ANSI_DIM}{truncated}{ANSI_RESET}"));
+                lines.push(format!(
+                    "{border}│{ANSI_RESET}   {ANSI_DIM}{truncated}{ANSI_RESET}"
+                ));
             }
         }
 
