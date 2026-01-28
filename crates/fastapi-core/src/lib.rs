@@ -65,26 +65,29 @@ pub mod routing;
 pub mod shutdown;
 pub mod testing;
 
-pub use context::{CancelledError, IntoOutcome, RequestContext};
+pub use context::{
+    BodyLimitConfig, CancelledError, DEFAULT_MAX_BODY_SIZE, IntoOutcome, RequestContext,
+};
 pub use dependency::{
     CleanupFn, CleanupStack, DefaultConfig, DefaultDependencyConfig, DependencyCache,
     DependencyOverrides, DependencyScope, Depends, DependsCleanup, DependsConfig, FromDependency,
     FromDependencyWithCleanup, NoCache,
 };
 pub use error::{
-    DebugConfig, DebugInfo, HttpError, LocItem, ValidationError, ValidationErrors,
-    disable_debug_mode, enable_debug_mode, is_debug_mode_enabled,
+    DebugConfig, DebugInfo, HttpError, LocItem, ResponseValidationError, ValidationError,
+    ValidationErrors, disable_debug_mode, enable_debug_mode, is_debug_mode_enabled,
 };
 pub use extract::{
     Accept, AppState, Authorization, BackgroundTasks, BackgroundTasksInner, BasicAuth,
-    BasicAuthError, BearerToken, BearerTokenError, ContentType, Cookie, CookiePrefix,
-    CookiePrefixError, DEFAULT_JSON_LIMIT, DEFAULT_PAGE, DEFAULT_PER_PAGE, FromHeaderValue,
-    FromRequest, Header, HeaderExtractError, HeaderName, HeaderValues, Host, Json, JsonConfig,
-    JsonExtractError, MAX_PER_PAGE, NamedHeader, OAuth2BearerError, OAuth2BearerErrorKind,
-    OAuth2PasswordBearer, OAuth2PasswordBearerConfig, Page, Pagination, PaginationConfig, Path,
-    PathExtractError, PathParams, Query, QueryExtractError, QueryParams, RequestRef, ResponseMut,
-    ResponseMutations, SameSite, SecureCompare, State, StateExtractError, UserAgent, XRequestId,
-    constant_time_eq, constant_time_str_eq, snake_to_header_case,
+    BasicAuthError, BearerToken, BearerTokenError, ContentType, Cookie, CookieExtractError,
+    CookieName, CookiePrefix, CookiePrefixError, CsrfTokenCookie, DEFAULT_JSON_LIMIT, DEFAULT_PAGE,
+    DEFAULT_PER_PAGE, FromHeaderValue, FromRequest, Header, HeaderExtractError, HeaderName,
+    HeaderValues, Host, Json, JsonConfig, JsonExtractError, MAX_PER_PAGE, NamedHeader,
+    OAuth2BearerError, OAuth2BearerErrorKind, OAuth2PasswordBearer, OAuth2PasswordBearerConfig,
+    Page, Pagination, PaginationConfig, Path, PathExtractError, PathParams, Query,
+    QueryExtractError, QueryParams, RequestCookie, RequestCookies, RequestRef, ResponseMut,
+    ResponseMutations, SameSite, SecureCompare, SessionIdCookie, State, StateExtractError,
+    UserAgent, XRequestId, constant_time_eq, constant_time_str_eq, snake_to_header_case,
 };
 pub use middleware::{
     AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, Handler, Layer, Layered,
@@ -94,8 +97,9 @@ pub use middleware::{
 };
 pub use request::{Body, Headers, HttpVersion, Method, Request};
 pub use response::{
-    BodyStream, FileResponse, Html, IntoResponse, NoContent, Redirect, Response, ResponseBody,
-    StatusCode, Text, mime_type_for_extension,
+    Binary, BinaryWithType, BodyStream, FileResponse, Html, IntoResponse, NoContent, Redirect,
+    Response, ResponseBody, ResponseModel, ResponseModelConfig, StatusCode, Text,
+    ValidatedResponse, exclude_fields, include_fields, mime_type_for_extension,
 };
 
 // Re-export key asupersync types for convenience

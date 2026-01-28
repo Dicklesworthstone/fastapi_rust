@@ -152,6 +152,10 @@ impl DebugConfig {
     /// - Debug mode is disabled (debug info won't be shown anyway)
     /// - `allow_unauthenticated` is true
     /// - The request includes the correct debug header/token
+    ///
+    /// # Security
+    ///
+    /// Token comparison uses constant-time comparison to prevent timing attacks.
     pub fn is_authorized(&self, request_headers: &[(String, Vec<u8>)]) -> bool {
         if !self.enabled {
             return false;
@@ -166,7 +170,8 @@ impl DebugConfig {
             for (name, value) in request_headers {
                 if name.eq_ignore_ascii_case(header_name) {
                     if let Ok(token) = std::str::from_utf8(value) {
-                        return token == expected_token;
+                        // Use constant-time comparison to prevent timing attacks
+                        return constant_time_str_eq(token, expected_token);
                     }
                 }
             }
@@ -174,6 +179,26 @@ impl DebugConfig {
 
         false
     }
+}
+
+/// Constant-time string comparison to prevent timing attacks.
+///
+/// This function compares two strings in constant time (for same-length inputs)
+/// to prevent timing-based side-channel attacks.
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+
+    let diff = a_bytes
+        .iter()
+        .zip(b_bytes.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+
+    diff == 0
 }
 
 // ============================================================================
@@ -462,6 +487,28 @@ pub mod loc {
             LocItem::index(idx),
         ]
     }
+
+    /// Response root location: `["response"]`
+    #[must_use]
+    pub fn response() -> Vec<LocItem> {
+        vec![LocItem::field("response")]
+    }
+
+    /// Response field location: `["response", "field"]`
+    #[must_use]
+    pub fn response_field(field: &str) -> Vec<LocItem> {
+        vec![LocItem::field("response"), LocItem::field(field)]
+    }
+
+    /// Response nested path: `["response", "field", "nested", ...]`
+    #[must_use]
+    pub fn response_path(fields: &[&str]) -> Vec<LocItem> {
+        let mut loc = vec![LocItem::field("response")];
+        for field in fields {
+            loc.push(LocItem::field(*field));
+        }
+        loc
+    }
 }
 
 // ============================================================================
@@ -508,6 +555,12 @@ pub mod error_types {
     pub const ENUM: &str = "enum";
     /// Extra field not allowed.
     pub const EXTRA_FORBIDDEN: &str = "extra_forbidden";
+
+    // Response validation error types
+    /// Response failed to serialize (e.g., JSON serialization error).
+    pub const SERIALIZATION_ERROR: &str = "serialization_error";
+    /// Response doesn't match the declared response model.
+    pub const MODEL_VALIDATION_ERROR: &str = "model_validation_error";
 }
 
 // ============================================================================
@@ -1126,6 +1179,279 @@ impl IntoResponse for ValidationErrors {
         };
 
         Response::with_status(StatusCode::UNPROCESSABLE_ENTITY)
+            .header("content-type", b"application/json".to_vec())
+            .body(ResponseBody::Bytes(body))
+    }
+}
+
+// ============================================================================
+// Response Validation Error (500 Internal Server Error)
+// ============================================================================
+
+/// Response validation error for internal failures (500 Internal Server Error).
+///
+/// This error type is used when a response fails to serialize or validate
+/// against the expected response model. Unlike [`ValidationErrors`] which
+/// indicates client errors (422), this represents a bug in the server code
+/// and returns a 500 status.
+///
+/// # When This Is Used
+///
+/// - Response fails to serialize to JSON
+/// - Response doesn't match the declared response_model
+/// - Internal data transformation fails
+///
+/// # Security Note
+///
+/// Error details and the original response content are logged server-side but
+/// are NOT exposed to clients (unless debug mode is explicitly enabled).
+/// This prevents leaking internal implementation details.
+///
+/// # Examples
+///
+/// ```
+/// use fastapi_core::error::{ResponseValidationError, ValidationError, loc};
+///
+/// // Serialization failure
+/// let error = ResponseValidationError::serialization_failed(
+///     "failed to serialize field 'created_at': invalid date format"
+/// );
+///
+/// // Response model validation failure
+/// let error = ResponseValidationError::new()
+///     .with_error(ValidationError::missing(loc::response_field("user_id")))
+///     .with_response_content(serde_json::json!({"name": "Alice"}));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ResponseValidationError {
+    /// The validation errors that occurred.
+    pub errors: Vec<ValidationError>,
+    /// The response content that failed validation (for logging only).
+    /// This is NOT included in the response to clients.
+    pub response_content: Option<serde_json::Value>,
+    /// A summary message for logging.
+    pub summary: Option<String>,
+    /// Debug information (only included in response when debug mode is enabled).
+    pub debug_info: Option<DebugInfo>,
+}
+
+impl ResponseValidationError {
+    /// Create a new empty response validation error.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a serialization failure error.
+    ///
+    /// Use this when response serialization to JSON fails.
+    #[must_use]
+    pub fn serialization_failed(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        Self {
+            errors: vec![
+                ValidationError::new(
+                    error_types::SERIALIZATION_ERROR,
+                    vec![LocItem::field("response")],
+                )
+                .with_msg(&msg),
+            ],
+            response_content: None,
+            summary: Some(msg),
+            debug_info: None,
+        }
+    }
+
+    /// Create a response model validation failure error.
+    ///
+    /// Use this when the response doesn't match the declared response_model.
+    #[must_use]
+    pub fn model_validation_failed(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        Self {
+            errors: vec![
+                ValidationError::new(
+                    error_types::MODEL_VALIDATION_ERROR,
+                    vec![LocItem::field("response")],
+                )
+                .with_msg(&msg),
+            ],
+            response_content: None,
+            summary: Some(msg),
+            debug_info: None,
+        }
+    }
+
+    /// Add a validation error.
+    #[must_use]
+    pub fn with_error(mut self, error: ValidationError) -> Self {
+        self.errors.push(error);
+        self
+    }
+
+    /// Add multiple validation errors.
+    #[must_use]
+    pub fn with_errors(mut self, errors: impl IntoIterator<Item = ValidationError>) -> Self {
+        self.errors.extend(errors);
+        self
+    }
+
+    /// Set the response content that failed validation.
+    ///
+    /// This is logged server-side but NOT exposed to clients.
+    #[must_use]
+    pub fn with_response_content(mut self, content: serde_json::Value) -> Self {
+        self.response_content = Some(content);
+        self
+    }
+
+    /// Set a summary message for logging.
+    #[must_use]
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
+
+    /// Add debug information.
+    ///
+    /// This information will only be included in the response when debug mode
+    /// is enabled (via `enable_debug_mode()`).
+    #[must_use]
+    pub fn with_debug_info(mut self, debug_info: DebugInfo) -> Self {
+        self.debug_info = Some(debug_info);
+        self
+    }
+
+    /// Check if there are no errors.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// Get the number of errors.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.errors.len()
+    }
+
+    /// Get an iterator over the errors.
+    pub fn iter(&self) -> impl Iterator<Item = &ValidationError> {
+        self.errors.iter()
+    }
+
+    /// Log the error details (for server-side logging).
+    ///
+    /// This returns a formatted string suitable for logging that includes
+    /// the error details and response content (if any).
+    #[must_use]
+    pub fn to_log_string(&self) -> String {
+        let mut parts = Vec::new();
+
+        if let Some(ref summary) = self.summary {
+            parts.push(format!("Summary: {}", summary));
+        }
+
+        parts.push(format!("Errors ({}): ", self.errors.len()));
+        for (i, error) in self.errors.iter().enumerate() {
+            let loc_str: Vec<String> = error
+                .loc
+                .iter()
+                .map(|item| match item {
+                    LocItem::Field(s) => s.clone(),
+                    LocItem::Index(i) => i.to_string(),
+                })
+                .collect();
+            parts.push(format!(
+                "  [{}] {} at [{}]: {}",
+                i + 1,
+                error.error_type,
+                loc_str.join("."),
+                error.msg
+            ));
+        }
+
+        if let Some(ref content) = self.response_content {
+            // Truncate large content for logging (UTF-8 safe)
+            let content_str = serde_json::to_string(content).unwrap_or_default();
+            let truncated = if content_str.len() > 500 {
+                // Find a safe UTF-8 boundary near 500 chars
+                let mut end = 500;
+                while end > 0 && !content_str.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...(truncated)", &content_str[..end])
+            } else {
+                content_str
+            };
+            parts.push(format!("Response content: {}", truncated));
+        }
+
+        parts.join("\n")
+    }
+}
+
+impl std::fmt::Display for ResponseValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Response validation failed")?;
+        if let Some(ref summary) = self.summary {
+            write!(f, ": {}", summary)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ResponseValidationError {}
+
+impl IntoResponse for ResponseValidationError {
+    fn into_response(self) -> Response {
+        // Always log the full error details server-side
+        // In a real application, this would use the logging system
+        // For now, we include it in debug_info if debug mode is enabled
+
+        // Build the response body
+        let body = if is_debug_mode_enabled() {
+            // In debug mode, include error details
+            #[derive(Serialize)]
+            struct DebugBody<'a> {
+                error: &'static str,
+                detail: &'static str,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                debug: Option<DebugResponseInfo<'a>>,
+            }
+
+            #[derive(Serialize)]
+            struct DebugResponseInfo<'a> {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                summary: Option<&'a str>,
+                errors: &'a [ValidationError],
+                #[serde(skip_serializing_if = "Option::is_none")]
+                response_content: &'a Option<serde_json::Value>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                source: Option<&'a DebugInfo>,
+            }
+
+            let debug_info = DebugResponseInfo {
+                summary: self.summary.as_deref(),
+                errors: &self.errors,
+                response_content: &self.response_content,
+                source: self.debug_info.as_ref(),
+            };
+
+            serde_json::to_vec(&DebugBody {
+                error: "internal_server_error",
+                detail: "Response validation failed",
+                debug: Some(debug_info),
+            })
+            .unwrap_or_else(|_| {
+                b"{\"error\":\"internal_server_error\",\"detail\":\"Internal Server Error\"}"
+                    .to_vec()
+            })
+        } else {
+            // In production, return a generic error message
+            b"{\"error\":\"internal_server_error\",\"detail\":\"Internal Server Error\"}".to_vec()
+        };
+
+        Response::with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .header("content-type", b"application/json".to_vec())
             .body(ResponseBody::Bytes(body))
     }
@@ -2485,5 +2811,212 @@ mod tests {
             errors1.debug_info.as_ref().unwrap().source_file,
             Some("src/b.rs".to_owned())
         );
+    }
+
+    // ========================================================================
+    // ResponseValidationError Tests
+    // ========================================================================
+
+    #[test]
+    fn response_validation_error_new_is_empty() {
+        let error = ResponseValidationError::new();
+        assert!(error.is_empty());
+        assert_eq!(error.len(), 0);
+        assert!(error.response_content.is_none());
+        assert!(error.summary.is_none());
+    }
+
+    #[test]
+    fn response_validation_error_serialization_failed() {
+        let error = ResponseValidationError::serialization_failed("failed to serialize DateTime");
+        assert_eq!(error.len(), 1);
+        assert!(error.summary.is_some());
+        assert_eq!(
+            error.summary.as_deref(),
+            Some("failed to serialize DateTime")
+        );
+        assert_eq!(error.errors[0].error_type, error_types::SERIALIZATION_ERROR);
+    }
+
+    #[test]
+    fn response_validation_error_model_validation_failed() {
+        let error = ResponseValidationError::model_validation_failed("missing required field 'id'");
+        assert_eq!(error.len(), 1);
+        assert!(error.summary.is_some());
+        assert_eq!(
+            error.errors[0].error_type,
+            error_types::MODEL_VALIDATION_ERROR
+        );
+    }
+
+    #[test]
+    fn response_validation_error_with_error() {
+        let error = ResponseValidationError::new()
+            .with_error(ValidationError::missing(loc::response_field("user_id")));
+        assert_eq!(error.len(), 1);
+        assert_eq!(error.errors[0].loc.len(), 2);
+    }
+
+    #[test]
+    fn response_validation_error_with_errors() {
+        let error = ResponseValidationError::new().with_errors(vec![
+            ValidationError::missing(loc::response_field("id")),
+            ValidationError::missing(loc::response_field("name")),
+        ]);
+        assert_eq!(error.len(), 2);
+    }
+
+    #[test]
+    fn response_validation_error_with_response_content() {
+        let content = json!({"name": "Alice", "age": 30});
+        let error = ResponseValidationError::serialization_failed("test")
+            .with_response_content(content.clone());
+        assert!(error.response_content.is_some());
+        assert_eq!(error.response_content.as_ref().unwrap()["name"], "Alice");
+    }
+
+    #[test]
+    fn response_validation_error_with_summary() {
+        let error = ResponseValidationError::new().with_summary("Custom summary");
+        assert_eq!(error.summary.as_deref(), Some("Custom summary"));
+    }
+
+    #[test]
+    fn response_validation_error_with_debug_info() {
+        let error = ResponseValidationError::serialization_failed("test")
+            .with_debug_info(DebugInfo::new().with_source_location("handler.rs", 42, "get_user"));
+        assert!(error.debug_info.is_some());
+    }
+
+    #[test]
+    fn response_validation_error_display() {
+        let error = ResponseValidationError::new();
+        assert_eq!(format!("{}", error), "Response validation failed");
+
+        let error = ResponseValidationError::new().with_summary("missing field");
+        assert_eq!(
+            format!("{}", error),
+            "Response validation failed: missing field"
+        );
+    }
+
+    #[test]
+    fn response_validation_error_into_response_production_mode() {
+        // Ensure debug mode is off
+        disable_debug_mode();
+
+        let error = ResponseValidationError::serialization_failed("some internal error")
+            .with_response_content(json!({"secret": "data"}));
+
+        let response = error.into_response();
+        assert_eq!(response.status().as_u16(), 500);
+
+        // Check content-type header
+        let content_type = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name == "content-type")
+            .map(|(_, value)| String::from_utf8_lossy(value).to_string());
+        assert_eq!(content_type, Some("application/json".to_string()));
+
+        // Check body - should NOT include internal details
+        if let crate::response::ResponseBody::Bytes(bytes) = response.body_ref() {
+            let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(body["error"], "internal_server_error");
+            assert_eq!(body["detail"], "Internal Server Error");
+            // Should NOT include debug info or response content
+            assert!(body.get("debug").is_none());
+        } else {
+            panic!("Expected Bytes body");
+        }
+    }
+
+    #[test]
+    fn response_validation_error_into_response_debug_mode() {
+        // Enable debug mode
+        enable_debug_mode();
+
+        let error = ResponseValidationError::serialization_failed("DateTime serialize failed")
+            .with_response_content(json!({"created_at": "invalid-date"}))
+            .with_debug_info(DebugInfo::new().with_source_location("handler.rs", 100, "get_user"));
+
+        let response = error.into_response();
+        assert_eq!(response.status().as_u16(), 500);
+
+        // Check body - should include debug info
+        if let crate::response::ResponseBody::Bytes(bytes) = response.body_ref() {
+            let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(body["error"], "internal_server_error");
+            // Should include debug info
+            assert!(body.get("debug").is_some());
+            let debug = &body["debug"];
+            assert_eq!(debug["summary"], "DateTime serialize failed");
+            assert!(debug.get("errors").is_some());
+            assert!(debug.get("response_content").is_some());
+        } else {
+            panic!("Expected Bytes body");
+        }
+
+        // Restore default state
+        disable_debug_mode();
+    }
+
+    #[test]
+    fn response_validation_error_to_log_string() {
+        let error = ResponseValidationError::serialization_failed("test error")
+            .with_error(ValidationError::missing(loc::response_field("id")))
+            .with_response_content(json!({"name": "Alice"}));
+
+        let log = error.to_log_string();
+        assert!(log.contains("Summary: test error"));
+        assert!(log.contains("serialization_error"));
+        assert!(log.contains("Response content:"));
+        assert!(log.contains("Alice"));
+    }
+
+    #[test]
+    fn response_validation_error_to_log_string_truncates_large_content() {
+        // Create a large response content
+        let large_string = "x".repeat(1000);
+        let error = ResponseValidationError::serialization_failed("test")
+            .with_response_content(json!({"data": large_string}));
+
+        let log = error.to_log_string();
+        assert!(log.contains("(truncated)"));
+    }
+
+    #[test]
+    fn response_validation_error_iter() {
+        let error = ResponseValidationError::new()
+            .with_error(ValidationError::missing(loc::response_field("a")))
+            .with_error(ValidationError::missing(loc::response_field("b")));
+
+        let locs: Vec<_> = error.iter().map(|e| e.loc.clone()).collect();
+        assert_eq!(locs.len(), 2);
+    }
+
+    #[test]
+    fn loc_response_helper() {
+        let loc = loc::response();
+        assert_eq!(loc.len(), 1);
+        assert!(matches!(&loc[0], LocItem::Field(s) if s == "response"));
+    }
+
+    #[test]
+    fn loc_response_field_helper() {
+        let loc = loc::response_field("user_id");
+        assert_eq!(loc.len(), 2);
+        assert!(matches!(&loc[0], LocItem::Field(s) if s == "response"));
+        assert!(matches!(&loc[1], LocItem::Field(s) if s == "user_id"));
+    }
+
+    #[test]
+    fn loc_response_path_helper() {
+        let loc = loc::response_path(&["user", "profile", "name"]);
+        assert_eq!(loc.len(), 4);
+        assert!(matches!(&loc[0], LocItem::Field(s) if s == "response"));
+        assert!(matches!(&loc[1], LocItem::Field(s) if s == "user"));
+        assert!(matches!(&loc[2], LocItem::Field(s) if s == "profile"));
+        assert!(matches!(&loc[3], LocItem::Field(s) if s == "name"));
     }
 }

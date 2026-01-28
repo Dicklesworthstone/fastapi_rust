@@ -176,6 +176,9 @@ impl<'a> RequestLine<'a> {
 
         // Parse URI (path + optional query)
         let uri_bytes = parts.next().ok_or(ParseError::InvalidRequestLine)?;
+        if uri_bytes.is_empty() {
+            return Err(ParseError::InvalidRequestLine);
+        }
         let uri = std::str::from_utf8(uri_bytes).map_err(|_| ParseError::InvalidRequestLine)?;
 
         // Parse version

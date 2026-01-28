@@ -5414,6 +5414,7 @@ mod special_extractor_tests {
 
     #[test]
     fn request_cookie_extractor_found() {
+        #[derive(Debug)]
         struct TestCookie;
         impl CookieName for TestCookie {
             const NAME: &'static str = "test_cookie";
@@ -5432,6 +5433,7 @@ mod special_extractor_tests {
 
     #[test]
     fn request_cookie_extractor_not_found() {
+        #[derive(Debug)]
         struct MissingCookie;
         impl CookieName for MissingCookie {
             const NAME: &'static str = "missing";
@@ -5454,6 +5456,7 @@ mod special_extractor_tests {
 
     #[test]
     fn request_cookie_deref() {
+        #[derive(Debug)]
         struct TestCookie;
         impl CookieName for TestCookie {
             const NAME: &'static str = "test";

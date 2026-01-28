@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/fastapi",
+    # "crates/fastapi",  # Temporarily disabled - depends on fastapi-output
     "crates/fastapi-core",
     "crates/fastapi-http",
     "crates/fastapi-router",
     "crates/fastapi-macros",
     "crates/fastapi-openapi",
-    "crates/fastapi-output",
+    # "crates/fastapi-output",  # Temporarily disabled - rich_rust not available
 ]
 
 [workspace.package]

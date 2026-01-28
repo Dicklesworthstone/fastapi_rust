@@ -9,6 +9,42 @@ use std::sync::Arc;
 
 use crate::dependency::{CleanupStack, DependencyCache, DependencyOverrides, ResolutionStack};
 
+/// Default maximum body size: 1MB.
+pub const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024;
+
+/// Configuration for request body limits.
+///
+/// This struct holds the body size limit configuration that applies to a request.
+/// It can be configured at the application level (via `AppConfig`) and optionally
+/// overridden on a per-route basis.
+#[derive(Debug, Clone, Copy)]
+pub struct BodyLimitConfig {
+    /// Maximum body size in bytes.
+    max_size: usize,
+}
+
+impl Default for BodyLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_size: DEFAULT_MAX_BODY_SIZE,
+        }
+    }
+}
+
+impl BodyLimitConfig {
+    /// Creates a new body limit config with the specified maximum size.
+    #[must_use]
+    pub fn new(max_size: usize) -> Self {
+        Self { max_size }
+    }
+
+    /// Returns the maximum body size in bytes.
+    #[must_use]
+    pub fn max_size(&self) -> usize {
+        self.max_size
+    }
+}
+
 /// Request context that wraps asupersync's capability context.
 ///
 /// `RequestContext` provides access to:
@@ -16,6 +52,7 @@ use crate::dependency::{CleanupStack, DependencyCache, DependencyOverrides, Reso
 /// - Cancellation checkpoints for cancel-safe handlers
 /// - Budget/deadline awareness for timeout enforcement
 /// - Region-scoped spawning for background work
+/// - Body size limit configuration for DoS prevention
 ///
 /// # Example
 ///
@@ -26,6 +63,9 @@ use crate::dependency::{CleanupStack, DependencyCache, DependencyOverrides, Reso
 ///
 ///     // Get remaining time budget
 ///     let remaining = ctx.remaining_budget();
+///
+///     // Check body size limit
+///     let max_body = ctx.body_limit().max_size();
 ///
 ///     // Do work...
 ///     "Hello, World!"
@@ -45,13 +85,16 @@ pub struct RequestContext {
     resolution_stack: Arc<ResolutionStack>,
     /// Cleanup functions to run after handler completion (LIFO order).
     cleanup_stack: Arc<CleanupStack>,
+    /// Body size limit configuration for this request.
+    body_limit: BodyLimitConfig,
 }
 
 impl RequestContext {
     /// Creates a new request context from an asupersync Cx.
     ///
     /// This is typically called by the server when accepting a new request,
-    /// creating a new region for the request lifecycle.
+    /// creating a new region for the request lifecycle. Uses the default
+    /// body size limit (1MB).
     #[must_use]
     pub fn new(cx: Cx, request_id: u64) -> Self {
         Self {
@@ -61,6 +104,24 @@ impl RequestContext {
             dependency_overrides: Arc::new(DependencyOverrides::new()),
             resolution_stack: Arc::new(ResolutionStack::new()),
             cleanup_stack: Arc::new(CleanupStack::new()),
+            body_limit: BodyLimitConfig::default(),
+        }
+    }
+
+    /// Creates a new request context with a custom body size limit.
+    ///
+    /// Use this when the application has configured a specific `max_body_size`
+    /// in `AppConfig`, or when a route has an override.
+    #[must_use]
+    pub fn with_body_limit(cx: Cx, request_id: u64, max_body_size: usize) -> Self {
+        Self {
+            cx,
+            request_id,
+            dependency_cache: Arc::new(DependencyCache::new()),
+            dependency_overrides: Arc::new(DependencyOverrides::new()),
+            resolution_stack: Arc::new(ResolutionStack::new()),
+            cleanup_stack: Arc::new(CleanupStack::new()),
+            body_limit: BodyLimitConfig::new(max_body_size),
         }
     }
 
@@ -74,6 +135,26 @@ impl RequestContext {
             dependency_overrides: overrides,
             resolution_stack: Arc::new(ResolutionStack::new()),
             cleanup_stack: Arc::new(CleanupStack::new()),
+            body_limit: BodyLimitConfig::default(),
+        }
+    }
+
+    /// Creates a new request context with overrides and a custom body size limit.
+    #[must_use]
+    pub fn with_overrides_and_body_limit(
+        cx: Cx,
+        request_id: u64,
+        overrides: Arc<DependencyOverrides>,
+        max_body_size: usize,
+    ) -> Self {
+        Self {
+            cx,
+            request_id,
+            dependency_cache: Arc::new(DependencyCache::new()),
+            dependency_overrides: overrides,
+            resolution_stack: Arc::new(ResolutionStack::new()),
+            cleanup_stack: Arc::new(CleanupStack::new()),
+            body_limit: BodyLimitConfig::new(max_body_size),
         }
     }
 
@@ -109,6 +190,23 @@ impl RequestContext {
     #[must_use]
     pub fn cleanup_stack(&self) -> &CleanupStack {
         &self.cleanup_stack
+    }
+
+    /// Returns the body limit configuration for this request.
+    ///
+    /// This can be used by body extractors (e.g., `Json<T>`) to enforce
+    /// size limits and prevent DoS attacks.
+    #[must_use]
+    pub fn body_limit(&self) -> &BodyLimitConfig {
+        &self.body_limit
+    }
+
+    /// Returns the maximum body size in bytes for this request.
+    ///
+    /// This is a convenience method equivalent to `ctx.body_limit().max_size()`.
+    #[must_use]
+    pub fn max_body_size(&self) -> usize {
+        self.body_limit.max_size()
     }
 
     /// Returns the underlying region ID from asupersync.
@@ -284,5 +382,53 @@ mod tests {
         let result = ctx.masked(|| ctx.checkpoint());
         assert!(result.is_ok());
         assert!(ctx.checkpoint().is_err());
+    }
+
+    // ========================================================================
+    // Body Limit Tests
+    // ========================================================================
+
+    #[test]
+    fn body_limit_config_default() {
+        let config = BodyLimitConfig::default();
+        assert_eq!(config.max_size(), DEFAULT_MAX_BODY_SIZE);
+        assert_eq!(config.max_size(), 1024 * 1024); // 1MB
+    }
+
+    #[test]
+    fn body_limit_config_custom() {
+        let config = BodyLimitConfig::new(512 * 1024);
+        assert_eq!(config.max_size(), 512 * 1024); // 512KB
+    }
+
+    #[test]
+    fn request_context_default_body_limit() {
+        let cx = Cx::for_testing();
+        let ctx = RequestContext::new(cx, 1);
+        assert_eq!(ctx.max_body_size(), DEFAULT_MAX_BODY_SIZE);
+        assert_eq!(ctx.body_limit().max_size(), DEFAULT_MAX_BODY_SIZE);
+    }
+
+    #[test]
+    fn request_context_custom_body_limit() {
+        let cx = Cx::for_testing();
+        let ctx = RequestContext::with_body_limit(cx, 1, 2 * 1024 * 1024);
+        assert_eq!(ctx.max_body_size(), 2 * 1024 * 1024); // 2MB
+    }
+
+    #[test]
+    fn request_context_with_overrides_has_default_limit() {
+        let cx = Cx::for_testing();
+        let overrides = Arc::new(DependencyOverrides::new());
+        let ctx = RequestContext::with_overrides(cx, 1, overrides);
+        assert_eq!(ctx.max_body_size(), DEFAULT_MAX_BODY_SIZE);
+    }
+
+    #[test]
+    fn request_context_with_overrides_and_custom_limit() {
+        let cx = Cx::for_testing();
+        let overrides = Arc::new(DependencyOverrides::new());
+        let ctx = RequestContext::with_overrides_and_body_limit(cx, 1, overrides, 4 * 1024 * 1024);
+        assert_eq!(ctx.max_body_size(), 4 * 1024 * 1024); // 4MB
     }
 }
