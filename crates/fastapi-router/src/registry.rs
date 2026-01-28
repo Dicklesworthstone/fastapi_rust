@@ -35,6 +35,10 @@ impl RouteRegistration {
 #[must_use]
 #[allow(unsafe_code)]
 pub fn registered_routes() -> Vec<Route> {
+    // SAFETY: `registrations()` returns a valid slice of RouteRegistration entries
+    // from the linker section. The entries are placed there by route macros during
+    // compilation and are valid for the 'static lifetime. See `registrations()` for
+    // the detailed safety invariants.
     let regs = unsafe { registrations() };
     regs.iter()
         .filter_map(|reg| reg.constructor)
@@ -44,24 +48,69 @@ pub fn registered_routes() -> Vec<Route> {
 
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
 #[allow(unsafe_code)]
+/// # Safety
+///
+/// This function must only be called when the following invariants hold:
+///
+/// 1. The linker has placed all `RouteRegistration` statics with
+///    `#[link_section = "fastapi_routes"]` into a contiguous memory region.
+/// 2. The `__start_fastapi_routes` and `__stop_fastapi_routes` symbols
+///    correctly bound this region (guaranteed by the linker for ELF targets).
+/// 3. All entries in the section are valid `RouteRegistration` structs
+///    (guaranteed by the route macros that create them).
+/// 4. `RouteRegistration` is `#[repr(C)]`, ensuring consistent memory layout.
 unsafe fn registrations() -> &'static [RouteRegistration] {
+    // SAFETY: These extern statics are provided by the linker and mark the start
+    // and end of the `fastapi_routes` section. This is a standard ELF linker feature.
     unsafe extern "C" {
         static __start_fastapi_routes: u8;
         static __stop_fastapi_routes: u8;
     }
 
+    // SAFETY: We cast the section bounds to RouteRegistration pointers.
+    // This is valid because:
+    // - All entries in this section are RouteRegistration (placed by route macros)
+    // - RouteRegistration is #[repr(C)] ensuring predictable layout
+    // - The linker guarantees __start and __stop bound the section correctly
     let start = unsafe { &__start_fastapi_routes as *const u8 as *const RouteRegistration };
     let stop = unsafe { &__stop_fastapi_routes as *const u8 as *const RouteRegistration };
     let count = (stop as usize - start as usize) / std::mem::size_of::<RouteRegistration>();
+
+    // SAFETY: We create a slice from the contiguous section memory.
+    // - `start` points to valid RouteRegistration data (or is equal to stop if empty)
+    // - `count` is calculated from the section bounds, so we never read past the end
+    // - The data is 'static because it's in a linker section (program lifetime)
     unsafe { std::slice::from_raw_parts(start, count) }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
 #[allow(unsafe_code)]
+/// # Safety
+///
+/// This is the fallback implementation for platforms without ELF linker section
+/// support. It returns an empty slice, which is always safe.
+///
+/// On unsupported platforms, route auto-discovery is disabled and routes must
+/// be registered manually.
 unsafe fn registrations() -> &'static [RouteRegistration] {
+    // SAFETY: An empty slice is always valid. No memory is accessed.
     &[]
 }
 
+/// Anchor entry that ensures the `fastapi_routes` linker section exists.
+///
+/// This empty registration is placed in the section to guarantee it exists
+/// even when no routes are registered via macros. Without this, the linker
+/// might not create the section at all, and the `__start_fastapi_routes` and
+/// `__stop_fastapi_routes` symbols would be undefined.
+///
+/// # Safety
+///
+/// The `unsafe(link_section)` attribute places this static in a custom linker
+/// section. This is safe because:
+/// - `RouteRegistration` is `#[repr(C)]` with predictable layout
+/// - This is an empty registration (constructor is None), so it won't affect route discovery
+/// - The section is only read by `registrations()`, which handles all entries uniformly
 #[used]
 #[allow(unsafe_code)]
 #[cfg_attr(

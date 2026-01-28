@@ -105,6 +105,14 @@ pub use fastapi_macros::{JsonSchema, Validate, delete, get, head, options, patch
 pub use fastapi_openapi::{OpenApi, OpenApiBuilder};
 pub use fastapi_router::{Route, Router};
 
+// Re-export HTTP server types
+pub use fastapi_http::{
+    Server, ServerConfig, TcpServer,
+    ServeError, ServerError,
+    serve, serve_with_config,
+    GracefulOutcome, ShutdownController, ShutdownReceiver,
+};
+
 /// Prelude module for convenient imports.
 pub mod prelude {
     pub use crate::{
@@ -124,6 +132,8 @@ pub mod prelude {
         JsonSchema, Validate, delete, get, head, options, patch, post, put,
         // OpenAPI
         OpenApi, OpenApiBuilder,
+        // Server
+        Server, ServerConfig, serve,
     };
     pub use serde::{Deserialize, Serialize};
 }
