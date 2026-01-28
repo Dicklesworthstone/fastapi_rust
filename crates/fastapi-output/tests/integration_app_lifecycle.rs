@@ -110,8 +110,11 @@ fn test_app_startup_lifecycle_plain_mode() {
             },
         ];
 
-        let route_display = RouteDisplay::new(OutputMode::Plain)
-            .with_config(RouteTableConfig::default().show_handlers(true));
+        let route_config = RouteTableConfig {
+            show_handlers: true,
+            ..RouteTableConfig::default()
+        };
+        let route_display = RouteDisplay::with_config(OutputMode::Plain, route_config);
         let route_output = route_display.render(&routes);
 
         assert_no_ansi(&route_output);
@@ -162,7 +165,9 @@ fn test_app_startup_lifecycle_rich_mode() {
 
         // Should have ANSI styling
         assert_has_ansi(&banner_output);
-        assert_contains(&banner_output, "FastAPI Rust");
+        // Check for version and URL in banner (ASCII art header doesn't contain literal "FastAPI Rust")
+        assert_contains(&banner_output, "0.1.0");
+        assert_contains(&banner_output, "127.0.0.1");
 
         // Route table should be styled
         let routes = vec![RouteEntry {
@@ -489,23 +494,22 @@ fn test_middleware_stack_display() {
     with_clean_env(|| {
         set_env("FASTAPI_OUTPUT_MODE", "plain");
 
-        let display = MiddlewareStackDisplay::new(OutputMode::Plain);
-
         // Simulate typical middleware stack using constructor
         let middleware = vec![
-            MiddlewareInfo::new("RequestLogger", 0).with_type_name("LoggingMiddleware"),
-            MiddlewareInfo::new("CORS", 1)
+            MiddlewareInfo::new("RequestLogger", 1).with_type_name("LoggingMiddleware"),
+            MiddlewareInfo::new("CORS", 2)
                 .with_type_name("CorsMiddleware")
                 .short_circuits(),
-            MiddlewareInfo::new("Auth", 2)
+            MiddlewareInfo::new("Auth", 3)
                 .with_type_name("AuthMiddleware")
                 .short_circuits(),
-            MiddlewareInfo::new("RateLimiter", 3)
+            MiddlewareInfo::new("RateLimiter", 4)
                 .with_type_name("RateLimitMiddleware")
                 .short_circuits(),
         ];
 
-        let output = display.render(&middleware);
+        let display = MiddlewareStackDisplay::new(middleware.clone());
+        let output = display.as_plain_text();
 
         assert_no_ansi(&output);
 
@@ -531,8 +535,6 @@ fn test_dependency_tree_display() {
     with_clean_env(|| {
         set_env("FASTAPI_OUTPUT_MODE", "plain");
 
-        let display = DependencyTreeDisplay::new(OutputMode::Plain);
-
         // Simulate dependency injection tree using constructors
         let root = DependencyNode::new("UserService")
             .scope("request")
@@ -544,7 +546,8 @@ fn test_dependency_tree_display() {
                     .cached(),
             ]);
 
-        let output = display.render(&root);
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, vec![root]);
+        let output = display.render();
 
         assert_no_ansi(&output);
         assert_contains(&output, "UserService");

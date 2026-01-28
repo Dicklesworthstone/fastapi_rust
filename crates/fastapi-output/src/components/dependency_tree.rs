@@ -306,7 +306,143 @@ impl TreeGlyphs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{assert_contains, assert_no_ansi};
+    use crate::testing::{assert_contains, assert_has_ansi, assert_no_ansi};
+
+    // =================================================================
+    // DependencyNode Builder Tests
+    // =================================================================
+
+    #[test]
+    fn test_dependency_node_new() {
+        let node = DependencyNode::new("TestService");
+        assert_eq!(node.name, "TestService");
+        assert!(node.children.is_empty());
+        assert!(!node.cached);
+        assert!(node.scope.is_none());
+        assert!(node.note.is_none());
+        assert!(!node.cycle);
+    }
+
+    #[test]
+    fn test_dependency_node_child() {
+        let node = DependencyNode::new("Parent")
+            .child(DependencyNode::new("Child1"))
+            .child(DependencyNode::new("Child2"));
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].name, "Child1");
+        assert_eq!(node.children[1].name, "Child2");
+    }
+
+    #[test]
+    fn test_dependency_node_children() {
+        let children = vec![
+            DependencyNode::new("A"),
+            DependencyNode::new("B"),
+            DependencyNode::new("C"),
+        ];
+        let node = DependencyNode::new("Root").children(children);
+        assert_eq!(node.children.len(), 3);
+        assert_eq!(node.children[2].name, "C");
+    }
+
+    #[test]
+    fn test_dependency_node_cached() {
+        let node = DependencyNode::new("Cached").cached();
+        assert!(node.cached);
+    }
+
+    #[test]
+    fn test_dependency_node_scope() {
+        let node = DependencyNode::new("Scoped").scope("singleton");
+        assert_eq!(node.scope, Some("singleton".to_string()));
+    }
+
+    #[test]
+    fn test_dependency_node_note() {
+        let node = DependencyNode::new("Noted").note("Important service");
+        assert_eq!(node.note, Some("Important service".to_string()));
+    }
+
+    #[test]
+    fn test_dependency_node_cycle() {
+        let node = DependencyNode::new("Circular").cycle();
+        assert!(node.cycle);
+    }
+
+    #[test]
+    fn test_dependency_node_full_builder() {
+        let node = DependencyNode::new("FullService")
+            .cached()
+            .scope("request")
+            .note("Main service entry")
+            .cycle()
+            .child(DependencyNode::new("Dep1"));
+
+        assert_eq!(node.name, "FullService");
+        assert!(node.cached);
+        assert_eq!(node.scope, Some("request".to_string()));
+        assert_eq!(node.note, Some("Main service entry".to_string()));
+        assert!(node.cycle);
+        assert_eq!(node.children.len(), 1);
+    }
+
+    // =================================================================
+    // DependencyTreeDisplay Configuration Tests
+    // =================================================================
+
+    #[test]
+    fn test_empty_roots() {
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, vec![]);
+        let output = display.render();
+        assert_eq!(output, "No dependencies registered.");
+    }
+
+    #[test]
+    fn test_custom_title() {
+        let roots = vec![DependencyNode::new("Service")];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots)
+            .title(Some("Custom DI Tree".to_string()));
+        let output = display.render();
+        assert_contains(&output, "Custom DI Tree");
+        assert!(!output.contains("Dependency Tree"));
+    }
+
+    #[test]
+    fn test_no_title() {
+        let roots = vec![DependencyNode::new("Service")];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots).title(None);
+        let output = display.render();
+        assert!(!output.contains("Dependency Tree"));
+        assert_contains(&output, "Service");
+    }
+
+    #[test]
+    fn test_hide_cached() {
+        let roots = vec![DependencyNode::new("Cached").cached()];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots).hide_cached();
+        let output = display.render();
+        assert!(!output.contains("[cached]"));
+    }
+
+    #[test]
+    fn test_hide_scopes() {
+        let roots = vec![DependencyNode::new("Scoped").scope("singleton")];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots).hide_scopes();
+        let output = display.render();
+        assert!(!output.contains("scope:"));
+    }
+
+    #[test]
+    fn test_hide_notes() {
+        let roots = vec![DependencyNode::new("Noted").note("Important note")];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots).hide_notes();
+        let output = display.render();
+        assert!(!output.contains("Important note"));
+    }
+
+    // =================================================================
+    // Rendering Mode Tests
+    // =================================================================
 
     #[test]
     fn renders_plain_tree() {
@@ -325,7 +461,83 @@ mod tests {
         assert_contains(&output, "scope: request");
         assert_contains(&output, "Config");
         assert_no_ansi(&output);
+        // Plain mode uses ASCII glyphs
+        assert!(output.contains("+-") || output.contains("\\-"));
     }
+
+    #[test]
+    fn renders_rich_tree_with_ansi() {
+        let roots = vec![DependencyNode::new("Service").cached().scope("request")];
+        let display = DependencyTreeDisplay::new(OutputMode::Rich, roots);
+        let output = display.render();
+
+        assert_has_ansi(&output);
+        assert_contains(&output, "Service");
+        // Rich mode uses Unicode glyphs
+        assert!(output.contains("├─") || output.contains("└─"));
+    }
+
+    #[test]
+    fn renders_minimal_tree_with_unicode() {
+        let roots = vec![DependencyNode::new("Service")];
+        let display = DependencyTreeDisplay::new(OutputMode::Minimal, roots);
+        let output = display.render();
+
+        // Minimal uses same Unicode glyphs as Rich
+        assert!(output.contains("└─"));
+    }
+
+    // =================================================================
+    // Tree Structure Tests
+    // =================================================================
+
+    #[test]
+    fn test_multiple_roots() {
+        let roots = vec![
+            DependencyNode::new("Root1"),
+            DependencyNode::new("Root2"),
+            DependencyNode::new("Root3"),
+        ];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots);
+        let output = display.render();
+
+        assert_contains(&output, "Root1");
+        assert_contains(&output, "Root2");
+        assert_contains(&output, "Root3");
+    }
+
+    #[test]
+    fn test_deep_nesting() {
+        let roots = vec![DependencyNode::new("Level0")
+            .child(DependencyNode::new("Level1").child(
+                DependencyNode::new("Level2").child(DependencyNode::new("Level3")),
+            ))];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots);
+        let output = display.render();
+
+        assert_contains(&output, "Level0");
+        assert_contains(&output, "Level1");
+        assert_contains(&output, "Level2");
+        assert_contains(&output, "Level3");
+    }
+
+    #[test]
+    fn test_wide_tree() {
+        let children = (0..5)
+            .map(|i| DependencyNode::new(format!("Child{}", i)))
+            .collect();
+        let roots = vec![DependencyNode::new("Root").children(children)];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots);
+        let output = display.render();
+
+        for i in 0..5 {
+            assert_contains(&output, &format!("Child{}", i));
+        }
+    }
+
+    // =================================================================
+    // Cycle Detection Tests
+    // =================================================================
 
     #[test]
     fn renders_cycle_marker() {
@@ -344,5 +556,63 @@ mod tests {
         assert_contains(&output, "[cycle]");
         assert_contains(&output, "Cycles detected:");
         assert_contains(&output, "Auth -> Db -> Auth");
+    }
+
+    #[test]
+    fn test_multiple_cycle_paths() {
+        let roots = vec![DependencyNode::new("A")
+            .child(DependencyNode::new("B").cycle())
+            .child(DependencyNode::new("C").cycle())];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots)
+            .with_cycle_path(vec!["A".into(), "B".into(), "A".into()])
+            .with_cycle_path(vec!["A".into(), "C".into(), "A".into()]);
+        let output = display.render();
+
+        assert_contains(&output, "A -> B -> A");
+        assert_contains(&output, "A -> C -> A");
+    }
+
+    #[test]
+    fn test_empty_cycle_path_ignored() {
+        let roots = vec![DependencyNode::new("Root")];
+        let display =
+            DependencyTreeDisplay::new(OutputMode::Plain, roots).with_cycle_path(vec![]);
+        let output = display.render();
+
+        // Empty cycle path should not add cycles section
+        assert!(!output.contains("Cycles detected:"));
+    }
+
+    // =================================================================
+    // Label Formatting Tests
+    // =================================================================
+
+    #[test]
+    fn test_node_with_all_annotations() {
+        let roots = vec![DependencyNode::new("FullAnnotated")
+            .cached()
+            .scope("singleton")
+            .note("Main dependency")
+            .cycle()];
+        let display = DependencyTreeDisplay::new(OutputMode::Plain, roots);
+        let output = display.render();
+
+        assert_contains(&output, "FullAnnotated");
+        assert_contains(&output, "[cached]");
+        assert_contains(&output, "(scope: singleton)");
+        assert_contains(&output, "[cycle]");
+        assert_contains(&output, "- Main dependency");
+    }
+
+    #[test]
+    fn test_rich_mode_cycles_header_styled() {
+        let roots = vec![DependencyNode::new("A").cycle()];
+        let display = DependencyTreeDisplay::new(OutputMode::Rich, roots)
+            .with_cycle_path(vec!["A".into(), "B".into()]);
+        let output = display.render();
+
+        // Cycles header should have ANSI codes in Rich mode
+        assert_has_ansi(&output);
+        assert_contains(&output, "Cycles detected:");
     }
 }

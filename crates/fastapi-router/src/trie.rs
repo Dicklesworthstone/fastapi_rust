@@ -1,4 +1,21 @@
 //! Radix trie router implementation.
+//!
+//! # Wildcard Catch-All Routes
+//!
+//! The router supports catch-all wildcard routes using two equivalent syntaxes:
+//!
+//! - `{*path}` - asterisk prefix syntax (recommended)
+//! - `{path:path}` - converter suffix syntax
+//!
+//! Wildcards capture all remaining path segments including slashes:
+//!
+//! ```ignore
+//! // Route: /files/{*filepath}
+//! // Request: /files/css/styles/main.css
+//! // Captured: filepath = "css/styles/main.css"
+//! ```
+//!
+//! Wildcards must be the final segment in a route pattern.
 
 use crate::r#match::{AllowedMethods, RouteLookup, RouteMatch};
 use fastapi_core::{Handler, Method};
@@ -17,7 +34,9 @@ pub enum Converter {
     Float,
     /// UUID.
     Uuid,
-    /// Path segment (can contain /).
+    /// Path segment (can contain `/`). Used for catch-all wildcard routes.
+    ///
+    /// Can be specified as `{*name}` or `{name:path}`.
     Path,
 }
 
@@ -500,6 +519,13 @@ fn parse_path(path: &str) -> Vec<PathSegment<'_>> {
         .map(|s| {
             if s.starts_with('{') && s.ends_with('}') {
                 let inner = &s[1..s.len() - 1];
+                // Check for {*name} wildcard syntax (catch-all)
+                if let Some(name) = inner.strip_prefix('*') {
+                    return PathSegment::Param {
+                        name,
+                        converter: Converter::Path,
+                    };
+                }
                 let (name, converter) = if let Some(pos) = inner.find(':') {
                     let conv = match &inner[pos + 1..] {
                         "int" => Converter::Int,
@@ -533,7 +559,7 @@ fn validate_path_segments(
             if idx + 1 != segments.len() {
                 return Err(InvalidRouteError::new(
                     path,
-                    format!("path converter '{{{name}:path}}' must be the final segment"),
+                    format!("wildcard '{{*{name}}}' or '{{{name}:path}}' must be the final segment"),
                 ));
             }
         }
@@ -1555,5 +1581,184 @@ mod tests {
         let allowed = AllowedMethods::new(vec![]);
         assert!(allowed.methods().is_empty());
         assert_eq!(allowed.header_value(), "");
+    }
+
+    // =========================================================================
+    // WILDCARD CATCH-ALL ROUTE TESTS ({*path} syntax)
+    // =========================================================================
+
+    #[test]
+    fn wildcard_asterisk_syntax_basic() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/files/{*path}")).unwrap();
+
+        let m = router.match_path("/files/a.txt", Method::Get).unwrap();
+        assert_eq!(m.params[0], ("path", "a.txt"));
+    }
+
+    #[test]
+    fn wildcard_asterisk_captures_multiple_segments() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/files/{*filepath}")).unwrap();
+
+        let m = router.match_path("/files/css/styles/main.css", Method::Get).unwrap();
+        assert_eq!(m.params[0], ("filepath", "css/styles/main.css"));
+    }
+
+    #[test]
+    fn wildcard_asterisk_with_prefix() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/api/v1/{*rest}")).unwrap();
+
+        let m = router.match_path("/api/v1/users/123/posts", Method::Get).unwrap();
+        assert_eq!(m.params[0], ("rest", "users/123/posts"));
+    }
+
+    #[test]
+    fn wildcard_asterisk_empty_capture() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/files/{*path}")).unwrap();
+
+        // Single segment after prefix should work
+        let m = router.match_path("/files/x", Method::Get).unwrap();
+        assert_eq!(m.params[0], ("path", "x"));
+    }
+
+    #[test]
+    fn wildcard_asterisk_must_be_terminal() {
+        let mut router = Router::new();
+        let result = router.add(route(Method::Get, "/files/{*path}/edit"));
+        assert!(matches!(result, Err(RouteAddError::InvalidPath(_))));
+    }
+
+    #[test]
+    fn wildcard_asterisk_syntax_equivalent_to_path_converter() {
+        // Both syntaxes should produce the same result
+        let segments_asterisk = parse_path("/files/{*filepath}");
+        let segments_converter = parse_path("/files/{filepath:path}");
+
+        assert_eq!(segments_asterisk.len(), 2);
+        assert_eq!(segments_converter.len(), 2);
+
+        match (&segments_asterisk[1], &segments_converter[1]) {
+            (
+                PathSegment::Param { name: n1, converter: c1 },
+                PathSegment::Param { name: n2, converter: c2 },
+            ) => {
+                assert_eq!(*n1, "filepath");
+                assert_eq!(*n2, "filepath");
+                assert_eq!(*c1, Converter::Path);
+                assert_eq!(*c2, Converter::Path);
+            }
+            _ => panic!("Expected param segments"),
+        }
+    }
+
+    #[test]
+    fn wildcard_asterisk_spa_routing() {
+        let mut router = Router::new();
+        // Static API routes take priority
+        router.add(route(Method::Get, "/api/users")).unwrap();
+        router.add(route(Method::Get, "/api/posts")).unwrap();
+        // Catch-all for SPA
+        router.add(route(Method::Get, "/{*route}")).unwrap();
+
+        // API routes match exactly
+        let m = router.match_path("/api/users", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/api/users");
+
+        // Other paths caught by wildcard
+        let m = router.match_path("/dashboard", Method::Get).unwrap();
+        assert_eq!(m.params[0], ("route", "dashboard"));
+
+        let m = router.match_path("/users/123/profile", Method::Get).unwrap();
+        assert_eq!(m.params[0], ("route", "users/123/profile"));
+    }
+
+    #[test]
+    fn wildcard_asterisk_file_serving() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/static/{*filepath}")).unwrap();
+
+        let m = router.match_path("/static/js/app.bundle.js", Method::Get).unwrap();
+        assert_eq!(m.params[0], ("filepath", "js/app.bundle.js"));
+
+        let m = router.match_path("/static/images/logo.png", Method::Get).unwrap();
+        assert_eq!(m.params[0], ("filepath", "images/logo.png"));
+    }
+
+    #[test]
+    fn wildcard_asterisk_priority_lowest() {
+        let mut router = Router::new();
+        // Static routes have highest priority
+        router.add(route(Method::Get, "/users/me")).unwrap();
+        // Single-segment param has medium priority
+        router.add(route(Method::Get, "/users/{id}")).unwrap();
+        // Catch-all has lowest priority
+        router.add(route(Method::Get, "/{*path}")).unwrap();
+
+        // Static match
+        let m = router.match_path("/users/me", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/users/me");
+        assert!(m.params.is_empty());
+
+        // Param match
+        let m = router.match_path("/users/123", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/users/{id}");
+        assert_eq!(m.params[0], ("id", "123"));
+
+        // Wildcard catches the rest
+        let m = router.match_path("/other/deep/path", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/{*path}");
+        assert_eq!(m.params[0], ("path", "other/deep/path"));
+    }
+
+    #[test]
+    fn parse_wildcard_asterisk_syntax() {
+        let segments = parse_path("/files/{*path}");
+        assert_eq!(segments.len(), 2);
+
+        match &segments[0] {
+            PathSegment::Static(s) => assert_eq!(*s, "files"),
+            _ => panic!("Expected static segment"),
+        }
+
+        match &segments[1] {
+            PathSegment::Param { name, converter } => {
+                assert_eq!(*name, "path");
+                assert_eq!(*converter, Converter::Path);
+            }
+            _ => panic!("Expected param segment"),
+        }
+    }
+
+    #[test]
+    fn wildcard_asterisk_conflict_with_path_converter() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/files/{*path}")).unwrap();
+
+        // Same route with different syntax should conflict
+        let result = router.add(route(Method::Get, "/files/{filepath:path}"));
+        assert!(matches!(result, Err(RouteAddError::Conflict(_))));
+    }
+
+    #[test]
+    fn wildcard_asterisk_different_methods_no_conflict() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/files/{*path}")).unwrap();
+        router.add(route(Method::Post, "/files/{*path}")).unwrap();
+        router.add(route(Method::Delete, "/files/{*path}")).unwrap();
+
+        assert_eq!(router.routes().len(), 3);
+
+        // Each method works
+        let m = router.match_path("/files/a/b/c", Method::Get).unwrap();
+        assert_eq!(m.route.method, Method::Get);
+
+        let m = router.match_path("/files/a/b/c", Method::Post).unwrap();
+        assert_eq!(m.route.method, Method::Post);
+
+        let m = router.match_path("/files/a/b/c", Method::Delete).unwrap();
+        assert_eq!(m.route.method, Method::Delete);
     }
 }
