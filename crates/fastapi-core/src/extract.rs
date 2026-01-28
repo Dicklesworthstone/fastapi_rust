@@ -6677,15 +6677,28 @@ impl BackgroundTasks {
         }
     }
 
-    /// Execute tasks with per-task error isolation using catch_unwind.
+    /// Execute tasks with per-task panic isolation using catch_unwind.
     ///
-    /// This version catches panics in task closures and logs them,
-    /// allowing subsequent tasks to continue even if earlier ones panic.
+    /// This version catches panics that occur when **calling the task closure**
+    /// (i.e., when creating the future), allowing subsequent tasks to continue.
     ///
-    /// Note: Due to Rust's async limitation, panics that occur during
-    /// `.await` inside the task future cannot be caught without additional
-    /// crate dependencies. This method catches panics in the synchronous
-    /// portion of task execution.
+    /// # What Is Caught vs. Not Caught
+    ///
+    /// ```ignore
+    /// // CAUGHT: Panic in closure before returning future
+    /// tasks.add_task(|| {
+    ///     panic!("this is caught");
+    ///     async {}  // never reached
+    /// });
+    ///
+    /// // NOT CAUGHT: Panic inside async block (during .await)
+    /// tasks.add_task(|| async {
+    ///     panic!("this is NOT caught - propagates and stops remaining tasks");
+    /// });
+    /// ```
+    ///
+    /// Due to Rust's async limitation, panics inside the async task body
+    /// cannot be caught without additional crate dependencies (like `futures`).
     ///
     /// For most use cases where task code is well-behaved, `execute_all()`
     /// or `execute_with_context()` is sufficient.
