@@ -35,6 +35,15 @@
 //! 5. Protected endpoint - with invalid token
 //!    GET /protected (Authorization: Bearer wrong_token) -> 403 Forbidden
 //!
+//! 6. Protected endpoint - with wrong auth scheme
+//!    GET /protected (Authorization: Basic ...) -> 401 Unauthorized
+//!
+//! 7. Login with wrong Content-Type
+//!    POST /login (Content-Type: text/plain) -> 415 Unsupported Media Type
+//!
+//! 8. Token case sensitivity (lowercase 'bearer')
+//!    GET /protected (Authorization: bearer demo_secret_token_12345) -> 200 OK
+//!
 //! All authentication tests passed!
 //! ```
 //!
