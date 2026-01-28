@@ -8835,6 +8835,181 @@ mod bearer_token_tests {
 }
 
 #[cfg(test)]
+mod api_key_header_tests {
+    use super::*;
+    use crate::request::Method;
+    use crate::response::IntoResponse;
+
+    fn test_context() -> RequestContext {
+        let cx = asupersync::Cx::for_testing();
+        RequestContext::new(cx, 54321)
+    }
+
+    #[test]
+    fn api_key_header_extraction_default() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("x-api-key", b"test_api_key_123".to_vec());
+
+        let result = futures_executor::block_on(ApiKeyHeader::from_request(&ctx, &mut req));
+        let api_key = result.unwrap();
+        assert_eq!(api_key.key(), "test_api_key_123");
+        assert_eq!(api_key.header_name(), "x-api-key");
+    }
+
+    #[test]
+    fn api_key_header_missing() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // No API key header
+
+        let result = futures_executor::block_on(ApiKeyHeader::from_request(&ctx, &mut req));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ApiKeyHeaderError::MissingHeader { .. }));
+    }
+
+    #[test]
+    fn api_key_header_empty() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut().insert("x-api-key", b"".to_vec());
+
+        let result = futures_executor::block_on(ApiKeyHeader::from_request(&ctx, &mut req));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ApiKeyHeaderError::EmptyKey { .. }));
+    }
+
+    #[test]
+    fn api_key_header_whitespace_only() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut().insert("x-api-key", b"   ".to_vec());
+
+        let result = futures_executor::block_on(ApiKeyHeader::from_request(&ctx, &mut req));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ApiKeyHeaderError::EmptyKey { .. }));
+    }
+
+    #[test]
+    fn api_key_header_trims_whitespace() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("x-api-key", b"  my_key_123  ".to_vec());
+
+        let result = futures_executor::block_on(ApiKeyHeader::from_request(&ctx, &mut req));
+        let api_key = result.unwrap();
+        assert_eq!(api_key.key(), "my_key_123");
+    }
+
+    #[test]
+    fn api_key_header_custom_header_name() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        req.headers_mut()
+            .insert("authorization", b"custom_key".to_vec());
+        req.insert_extension(ApiKeyHeaderConfig::new().header_name("authorization"));
+
+        let result = futures_executor::block_on(ApiKeyHeader::from_request(&ctx, &mut req));
+        let api_key = result.unwrap();
+        assert_eq!(api_key.key(), "custom_key");
+        assert_eq!(api_key.header_name(), "authorization");
+    }
+
+    #[test]
+    fn api_key_header_invalid_utf8() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Get, "/api/protected");
+        // Invalid UTF-8 sequence
+        req.headers_mut()
+            .insert("x-api-key", vec![0xFF, 0xFE, 0x00, 0x01]);
+
+        let result = futures_executor::block_on(ApiKeyHeader::from_request(&ctx, &mut req));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ApiKeyHeaderError::InvalidUtf8 { .. }));
+    }
+
+    #[test]
+    fn api_key_header_error_response_401() {
+        let err = ApiKeyHeaderError::missing_header("x-api-key");
+        let response = err.into_response();
+        assert_eq!(response.status().as_u16(), 401);
+    }
+
+    #[test]
+    fn api_key_header_error_response_json() {
+        let err = ApiKeyHeaderError::missing_header("x-api-key");
+        let response = err.into_response();
+
+        let has_json_content_type = response
+            .headers()
+            .iter()
+            .any(|(name, value)| name == "content-type" && value == b"application/json");
+        assert!(has_json_content_type);
+    }
+
+    #[test]
+    fn api_key_header_secure_compare() {
+        let api_key = ApiKeyHeader::new("secret_key_123");
+
+        // Timing-safe comparison
+        assert!(api_key.secure_eq("secret_key_123"));
+        assert!(!api_key.secure_eq("secret_key_124"));
+        assert!(!api_key.secure_eq("wrong"));
+
+        // Bytes comparison
+        assert!(api_key.secure_eq_bytes(b"secret_key_123"));
+        assert!(!api_key.secure_eq_bytes(b"secret_key_124"));
+    }
+
+    #[test]
+    fn api_key_header_deref_and_as_ref() {
+        let api_key = ApiKeyHeader::new("deref_test");
+
+        // Deref to &str
+        let s: &str = &api_key;
+        assert_eq!(s, "deref_test");
+
+        // AsRef<str>
+        let s: &str = api_key.as_ref();
+        assert_eq!(s, "deref_test");
+    }
+
+    #[test]
+    fn api_key_header_config_defaults() {
+        let config = ApiKeyHeaderConfig::default();
+        assert_eq!(config.get_header_name(), DEFAULT_API_KEY_HEADER);
+    }
+
+    #[test]
+    fn api_key_header_error_display() {
+        let err = ApiKeyHeaderError::missing_header("x-api-key");
+        assert!(err.to_string().contains("x-api-key"));
+
+        let err = ApiKeyHeaderError::empty_key("x-api-key");
+        assert!(err.to_string().contains("Empty"));
+
+        let err = ApiKeyHeaderError::invalid_utf8("x-api-key");
+        assert!(err.to_string().contains("Invalid UTF-8"));
+    }
+
+    #[test]
+    fn api_key_header_equality() {
+        let key1 = ApiKeyHeader::new("same_key");
+        let key2 = ApiKeyHeader::new("same_key");
+        let key3 = ApiKeyHeader::new("different_key");
+
+        assert_eq!(key1, key2);
+        assert_ne!(key1, key3);
+    }
+}
+
+#[cfg(test)]
 mod basic_auth_tests {
     use super::*;
     use crate::request::Method;

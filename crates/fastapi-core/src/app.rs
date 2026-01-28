@@ -4485,7 +4485,7 @@ mod tests {
         let mut req = Request::new(Method::Get, "/");
         let response = futures_executor::block_on(app.handle(&ctx, &mut req));
         assert_eq!(response.status().as_u16(), 200);
-        if let ResponseBody::Bytes(body) = response.body() {
+        if let ResponseBody::Bytes(body) = response.body_ref() {
             assert_eq!(body.as_slice(), b"Hello, World!");
         }
 
@@ -4493,7 +4493,7 @@ mod tests {
         let mut req = Request::new(Method::Get, "/admin");
         let response = futures_executor::block_on(app.handle(&ctx, &mut req));
         assert_eq!(response.status().as_u16(), 200);
-        if let ResponseBody::Bytes(body) = response.body() {
+        if let ResponseBody::Bytes(body) = response.body_ref() {
             assert_eq!(body.as_slice(), b"Admin Panel");
         }
 
@@ -4501,7 +4501,7 @@ mod tests {
         let mut req = Request::new(Method::Get, "/admin/users");
         let response = futures_executor::block_on(app.handle(&ctx, &mut req));
         assert_eq!(response.status().as_u16(), 200);
-        if let ResponseBody::Bytes(body) = response.body() {
+        if let ResponseBody::Bytes(body) = response.body_ref() {
             assert_eq!(body.as_slice(), b"Admin Panel");
         }
     }
