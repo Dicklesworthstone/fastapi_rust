@@ -38,7 +38,8 @@ mod schema;
 mod spec;
 
 pub use schema::{
-    ArraySchema, JsonSchema, ObjectSchema, PrimitiveSchema, RefSchema, Schema, SchemaType,
+    ArraySchema, ConstSchema, Discriminator, EnumSchema, JsonSchema, ObjectSchema, PrimitiveSchema,
+    RefSchema, Schema, SchemaType, StringEnumSchema,
 };
 pub use spec::{
     Components, Example, HasParamMeta, Info, MediaType, OpenApi, OpenApiBuilder, Operation,

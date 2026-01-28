@@ -11,5 +11,8 @@ fastapi-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+fastapi-macros = { workspace = true }
+
 [lints]
 workspace = true

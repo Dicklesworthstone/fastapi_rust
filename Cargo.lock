@@ -432,6 +432,7 @@ name = "fastapi-openapi"
 version = "0.1.0"
 dependencies = [
  "fastapi-core",
+ "fastapi-macros",
  "serde",
  "serde_json",
 ]

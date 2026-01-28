@@ -17,6 +17,8 @@ pub enum Schema {
     Array(ArraySchema),
     /// Primitive type schema.
     Primitive(PrimitiveSchema),
+    /// Enum/union schema (oneOf, anyOf, allOf).
+    Enum(EnumSchema),
 }
 
 impl Schema {
@@ -93,6 +95,58 @@ impl Schema {
         }
         self
     }
+
+    /// Create a oneOf schema (discriminated union - exactly one must match).
+    pub fn one_of(schemas: Vec<Schema>) -> Self {
+        Schema::Enum(EnumSchema {
+            one_of: schemas,
+            ..Default::default()
+        })
+    }
+
+    /// Create an anyOf schema (untagged union - at least one must match).
+    pub fn any_of(schemas: Vec<Schema>) -> Self {
+        Schema::Enum(EnumSchema {
+            any_of: schemas,
+            ..Default::default()
+        })
+    }
+
+    /// Create an allOf schema (intersection - all must match).
+    pub fn all_of(schemas: Vec<Schema>) -> Self {
+        Schema::Enum(EnumSchema {
+            all_of: schemas,
+            ..Default::default()
+        })
+    }
+
+    /// Create a string enum schema (for unit variants only).
+    pub fn string_enum(values: Vec<String>) -> Self {
+        Schema::Primitive(PrimitiveSchema {
+            schema_type: SchemaType::String,
+            format: None,
+            nullable: false,
+            minimum: None,
+            maximum: None,
+            enum_values: Some(values),
+        })
+    }
+
+    /// Create a oneOf schema with discriminator.
+    pub fn one_of_with_discriminator(
+        schemas: Vec<Schema>,
+        property_name: impl Into<String>,
+        mapping: HashMap<String, String>,
+    ) -> Self {
+        Schema::Enum(EnumSchema {
+            one_of: schemas,
+            discriminator: Some(Discriminator {
+                property_name: property_name.into(),
+                mapping,
+            }),
+            ..Default::default()
+        })
+    }
 }
 
 /// Schema reference.
@@ -136,6 +190,64 @@ pub struct ArraySchema {
     pub max_items: Option<usize>,
 }
 
+/// Enum/union schema supporting oneOf, anyOf, allOf, and string enums.
+///
+/// This is used for Rust enums which map to various OpenAPI constructs:
+/// - Unit variants only → string enum with `enum` keyword
+/// - Mixed variants → `oneOf` with discriminated union
+/// - Untagged enums → `anyOf`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnumSchema {
+    /// Schema title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Schema description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// oneOf schemas (discriminated union - exactly one must match).
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "oneOf")]
+    pub one_of: Vec<Schema>,
+    /// anyOf schemas (untagged union - at least one must match).
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "anyOf")]
+    pub any_of: Vec<Schema>,
+    /// allOf schemas (intersection - all must match).
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "allOf")]
+    pub all_of: Vec<Schema>,
+    /// Discriminator for oneOf schemas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discriminator: Option<Discriminator>,
+}
+
+/// Discriminator for oneOf schemas (OpenAPI 3.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Discriminator {
+    /// Property name that discriminates between variants.
+    #[serde(rename = "propertyName")]
+    pub property_name: String,
+    /// Mapping from discriminator values to schema references.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub mapping: HashMap<String, String>,
+}
+
+/// Schema for a constant value (used for unit enum variants).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstSchema {
+    /// The constant value.
+    #[serde(rename = "const")]
+    pub const_value: serde_json::Value,
+}
+
+/// Schema for string enums (unit variants only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StringEnumSchema {
+    /// Schema type (always "string").
+    #[serde(rename = "type")]
+    pub schema_type: SchemaType,
+    /// Allowed enum values.
+    #[serde(rename = "enum")]
+    pub enum_values: Vec<String>,
+}
+
 /// Primitive type schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrimitiveSchema {
@@ -154,6 +266,9 @@ pub struct PrimitiveSchema {
     /// Maximum value constraint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maximum: Option<i64>,
+    /// Enum values (for string enums with unit variants).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "enum")]
+    pub enum_values: Option<Vec<String>>,
 }
 
 impl PrimitiveSchema {
@@ -165,6 +280,7 @@ impl PrimitiveSchema {
             nullable: false,
             minimum: None,
             maximum: None,
+            enum_values: None,
         }
     }
 
@@ -176,6 +292,7 @@ impl PrimitiveSchema {
             nullable: false,
             minimum: None,
             maximum: None,
+            enum_values: None,
         }
     }
 
@@ -187,6 +304,7 @@ impl PrimitiveSchema {
             nullable: false,
             minimum: Some(0),
             maximum: None,
+            enum_values: None,
         }
     }
 
@@ -198,6 +316,7 @@ impl PrimitiveSchema {
             nullable: false,
             minimum: None,
             maximum: None,
+            enum_values: None,
         }
     }
 
@@ -209,6 +328,7 @@ impl PrimitiveSchema {
             nullable: false,
             minimum: None,
             maximum: None,
+            enum_values: None,
         }
     }
 }
@@ -617,5 +737,52 @@ mod tests {
         let schema = i32::schema();
         let json = serde_json::to_string(&schema).unwrap();
         assert!(!json.contains("minimum"));
+    }
+
+    #[test]
+    fn test_string_enum_schema() {
+        // Test string_enum helper
+        let schema = Schema::string_enum(vec![
+            "Red".to_string(),
+            "Green".to_string(),
+            "Blue".to_string(),
+        ]);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(json.contains(r#""type":"string""#));
+        assert!(json.contains(r#""enum":["Red","Green","Blue"]"#));
+    }
+
+    #[test]
+    fn test_one_of_schema() {
+        // Test oneOf helper
+        let schema = Schema::one_of(vec![Schema::string(), Schema::integer(Some("int32"))]);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(json.contains(r#""oneOf""#));
+    }
+
+    #[test]
+    fn test_any_of_schema() {
+        // Test anyOf helper (for untagged enums)
+        let schema = Schema::any_of(vec![Schema::string(), Schema::boolean()]);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(json.contains(r#""anyOf""#));
+    }
+
+    #[test]
+    fn test_enum_schema_with_discriminator() {
+        // Test oneOf with discriminator
+        let mut mapping = HashMap::new();
+        mapping.insert("dog".to_string(), "#/components/schemas/Dog".to_string());
+        mapping.insert("cat".to_string(), "#/components/schemas/Cat".to_string());
+
+        let schema = Schema::one_of_with_discriminator(
+            vec![Schema::reference("Dog"), Schema::reference("Cat")],
+            "petType",
+            mapping,
+        );
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(json.contains(r#""oneOf""#));
+        assert!(json.contains(r#""discriminator""#));
+        assert!(json.contains(r#""propertyName":"petType""#));
     }
 }

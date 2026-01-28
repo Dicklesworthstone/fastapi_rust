@@ -49,9 +49,11 @@ use crate::parser::{ParseError, ParseLimits, ParseStatus, Parser, StatefulParser
 use crate::response::{ResponseWrite, ResponseWriter};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::{TcpListener, TcpStream};
+use asupersync::runtime::{RuntimeState, SpawnError, TaskHandle};
+use asupersync::signal::{GracefulOutcome, ShutdownController, ShutdownReceiver};
 use asupersync::stream::Stream;
 use asupersync::time::timeout;
-use asupersync::{Budget, Cx, Time};
+use asupersync::{Budget, Cx, Scope, Time};
 use fastapi_core::app::App;
 use fastapi_core::{Request, RequestContext, Response, StatusCode};
 use std::future::Future;
@@ -59,7 +61,7 @@ use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -551,6 +553,118 @@ impl From<ParseError> for ServerError {
     }
 }
 
+/// Handles a single connection (standalone function for concurrent spawning).
+///
+/// This function can be called from a spawned task without requiring a reference
+/// to the TcpServer instance. Used for concurrent connection handling.
+async fn handle_connection_inner<H, Fut>(
+    initial_request_id: u64,
+    mut stream: TcpStream,
+    _peer_addr: SocketAddr,
+    config: &ServerConfig,
+    handler: &H,
+) -> Result<(), ServerError>
+where
+    H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync,
+    Fut: Future<Output = Response> + Send,
+{
+    let mut parser = StatefulParser::new().with_limits(config.parse_limits.clone());
+    let mut read_buffer = vec![0u8; config.read_buffer_size];
+    let mut response_writer = ResponseWriter::new();
+    let mut requests_on_connection: usize = 0;
+    let max_requests = config.max_requests_per_connection;
+    let mut request_counter = initial_request_id;
+
+    loop {
+        // Try to parse a complete request from buffered data first
+        let parse_result = parser.feed(&[])?;
+
+        let mut request = match parse_result {
+            ParseStatus::Complete { request, .. } => request,
+            ParseStatus::Incomplete => {
+                let keep_alive_timeout = config.keep_alive_timeout;
+
+                let bytes_read = if keep_alive_timeout.is_zero() {
+                    read_into_buffer(&mut stream, &mut read_buffer).await?
+                } else {
+                    match read_with_timeout(&mut stream, &mut read_buffer, keep_alive_timeout).await
+                    {
+                        Ok(0) => return Ok(()),
+                        Ok(n) => n,
+                        Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                            return Err(ServerError::KeepAliveTimeout);
+                        }
+                        Err(e) => return Err(ServerError::Io(e)),
+                    }
+                };
+
+                if bytes_read == 0 {
+                    return Ok(());
+                }
+
+                match parser.feed(&read_buffer[..bytes_read])? {
+                    ParseStatus::Complete { request, .. } => request,
+                    ParseStatus::Incomplete => continue,
+                }
+            }
+        };
+
+        requests_on_connection += 1;
+
+        // Generate unique request ID for this request with timeout budget
+        request_counter += 1;
+        let request_budget = Budget::new().with_deadline(config.request_timeout);
+        let request_cx = Cx::for_testing_with_budget(request_budget);
+        let ctx = RequestContext::new(request_cx, request_counter);
+
+        // Validate Host header
+        if let Err(err) = validate_host_header(&request, config) {
+            ctx.trace(&format!("Rejecting request: {}", err.detail));
+            let response = err.response().header("connection", b"close".to_vec());
+            let response_write = response_writer.write(response);
+            write_response(&mut stream, response_write).await?;
+            return Ok(());
+        }
+
+        let client_wants_keep_alive = should_keep_alive(&request);
+        let at_max_requests = max_requests > 0 && requests_on_connection >= max_requests;
+        let server_will_keep_alive = client_wants_keep_alive && !at_max_requests;
+
+        let request_start = Instant::now();
+        let timeout_duration = Duration::from_nanos(config.request_timeout.as_nanos());
+
+        // Call the handler
+        let response = handler(ctx, &mut request).await;
+
+        let mut response = if request_start.elapsed() > timeout_duration {
+            Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
+                fastapi_core::ResponseBody::Bytes(
+                    b"Gateway Timeout: request processing exceeded time limit".to_vec(),
+                ),
+            )
+        } else {
+            response
+        };
+
+        response = if server_will_keep_alive {
+            response.header("connection", b"keep-alive".to_vec())
+        } else {
+            response.header("connection", b"close".to_vec())
+        };
+
+        let response_write = response_writer.write(response);
+        write_response(&mut stream, response_write).await?;
+
+        if let Some(tasks) = App::take_background_tasks(&mut request) {
+            tasks.execute_all().await;
+        }
+
+        if !server_will_keep_alive {
+            return Ok(());
+        }
+    }
+}
+
 /// TCP server with asupersync integration.
 ///
 /// This server manages the lifecycle of connections and requests using
@@ -560,10 +674,12 @@ impl From<ParseError> for ServerError {
 pub struct TcpServer {
     config: ServerConfig,
     request_counter: AtomicU64,
-    /// Current number of active connections.
-    connection_counter: AtomicU64,
+    /// Current number of active connections (wrapped in Arc for concurrent feature).
+    connection_counter: Arc<AtomicU64>,
     /// Whether the server is draining (shutting down gracefully).
-    draining: AtomicBool,
+    draining: Arc<AtomicBool>,
+    /// Handles to spawned connection tasks for graceful shutdown.
+    connection_handles: Mutex<Vec<TaskHandle<()>>>,
 }
 
 impl TcpServer {
@@ -573,8 +689,9 @@ impl TcpServer {
         Self {
             config,
             request_counter: AtomicU64::new(0),
-            connection_counter: AtomicU64::new(0),
-            draining: AtomicBool::new(false),
+            connection_counter: Arc::new(AtomicU64::new(0)),
+            draining: Arc::new(AtomicBool::new(false)),
+            connection_handles: Mutex::new(Vec::new()),
         }
     }
 
@@ -730,6 +847,452 @@ impl TcpServer {
         self.accept_loop(cx, listener, handler).await
     }
 
+    /// Runs the server with a Handler trait object.
+    ///
+    /// This is the recommended way to serve an application that implements
+    /// the [`Handler`] trait (like [`App`]).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_http::TcpServer;
+    /// use fastapi_core::{App, Handler};
+    /// use std::sync::Arc;
+    ///
+    /// let app = App::builder()
+    ///     .get("/", handler_fn)
+    ///     .build();
+    ///
+    /// let server = TcpServer::new(ServerConfig::new("127.0.0.1:8080"));
+    /// let cx = Cx::for_testing();
+    /// server.serve_handler(&cx, Arc::new(app)).await?;
+    /// ```
+    pub async fn serve_handler(
+        &self,
+        cx: &Cx,
+        handler: Arc<dyn fastapi_core::Handler>,
+    ) -> Result<(), ServerError> {
+        let bind_addr = self.config.bind_addr.clone();
+        let listener = TcpListener::bind(bind_addr).await?;
+        let local_addr = listener.local_addr()?;
+
+        cx.trace(&format!("Server listening on {local_addr}"));
+
+        self.accept_loop_handler(cx, listener, handler).await
+    }
+
+    /// Runs the server on a specific listener with a Handler trait object.
+    pub async fn serve_on_handler(
+        &self,
+        cx: &Cx,
+        listener: TcpListener,
+        handler: Arc<dyn fastapi_core::Handler>,
+    ) -> Result<(), ServerError> {
+        self.accept_loop_handler(cx, listener, handler).await
+    }
+
+    /// Accept loop for Handler trait objects.
+    async fn accept_loop_handler(
+        &self,
+        cx: &Cx,
+        listener: TcpListener,
+        handler: Arc<dyn fastapi_core::Handler>,
+    ) -> Result<(), ServerError> {
+        loop {
+            // Check for cancellation at each iteration.
+            if cx.is_cancel_requested() {
+                cx.trace("Server shutdown requested");
+                return Ok(());
+            }
+
+            // Check if draining (graceful shutdown)
+            if self.is_draining() {
+                cx.trace("Server draining, stopping accept loop");
+                return Err(ServerError::Shutdown);
+            }
+
+            // Accept a connection.
+            let (mut stream, peer_addr) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    cx.trace(&format!("Accept error: {e}"));
+                    if is_fatal_accept_error(&e) {
+                        return Err(ServerError::Io(e));
+                    }
+                    continue;
+                }
+            };
+
+            // Check connection limit before processing
+            if !self.try_acquire_connection() {
+                cx.trace(&format!(
+                    "Connection limit reached ({}), rejecting {peer_addr}",
+                    self.config.max_connections
+                ));
+
+                let response = Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header("connection", b"close".to_vec())
+                    .body(fastapi_core::ResponseBody::Bytes(
+                        b"503 Service Unavailable: connection limit reached".to_vec(),
+                    ));
+                let mut writer = crate::response::ResponseWriter::new();
+                let response_bytes = writer.write(response);
+                let _ = write_response(&mut stream, response_bytes).await;
+                continue;
+            }
+
+            // Configure the connection.
+            if self.config.tcp_nodelay {
+                let _ = stream.set_nodelay(true);
+            }
+
+            cx.trace(&format!(
+                "Accepted connection from {peer_addr} ({}/{})",
+                self.current_connections(),
+                if self.config.max_connections == 0 {
+                    "∞".to_string()
+                } else {
+                    self.config.max_connections.to_string()
+                }
+            ));
+
+            let request_id = self.next_request_id();
+            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let ctx = RequestContext::new(request_cx, request_id);
+
+            // Handle the connection with the Handler trait object
+            let result = self
+                .handle_connection_handler(&ctx, stream, peer_addr, &*handler)
+                .await;
+
+            self.release_connection();
+
+            if let Err(e) = result {
+                cx.trace(&format!("Connection error from {peer_addr}: {e}"));
+            }
+        }
+    }
+
+    /// Serves HTTP requests with concurrent connection handling using asupersync Scope.
+    ///
+    /// This method uses `Scope::spawn_registered` for proper structured concurrency,
+    /// ensuring all spawned connection tasks are tracked and can be properly drained
+    /// during shutdown.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - The asupersync context for cancellation and tracing
+    /// * `scope` - A scope for spawning connection tasks
+    /// * `state` - Runtime state for task registration
+    /// * `handler` - The request handler
+    #[allow(clippy::too_many_lines)]
+    pub async fn serve_concurrent<H, Fut>(
+        &self,
+        cx: &Cx,
+        scope: &Scope<'_>,
+        state: &mut RuntimeState,
+        handler: H,
+    ) -> Result<(), ServerError>
+    where
+        H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let bind_addr = self.config.bind_addr.clone();
+        let listener = TcpListener::bind(bind_addr).await?;
+        let local_addr = listener.local_addr()?;
+
+        cx.trace(&format!(
+            "Server listening on {local_addr} (concurrent mode)"
+        ));
+
+        let handler = Arc::new(handler);
+
+        self.accept_loop_concurrent(cx, scope, state, listener, handler)
+            .await
+    }
+
+    /// Accept loop that spawns connection handlers concurrently using Scope.
+    async fn accept_loop_concurrent<H, Fut>(
+        &self,
+        cx: &Cx,
+        scope: &Scope<'_>,
+        state: &mut RuntimeState,
+        listener: TcpListener,
+        handler: Arc<H>,
+    ) -> Result<(), ServerError>
+    where
+        H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        loop {
+            // Check for cancellation or drain
+            if cx.is_cancel_requested() || self.is_draining() {
+                cx.trace("Server shutting down, draining connections");
+                self.drain_connection_tasks(cx).await;
+                return Ok(());
+            }
+
+            // Accept a connection
+            let (mut stream, peer_addr) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    cx.trace(&format!("Accept error: {e}"));
+                    if is_fatal_accept_error(&e) {
+                        return Err(ServerError::Io(e));
+                    }
+                    continue;
+                }
+            };
+
+            // Check connection limit before processing
+            if !self.try_acquire_connection() {
+                cx.trace(&format!(
+                    "Connection limit reached ({}), rejecting {peer_addr}",
+                    self.config.max_connections
+                ));
+
+                let response = Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header("connection", b"close".to_vec())
+                    .body(fastapi_core::ResponseBody::Bytes(
+                        b"503 Service Unavailable: connection limit reached".to_vec(),
+                    ));
+                let mut writer = crate::response::ResponseWriter::new();
+                let response_bytes = writer.write(response);
+                let _ = write_response(&mut stream, response_bytes).await;
+                continue;
+            }
+
+            // Configure the connection
+            if self.config.tcp_nodelay {
+                let _ = stream.set_nodelay(true);
+            }
+
+            cx.trace(&format!(
+                "Accepted connection from {peer_addr} ({}/{})",
+                self.current_connections(),
+                if self.config.max_connections == 0 {
+                    "∞".to_string()
+                } else {
+                    self.config.max_connections.to_string()
+                }
+            ));
+
+            // Spawn connection task using Scope
+            match self.spawn_connection_task(
+                scope,
+                state,
+                cx,
+                stream,
+                peer_addr,
+                Arc::clone(&handler),
+            ) {
+                Ok(handle) => {
+                    // Store handle for draining
+                    if let Ok(mut handles) = self.connection_handles.lock() {
+                        handles.push(handle);
+                    }
+                    // Periodically clean up completed handles
+                    self.cleanup_completed_handles();
+                }
+                Err(e) => {
+                    cx.trace(&format!("Failed to spawn connection task: {e:?}"));
+                    self.release_connection();
+                }
+            }
+        }
+    }
+
+    /// Spawns a connection handler task using Scope::spawn_registered.
+    fn spawn_connection_task<H, Fut>(
+        &self,
+        scope: &Scope<'_>,
+        state: &mut RuntimeState,
+        cx: &Cx,
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+        handler: Arc<H>,
+    ) -> Result<TaskHandle<()>, SpawnError>
+    where
+        H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let config = self.config.clone();
+        let request_id = self.next_request_id();
+        let connection_counter = Arc::clone(&self.connection_counter);
+
+        scope.spawn_registered(state, cx, move |_task_cx| async move {
+            let result =
+                handle_connection_inner(request_id, stream, peer_addr, &config, &*handler).await;
+
+            // Release connection slot (always, regardless of success/failure)
+            connection_counter.fetch_sub(1, Ordering::Relaxed);
+
+            if let Err(e) = result {
+                // Log error - in production this would use proper logging
+                eprintln!("Connection error from {peer_addr}: {e}");
+            }
+        })
+    }
+
+    /// Removes completed task handles from the tracking vector.
+    fn cleanup_completed_handles(&self) {
+        if let Ok(mut handles) = self.connection_handles.lock() {
+            handles.retain(|handle| !handle.is_finished());
+        }
+    }
+
+    /// Drains all connection tasks during shutdown.
+    async fn drain_connection_tasks(&self, cx: &Cx) {
+        let drain_timeout = self.config.drain_timeout;
+        let start = Instant::now();
+
+        cx.trace(&format!(
+            "Draining {} connection tasks (timeout: {:?})",
+            self.connection_handles.lock().map_or(0, |h| h.len()),
+            drain_timeout
+        ));
+
+        // Wait for all tasks to complete or timeout
+        while start.elapsed() < drain_timeout {
+            let remaining = self
+                .connection_handles
+                .lock()
+                .map_or(0, |h| h.iter().filter(|t| !t.is_finished()).count());
+
+            if remaining == 0 {
+                cx.trace("All connection tasks drained successfully");
+                return;
+            }
+
+            // Yield to allow tasks to make progress
+            asupersync::runtime::yield_now().await;
+        }
+
+        cx.trace(&format!(
+            "Drain timeout reached with {} tasks still running",
+            self.connection_handles
+                .lock()
+                .map_or(0, |h| h.iter().filter(|t| !t.is_finished()).count())
+        ));
+    }
+
+    /// Handles a single connection using the Handler trait.
+    async fn handle_connection_handler(
+        &self,
+        ctx: &RequestContext,
+        mut stream: TcpStream,
+        _peer_addr: SocketAddr,
+        handler: &dyn fastapi_core::Handler,
+    ) -> Result<(), ServerError> {
+        let mut parser = StatefulParser::new().with_limits(self.config.parse_limits.clone());
+        let mut read_buffer = vec![0u8; self.config.read_buffer_size];
+        let mut response_writer = ResponseWriter::new();
+        let mut requests_on_connection: usize = 0;
+        let max_requests = self.config.max_requests_per_connection;
+
+        loop {
+            if ctx.cx().is_cancel_requested() {
+                return Ok(());
+            }
+
+            let parse_result = parser.feed(&[])?;
+
+            let mut request = match parse_result {
+                ParseStatus::Complete { request, .. } => request,
+                ParseStatus::Incomplete => {
+                    let keep_alive_timeout = self.config.keep_alive_timeout;
+
+                    let bytes_read = if keep_alive_timeout.is_zero() {
+                        read_into_buffer(&mut stream, &mut read_buffer).await?
+                    } else {
+                        match read_with_timeout(&mut stream, &mut read_buffer, keep_alive_timeout)
+                            .await
+                        {
+                            Ok(0) => return Ok(()),
+                            Ok(n) => n,
+                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                                ctx.trace(&format!(
+                                    "Keep-alive timeout ({:?}) - closing idle connection",
+                                    keep_alive_timeout
+                                ));
+                                return Err(ServerError::KeepAliveTimeout);
+                            }
+                            Err(e) => return Err(ServerError::Io(e)),
+                        }
+                    };
+
+                    if bytes_read == 0 {
+                        return Ok(());
+                    }
+
+                    match parser.feed(&read_buffer[..bytes_read])? {
+                        ParseStatus::Complete { request, .. } => request,
+                        ParseStatus::Incomplete => continue,
+                    }
+                }
+            };
+
+            requests_on_connection += 1;
+
+            let request_id = self.next_request_id();
+            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let ctx = RequestContext::new(request_cx, request_id);
+
+            if let Err(err) = validate_host_header(&request, &self.config) {
+                ctx.trace(&format!("Rejecting request: {}", err.detail));
+                let response = err.response().header("connection", b"close".to_vec());
+                let response_write = response_writer.write(response);
+                write_response(&mut stream, response_write).await?;
+                return Ok(());
+            }
+
+            let client_wants_keep_alive = should_keep_alive(&request);
+            let at_max_requests = max_requests > 0 && requests_on_connection >= max_requests;
+            let server_will_keep_alive = client_wants_keep_alive && !at_max_requests;
+
+            let request_start = Instant::now();
+            let timeout_duration = Duration::from_nanos(self.config.request_timeout.as_nanos());
+
+            // Call the Handler trait's call method
+            let response = handler.call(&ctx, &mut request).await;
+
+            let mut response = if request_start.elapsed() > timeout_duration {
+                Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
+                    fastapi_core::ResponseBody::Bytes(
+                        b"Gateway Timeout: request processing exceeded time limit".to_vec(),
+                    ),
+                )
+            } else {
+                response
+            };
+
+            response = if server_will_keep_alive {
+                response.header("connection", b"keep-alive".to_vec())
+            } else {
+                response.header("connection", b"close".to_vec())
+            };
+
+            let response_write = response_writer.write(response);
+            write_response(&mut stream, response_write).await?;
+
+            if let Some(tasks) = App::take_background_tasks(&mut request) {
+                tasks.execute_all().await;
+            }
+
+            if !server_will_keep_alive {
+                return Ok(());
+            }
+        }
+    }
+
     /// The main accept loop.
     async fn accept_loop<H, Fut>(
         &self,
@@ -808,35 +1371,79 @@ impl TcpServer {
                 }
             ));
 
-            // Handle the connection.
-            // In a full implementation, we would spawn this in a sub-region.
-            // For now, we handle it inline (blocking accept loop).
-            //
-            // TODO: When asupersync has spawn support, use:
-            // scope.spawn(cx, |conn_cx| {
-            //     self.handle_connection(conn_cx, stream, peer_addr, handler.clone())
-            // });
-            let request_id = self.next_request_id();
-            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            // Spawn connection handling concurrently when the feature is enabled.
+            // When asupersync has an accessible spawn API from Cx, we can use that
+            // for proper structured concurrency. For now, use tokio::spawn.
+            #[cfg(feature = "concurrent")]
+            {
+                self.spawn_connection_handler(cx.clone(), stream, peer_addr, Arc::clone(&handler));
+            }
 
-            // Create a RequestContext for this request with the configured timeout budget.
-            // In the full implementation, the Cx would be derived from the connection region.
-            // For now, we use for_testing_with_budget to apply the timeout.
-            let request_cx = Cx::for_testing_with_budget(request_budget);
-            let ctx = RequestContext::new(request_cx, request_id);
+            // Without the concurrent feature, handle inline (blocking accept loop).
+            // This is simpler but means only one connection is handled at a time.
+            #[cfg(not(feature = "concurrent"))]
+            {
+                let request_id = self.next_request_id();
+                let request_budget = Budget::new().with_deadline(self.config.request_timeout);
 
-            // Handle the connection and release the slot when done.
-            let result = self
-                .handle_connection(&ctx, stream, peer_addr, &*handler)
-                .await;
+                // Create a RequestContext for this request with the configured timeout budget.
+                // In the full implementation, the Cx would be derived from the connection region.
+                // For now, we use for_testing_with_budget to apply the timeout.
+                let request_cx = Cx::for_testing_with_budget(request_budget);
+                let ctx = RequestContext::new(request_cx, request_id);
 
-            // Release connection slot (always, regardless of success/failure)
-            self.release_connection();
+                // Handle the connection and release the slot when done.
+                let result = self
+                    .handle_connection(&ctx, stream, peer_addr, &*handler)
+                    .await;
 
-            if let Err(e) = result {
-                cx.trace(&format!("Connection error from {peer_addr}: {e}"));
+                // Release connection slot (always, regardless of success/failure)
+                self.release_connection();
+
+                if let Err(e) = result {
+                    cx.trace(&format!("Connection error from {peer_addr}: {e}"));
+                }
             }
         }
+    }
+
+    /// Spawns a connection handler as a separate task.
+    ///
+    /// This is used when the `concurrent` feature is enabled to handle
+    /// connections concurrently without blocking the accept loop.
+    ///
+    /// When asupersync has an accessible spawn API from Cx, this should be
+    /// migrated to use that for proper structured concurrency.
+    #[cfg(feature = "concurrent")]
+    fn spawn_connection_handler<H, Fut>(
+        &self,
+        server_cx: Cx,
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+        handler: Arc<H>,
+    ) where
+        H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        // Clone values needed for the spawned task
+        let config = self.config.clone();
+        let request_id = self.next_request_id();
+        let connection_counter = Arc::clone(&self.connection_counter);
+
+        // Spawn the connection handler
+        // Note: Using tokio::spawn as a transitional solution.
+        // When asupersync's Scope::spawn is accessible from Cx, migrate to that.
+        tokio::spawn(async move {
+            let result =
+                handle_connection_inner(request_id, stream, peer_addr, &config, &*handler).await;
+
+            // Release connection slot (always, regardless of success/failure)
+            connection_counter.fetch_sub(1, Ordering::Relaxed);
+
+            if let Err(e) = result {
+                server_cx.trace(&format!("Connection error from {peer_addr}: {e}"));
+            }
+        });
     }
 
     /// Handles a single connection.
@@ -1793,10 +2400,7 @@ pub trait AppServeExt {
     ///     Ok(())
     /// }
     /// ```
-    fn serve(
-        self,
-        addr: impl Into<String>,
-    ) -> impl Future<Output = Result<(), ServeError>> + Send;
+    fn serve(self, addr: impl Into<String>) -> impl Future<Output = Result<(), ServeError>> + Send;
 
     /// Starts the HTTP server with custom configuration.
     ///
@@ -1860,14 +2464,12 @@ impl From<ServerError> for ServeError {
 }
 
 impl AppServeExt for App {
-    fn serve(
-        self,
-        addr: impl Into<String>,
-    ) -> impl Future<Output = Result<(), ServeError>> + Send {
+    fn serve(self, addr: impl Into<String>) -> impl Future<Output = Result<(), ServeError>> + Send {
         let config = ServerConfig::new(addr);
         self.serve_with_config(config)
     }
 
+    #[allow(clippy::manual_async_fn)] // Using impl Future for trait compatibility
     fn serve_with_config(
         self,
         config: ServerConfig,
@@ -1889,7 +2491,10 @@ impl AppServeExt for App {
             let server = TcpServer::new(config);
 
             // Wrap app in Arc for sharing with handler
+            // App implements Handler trait, so we can use serve_handler
             let app = Arc::new(self);
+            let handler: Arc<dyn fastapi_core::Handler> =
+                Arc::clone(&app) as Arc<dyn fastapi_core::Handler>;
 
             // Create a root Cx for the server
             let cx = Cx::for_testing();
@@ -1898,16 +2503,10 @@ impl AppServeExt for App {
             let bind_addr = &server.config().bind_addr;
             println!("🚀 Server starting on http://{bind_addr}");
 
-            // Run the server with a handler that delegates to App::handle
-            let app_ref = Arc::clone(&app);
-            let result = server
-                .serve(&cx, move |ctx, req| {
-                    let app = Arc::clone(&app_ref);
-                    async move { app.handle(&ctx, req).await }
-                })
-                .await;
+            // Run the server using the Handler-based serve method
+            let result = server.serve_handler(&cx, handler).await;
 
-            // Run shutdown hooks
+            // Run shutdown hooks (use the original Arc<App>)
             app.run_shutdown_hooks().await;
 
             result.map_err(ServeError::from)

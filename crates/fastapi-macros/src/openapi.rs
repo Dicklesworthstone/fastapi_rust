@@ -21,8 +21,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    Attribute, Data, DeriveInput, Expr, ExprLit, Fields, GenericArgument, Lit, Meta, MetaNameValue,
-    PathArguments, Type, parse_macro_input,
+    Attribute, Data, DataEnum, DeriveInput, Expr, ExprLit, Fields, GenericArgument, Lit, Meta,
+    MetaNameValue, PathArguments, Type, Variant, parse_macro_input,
 };
 
 /// Schema attributes parsed from `#[schema(...)]`.
@@ -158,6 +158,9 @@ fn generate_type_schema(ty: &Type, attrs: &SchemaAttrs) -> TokenStream2 {
                 schema_type: fastapi_openapi::SchemaType::String,
                 format: Some(#format.to_string()),
                 nullable: #nullable,
+                minimum: None,
+                maximum: None,
+                enum_values: None,
             })
         };
     }
@@ -270,6 +273,184 @@ fn generate_type_schema(ty: &Type, attrs: &SchemaAttrs) -> TokenStream2 {
     }
 }
 
+/// Check if all variants in an enum are unit variants (no data).
+fn is_all_unit_variants(data: &DataEnum) -> bool {
+    data.variants
+        .iter()
+        .all(|v| matches!(v.fields, Fields::Unit))
+}
+
+/// Generate schema for a single enum variant.
+/// Uses serde's default external tagging format:
+/// - Unit: "VariantName"
+/// - Tuple: {"VariantName": data} or {"VariantName": [data1, data2]}
+/// - Struct: {"VariantName": {field1: ..., field2: ...}}
+#[allow(clippy::too_many_lines)]
+fn generate_variant_schema(variant: &Variant) -> TokenStream2 {
+    let variant_name = variant.ident.to_string();
+
+    match &variant.fields {
+        Fields::Unit => {
+            // Unit variant serializes as just the string "VariantName"
+            // Generate a const schema for this specific value
+            quote! {
+                fastapi_openapi::Schema::Primitive(fastapi_openapi::PrimitiveSchema {
+                    schema_type: fastapi_openapi::SchemaType::String,
+                    format: None,
+                    nullable: false,
+                    minimum: None,
+                    maximum: None,
+                    enum_values: Some(vec![#variant_name.to_string()]),
+                })
+            }
+        }
+        Fields::Unnamed(fields) => {
+            // Tuple variant: {"VariantName": data} or {"VariantName": [d1, d2]}
+            let field_schemas: Vec<TokenStream2> = fields
+                .unnamed
+                .iter()
+                .map(|f| generate_type_schema(&f.ty, &SchemaAttrs::default()))
+                .collect();
+
+            if field_schemas.len() == 1 {
+                // Single field tuple: {"VariantName": value}
+                let inner_schema = &field_schemas[0];
+                quote! {
+                    {
+                        let mut props = std::collections::HashMap::new();
+                        props.insert(#variant_name.to_string(), #inner_schema);
+                        fastapi_openapi::Schema::Object(fastapi_openapi::ObjectSchema {
+                            title: None,
+                            description: None,
+                            properties: props,
+                            required: vec![#variant_name.to_string()],
+                            additional_properties: Some(Box::new(fastapi_openapi::Schema::Boolean(false))),
+                        })
+                    }
+                }
+            } else {
+                // Multiple fields: {"VariantName": [value1, value2, ...]}
+                // Generate tuple schema as array with prefixItems (OpenAPI 3.1)
+                quote! {
+                    {
+                        let mut props = std::collections::HashMap::new();
+                        // For now, use anyOf for multiple tuple fields
+                        let inner_schemas = vec![#(#field_schemas),*];
+                        props.insert(#variant_name.to_string(), fastapi_openapi::Schema::any_of(inner_schemas));
+                        fastapi_openapi::Schema::Object(fastapi_openapi::ObjectSchema {
+                            title: None,
+                            description: None,
+                            properties: props,
+                            required: vec![#variant_name.to_string()],
+                            additional_properties: Some(Box::new(fastapi_openapi::Schema::Boolean(false))),
+                        })
+                    }
+                }
+            }
+        }
+        Fields::Named(fields) => {
+            // Struct variant: {"VariantName": {field1: ..., field2: ...}}
+            let field_insertions: Vec<TokenStream2> = fields
+                .named
+                .iter()
+                .filter_map(|f| {
+                    let field_name = f.ident.as_ref()?.to_string();
+                    let attrs = SchemaAttrs::from_attributes(&f.attrs);
+                    if attrs.skip {
+                        return None;
+                    }
+                    let schema = generate_type_schema(&f.ty, &attrs);
+                    Some(quote! {
+                        inner_props.insert(#field_name.to_string(), #schema);
+                    })
+                })
+                .collect();
+
+            let required_fields: Vec<String> = fields
+                .named
+                .iter()
+                .filter_map(|f| {
+                    let attrs = SchemaAttrs::from_attributes(&f.attrs);
+                    if attrs.skip || unwrap_option_type(&f.ty).is_some() {
+                        return None;
+                    }
+                    Some(f.ident.as_ref()?.to_string())
+                })
+                .collect();
+
+            quote! {
+                {
+                    let mut inner_props = std::collections::HashMap::new();
+                    #(#field_insertions)*
+                    let inner_required = vec![#(#required_fields.to_string()),*];
+                    let inner_schema = fastapi_openapi::Schema::Object(fastapi_openapi::ObjectSchema {
+                        title: None,
+                        description: None,
+                        properties: inner_props,
+                        required: inner_required,
+                        additional_properties: None,
+                    });
+                    let mut props = std::collections::HashMap::new();
+                    props.insert(#variant_name.to_string(), inner_schema);
+                    fastapi_openapi::Schema::Object(fastapi_openapi::ObjectSchema {
+                        title: None,
+                        description: None,
+                        properties: props,
+                        required: vec![#variant_name.to_string()],
+                        additional_properties: Some(Box::new(fastapi_openapi::Schema::Boolean(false))),
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Generate schema for an enum type.
+fn generate_enum_schema(data: &DataEnum, name_str: &str, attrs: &SchemaAttrs) -> TokenStream2 {
+    let title = attrs.title.as_ref().map_or_else(
+        || quote! { Some(#name_str.to_string()) },
+        |t| quote! { Some(#t.to_string()) },
+    );
+    let description = attrs
+        .description
+        .as_ref()
+        .map_or_else(|| quote! { None }, |d| quote! { Some(#d.to_string()) });
+
+    // Check if all variants are unit variants
+    if is_all_unit_variants(data) {
+        // Simple string enum: { "type": "string", "enum": ["A", "B", "C"] }
+        let variant_names: Vec<String> =
+            data.variants.iter().map(|v| v.ident.to_string()).collect();
+        return quote! {
+            {
+                let mut schema = fastapi_openapi::Schema::string_enum(vec![#(#variant_names.to_string()),*]);
+                // Add title/description if this becomes an enum schema with metadata
+                if let fastapi_openapi::Schema::Enum(ref mut e) = schema {
+                    e.title = #title;
+                    e.description = #description;
+                }
+                schema
+            }
+        };
+    }
+
+    // Mixed/complex enum: generate oneOf
+    let variant_schemas: Vec<TokenStream2> =
+        data.variants.iter().map(generate_variant_schema).collect();
+
+    quote! {
+        {
+            let variants = vec![#(#variant_schemas),*];
+            let mut schema = fastapi_openapi::Schema::one_of(variants);
+            if let fastapi_openapi::Schema::Enum(ref mut e) = schema {
+                e.title = #title;
+                e.description = #description;
+            }
+            schema
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -318,21 +499,13 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
             Fields::Unit => Vec::new(),
         },
         Data::Enum(data) => {
-            // Handle enums as string enums (simple case)
-            // TODO: Generate proper oneOf schema with enum variants
-            let _variants: Vec<String> =
-                data.variants.iter().map(|v| v.ident.to_string()).collect();
+            // Generate enum schema based on variant types
+            let enum_schema = generate_enum_schema(data, &name_str, &struct_attrs);
 
             let expanded = quote! {
                 impl fastapi_openapi::JsonSchema for #name {
                     fn schema() -> fastapi_openapi::Schema {
-                        // For simple enums, generate oneOf with const values
-                        // TODO: Add proper enum variant handling
-                        fastapi_openapi::Schema::Primitive(fastapi_openapi::PrimitiveSchema {
-                            schema_type: fastapi_openapi::SchemaType::String,
-                            format: None,
-                            nullable: false,
-                        })
+                        #enum_schema
                     }
 
                     fn schema_name() -> Option<&'static str> {
