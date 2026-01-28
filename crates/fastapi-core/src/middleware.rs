@@ -2862,6 +2862,7 @@ impl InMemoryRateLimitStore {
         }
     }
 
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
     fn check_token_bucket(
         &self,
         key: &str,
@@ -2869,7 +2870,7 @@ impl InMemoryRateLimitStore {
         refill_rate: f64,
         window: Duration,
     ) -> RateLimitResult {
-        let mut buckets = self.token_buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buckets = self.token_buckets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
 
         let state = buckets
@@ -2914,7 +2915,7 @@ impl InMemoryRateLimitStore {
         max_requests: u64,
         window: Duration,
     ) -> RateLimitResult {
-        let mut windows = self.fixed_windows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut windows = self.fixed_windows.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
 
         let state = windows
@@ -2953,6 +2954,7 @@ impl InMemoryRateLimitStore {
         }
     }
 
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
     fn check_sliding_window(
         &self,
         key: &str,
@@ -2962,7 +2964,7 @@ impl InMemoryRateLimitStore {
         let mut windows = self
             .sliding_windows
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
 
         let state = windows
@@ -3016,6 +3018,7 @@ impl InMemoryRateLimitStore {
     }
 
     /// Check and consume a request against the rate limit.
+    #[allow(clippy::cast_precision_loss)]
     pub fn check(
         &self,
         key: &str,
@@ -3255,12 +3258,9 @@ impl Middleware for RateLimitMiddleware {
     ) -> BoxFuture<'a, ControlFlow> {
         Box::pin(async move {
             // Extract the key for this request
-            let key = match self.key_extractor.extract_key(req) {
-                Some(k) => k,
-                None => {
-                    // No key extracted — skip rate limiting for this request
-                    return ControlFlow::Continue;
-                }
+            let Some(key) = self.key_extractor.extract_key(req) else {
+                // No key extracted — skip rate limiting for this request
+                return ControlFlow::Continue;
             };
 
             // Check the rate limit
@@ -5986,7 +5986,7 @@ mod compression_tests {
     ) -> ControlFlow {
         let ctx = test_context();
         let fut = mw.before(&ctx, req);
-        futures_lite::future::block_on(fut)
+        futures_executor::block_on(fut)
     }
 
     fn run_rate_limit_after(
@@ -5996,7 +5996,7 @@ mod compression_tests {
     ) -> Response {
         let ctx = test_context();
         let fut = mw.after(&ctx, req, resp);
-        futures_lite::future::block_on(fut)
+        futures_executor::block_on(fut)
     }
 
     #[test]

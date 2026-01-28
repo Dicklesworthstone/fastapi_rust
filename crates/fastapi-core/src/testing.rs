@@ -6252,7 +6252,6 @@ impl<'a, H: Handler + 'static> IntegrationTestContext<'a, H> {
 mod test_server_tests {
     use super::*;
     use crate::app::App;
-    use std::io::{Read as _, Write as _};
     use std::net::TcpStream as StdTcpStreamAlias;
 
     fn make_test_app() -> App {
@@ -6275,7 +6274,7 @@ mod test_server_tests {
             })
             .post("/echo", |_ctx: &RequestContext, req: &mut Request| {
                 let body = match req.body() {
-                    Some(Body::Bytes(b)) => b.clone(),
+                    Body::Bytes(b) => b.clone(),
                     _ => Vec::new(),
                 };
                 std::future::ready(
