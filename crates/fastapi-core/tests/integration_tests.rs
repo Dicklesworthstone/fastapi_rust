@@ -6,6 +6,8 @@
 //! - State management across requests
 //! - Error propagation through layers
 
+#![allow(unused_must_use, dead_code)]
+
 use std::sync::Arc;
 
 use fastapi_core::{

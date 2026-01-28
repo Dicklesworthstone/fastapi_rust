@@ -3673,6 +3673,529 @@ impl MockServerOptions {
 }
 
 // =============================================================================
+// Real HTTP Test Server
+// =============================================================================
+
+/// A log entry recorded by [`TestServer`] for each processed request.
+///
+/// This provides structured logging of all HTTP traffic flowing through
+/// the test server, useful for debugging test failures.
+#[derive(Debug, Clone)]
+pub struct TestServerLogEntry {
+    /// HTTP method (e.g., "GET", "POST").
+    pub method: String,
+    /// Request path (e.g., "/api/users").
+    pub path: String,
+    /// Response status code.
+    pub status: u16,
+    /// Time taken to process the request through the App pipeline.
+    pub duration: Duration,
+    /// When this request was received.
+    pub timestamp: std::time::Instant,
+}
+
+/// Configuration for [`TestServer`].
+#[derive(Debug, Clone)]
+pub struct TestServerConfig {
+    /// TCP read timeout for connections (default: 5 seconds).
+    pub read_timeout: Duration,
+    /// Whether to log each request/response (default: true).
+    pub log_requests: bool,
+}
+
+impl Default for TestServerConfig {
+    fn default() -> Self {
+        Self {
+            read_timeout: Duration::from_secs(5),
+            log_requests: true,
+        }
+    }
+}
+
+impl TestServerConfig {
+    /// Creates a new configuration with default values.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the read timeout for TCP connections.
+    #[must_use]
+    pub fn read_timeout(mut self, timeout: Duration) -> Self {
+        self.read_timeout = timeout;
+        self
+    }
+
+    /// Sets whether to log requests.
+    #[must_use]
+    pub fn log_requests(mut self, log: bool) -> Self {
+        self.log_requests = log;
+        self
+    }
+}
+
+/// A real HTTP test server that routes requests through the full App pipeline.
+///
+/// Unlike [`TestClient`] which operates in-process without network I/O,
+/// `TestServer` creates actual TCP connections and processes requests through
+/// the complete HTTP parsing -> App.handle() -> response serialization pipeline.
+///
+/// This enables true end-to-end testing including:
+/// - HTTP request parsing from raw bytes
+/// - Full middleware stack execution
+/// - Route matching and handler dispatch
+/// - Response serialization to HTTP/1.1
+/// - Cookie handling over the wire
+/// - Keep-alive and connection management
+///
+/// # Architecture
+///
+/// ```text
+/// Test Code                        TestServer (background thread)
+///     |                                 |
+///     |-- TCP connect ----------------> |
+///     |-- Send HTTP request ----------> |
+///     |                                 |-- Parse HTTP request
+///     |                                 |-- Create RequestContext
+///     |                                 |-- App.handle(ctx, req)
+///     |                                 |-- Serialize Response
+///     |<-- Receive HTTP response ------ |
+///     |                                 |-- Log entry recorded
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::testing::TestServer;
+/// use fastapi_core::app::App;
+/// use std::io::{Read, Write};
+/// use std::net::TcpStream;
+///
+/// let app = App::builder()
+///     .get("/health", |_, _| async { Response::ok().body_text("OK") })
+///     .build();
+///
+/// let server = TestServer::start(app);
+/// println!("Server running on {}", server.url());
+///
+/// // Connect with any HTTP client
+/// let mut stream = TcpStream::connect(server.addr()).unwrap();
+/// stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+///
+/// let mut buf = vec![0u8; 4096];
+/// let n = stream.read(&mut buf).unwrap();
+/// let response = String::from_utf8_lossy(&buf[..n]);
+/// assert!(response.contains("200 OK"));
+///
+/// // Check server logs
+/// let logs = server.log_entries();
+/// assert_eq!(logs.len(), 1);
+/// assert_eq!(logs[0].path, "/health");
+/// assert_eq!(logs[0].status, 200);
+/// ```
+pub struct TestServer {
+    addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    log_entries: Arc<Mutex<Vec<TestServerLogEntry>>>,
+}
+
+impl TestServer {
+    /// Starts a new test server with the given App on a random available port.
+    ///
+    /// The server begins listening immediately and runs in a background thread.
+    /// It will process requests through the full App pipeline including all
+    /// middleware, routing, and error handling.
+    ///
+    /// # Panics
+    ///
+    /// Panics if binding to a local port fails.
+    #[must_use]
+    pub fn start(app: crate::app::App) -> Self {
+        Self::start_with_config(app, TestServerConfig::default())
+    }
+
+    /// Starts a test server with custom configuration.
+    #[must_use]
+    pub fn start_with_config(app: crate::app::App, config: TestServerConfig) -> Self {
+        let listener =
+            StdTcpListener::bind("127.0.0.1:0").expect("Failed to bind test server to port");
+        let addr = listener.local_addr().expect("Failed to get local address");
+
+        listener
+            .set_nonblocking(true)
+            .expect("Failed to set non-blocking");
+
+        let app = Arc::new(app);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let log_entries = Arc::new(Mutex::new(Vec::new()));
+
+        let shutdown_clone = Arc::clone(&shutdown);
+        let log_entries_clone = Arc::clone(&log_entries);
+        let app_clone = Arc::clone(&app);
+
+        let handle = thread::spawn(move || {
+            Self::server_loop(
+                listener,
+                app_clone,
+                shutdown_clone,
+                log_entries_clone,
+                config,
+            );
+        });
+
+        Self {
+            addr,
+            shutdown,
+            handle: Some(handle),
+            log_entries,
+        }
+    }
+
+    /// The main server loop — accepts connections and processes requests.
+    fn server_loop(
+        listener: StdTcpListener,
+        app: Arc<crate::app::App>,
+        shutdown: Arc<AtomicBool>,
+        log_entries: Arc<Mutex<Vec<TestServerLogEntry>>>,
+        config: TestServerConfig,
+    ) {
+        let request_counter = std::sync::atomic::AtomicU64::new(1);
+
+        loop {
+            if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+
+            match listener.accept() {
+                Ok((stream, _peer)) => {
+                    Self::handle_connection(
+                        stream,
+                        &app,
+                        &log_entries,
+                        &config,
+                        &request_counter,
+                    );
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Handles a single TCP connection, potentially with keep-alive.
+    fn handle_connection(
+        mut stream: StdTcpStream,
+        app: &Arc<crate::app::App>,
+        log_entries: &Arc<Mutex<Vec<TestServerLogEntry>>>,
+        config: &TestServerConfig,
+        request_counter: &std::sync::atomic::AtomicU64,
+    ) {
+        let _ = stream.set_read_timeout(Some(config.read_timeout));
+
+        // Read the request data
+        let mut buffer = vec![0u8; 65536];
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(n) if n > 0 => n,
+            _ => return,
+        };
+        buffer.truncate(bytes_read);
+
+        // Parse the raw HTTP request into method, path, headers, body
+        let Some(parsed) = Self::parse_raw_request(&buffer) else {
+            // Send 400 Bad Request for unparseable requests
+            let bad_request = b"HTTP/1.1 400 Bad Request\r\ncontent-length: 11\r\n\r\nBad Request";
+            let _ = stream.write_all(bad_request);
+            let _ = stream.flush();
+            return;
+        };
+
+        let start_time = std::time::Instant::now();
+
+        // Build a proper Request object
+        let method = match parsed.method.to_uppercase().as_str() {
+            "GET" => Method::Get,
+            "POST" => Method::Post,
+            "PUT" => Method::Put,
+            "DELETE" => Method::Delete,
+            "PATCH" => Method::Patch,
+            "HEAD" => Method::Head,
+            "OPTIONS" => Method::Options,
+            _ => Method::Get,
+        };
+
+        let mut request = Request::new(method, &parsed.path);
+
+        // Set query string if present
+        if let Some(ref query) = parsed.query {
+            request.set_query(Some(query.clone()));
+        }
+
+        // Copy headers
+        for (name, value) in &parsed.headers {
+            request
+                .headers_mut()
+                .insert(name.clone(), value.as_bytes().to_vec());
+        }
+
+        // Set body
+        if !parsed.body.is_empty() {
+            request.set_body(Body::Bytes(parsed.body.clone()));
+        }
+
+        // Create RequestContext with a Cx for testing
+        let cx = Cx::for_testing();
+        let request_id = request_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dependency_overrides = Handler::dependency_overrides(app.as_ref())
+            .unwrap_or_else(|| Arc::new(crate::dependency::DependencyOverrides::new()));
+        let ctx = RequestContext::with_overrides(cx, request_id, dependency_overrides);
+
+        // Execute the App handler synchronously
+        let response = futures_executor::block_on(app.handle(&ctx, &mut request));
+
+        let duration = start_time.elapsed();
+        let status_code = response.status().as_u16();
+
+        // Log the request if configured
+        if config.log_requests {
+            let entry = TestServerLogEntry {
+                method: parsed.method.clone(),
+                path: parsed.path.clone(),
+                status: status_code,
+                duration,
+                timestamp: start_time,
+            };
+            if let Ok(mut entries) = log_entries.lock() {
+                entries.push(entry);
+            }
+        }
+
+        // Serialize the Response to HTTP/1.1 bytes and send
+        let response_bytes = Self::serialize_response(response);
+        let _ = stream.write_all(&response_bytes);
+        let _ = stream.flush();
+    }
+
+    /// Parses raw HTTP request bytes into structured components.
+    fn parse_raw_request(data: &[u8]) -> Option<ParsedRequest> {
+        let text = std::str::from_utf8(data).ok()?;
+        let mut lines = text.lines();
+
+        // Parse request line: "GET /path HTTP/1.1"
+        let request_line = lines.next()?;
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        let method = parts[0].to_string();
+        let full_path = parts[1];
+
+        // Split path and query string
+        let (path, query) = if let Some(idx) = full_path.find('?') {
+            (
+                full_path[..idx].to_string(),
+                Some(full_path[idx + 1..].to_string()),
+            )
+        } else {
+            (full_path.to_string(), None)
+        };
+
+        // Parse headers
+        let mut headers = Vec::new();
+        let mut content_length = 0usize;
+        for line in lines.by_ref() {
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                let name = name.trim().to_string();
+                let value = value.trim().to_string();
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.parse().unwrap_or(0);
+                }
+                headers.push((name, value));
+            }
+        }
+
+        // Parse body
+        let body = if content_length > 0 {
+            if let Some(body_start) = text.find("\r\n\r\n") {
+                let body_start = body_start + 4;
+                if body_start < data.len() {
+                    data[body_start..].to_vec()
+                } else {
+                    Vec::new()
+                }
+            } else if let Some(body_start) = text.find("\n\n") {
+                let body_start = body_start + 2;
+                if body_start < data.len() {
+                    data[body_start..].to_vec()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        Some(ParsedRequest {
+            method,
+            path,
+            query,
+            headers,
+            body,
+        })
+    }
+
+    /// Serializes a Response to HTTP/1.1 wire format bytes.
+    fn serialize_response(response: Response) -> Vec<u8> {
+        let (status, headers, body) = response.into_parts();
+
+        let body_bytes = match body {
+            ResponseBody::Empty => Vec::new(),
+            ResponseBody::Bytes(b) => b,
+            ResponseBody::Stream(_) => {
+                // For streaming responses in test context, we can't easily
+                // collect the stream synchronously. Return empty body.
+                Vec::new()
+            }
+        };
+
+        let mut buf = Vec::with_capacity(512 + body_bytes.len());
+
+        // Status line
+        buf.extend_from_slice(b"HTTP/1.1 ");
+        buf.extend_from_slice(status.as_u16().to_string().as_bytes());
+        buf.extend_from_slice(b" ");
+        buf.extend_from_slice(status.canonical_reason().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+
+        // Headers (skip content-length and transfer-encoding; we'll add our own)
+        for (name, value) in &headers {
+            if name.eq_ignore_ascii_case("content-length")
+                || name.eq_ignore_ascii_case("transfer-encoding")
+            {
+                continue;
+            }
+            buf.extend_from_slice(name.as_bytes());
+            buf.extend_from_slice(b": ");
+            buf.extend_from_slice(value);
+            buf.extend_from_slice(b"\r\n");
+        }
+
+        // Content-Length
+        buf.extend_from_slice(b"content-length: ");
+        buf.extend_from_slice(body_bytes.len().to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+
+        // End of headers
+        buf.extend_from_slice(b"\r\n");
+
+        // Body
+        buf.extend_from_slice(&body_bytes);
+
+        buf
+    }
+
+    /// Returns the socket address the server is listening on.
+    #[must_use]
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Returns the port the server is listening on.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    /// Returns the base URL (e.g., "http://127.0.0.1:12345").
+    #[must_use]
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Returns a URL for the given path.
+    #[must_use]
+    pub fn url_for(&self, path: &str) -> String {
+        let path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
+        format!("http://{}{}", self.addr, path)
+    }
+
+    /// Returns a snapshot of all log entries recorded so far.
+    #[must_use]
+    pub fn log_entries(&self) -> Vec<TestServerLogEntry> {
+        self.log_entries
+            .lock()
+            .expect("log entries mutex poisoned")
+            .clone()
+    }
+
+    /// Returns the number of requests processed.
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        self.log_entries
+            .lock()
+            .expect("log entries mutex poisoned")
+            .len()
+    }
+
+    /// Clears all recorded log entries.
+    pub fn clear_logs(&self) {
+        self.log_entries
+            .lock()
+            .expect("log entries mutex poisoned")
+            .clear();
+    }
+
+    /// Signals the server to shut down gracefully.
+    ///
+    /// The server will stop accepting new connections and the background
+    /// thread will exit. This is also called automatically on drop.
+    pub fn shutdown(&self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Returns true if the server has been signaled to shut down.
+    #[must_use]
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Internal parsed request for TestServer (not the same as Request).
+struct ParsedRequest {
+    method: String,
+    path: String,
+    query: Option<String>,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+// =============================================================================
 // E2E Testing Framework
 // =============================================================================
 
@@ -5718,5 +6241,256 @@ impl<'a, H: Handler + 'static> IntegrationTestContext<'a, H> {
     /// Starts building a request with a custom method.
     pub fn request(&self, method: Method, path: &str) -> RequestBuilder<'_, H> {
         self.client.request(method, path)
+    }
+}
+
+// =============================================================================
+// TestServer Unit Tests
+// =============================================================================
+
+#[cfg(test)]
+mod test_server_tests {
+    use super::*;
+    use crate::app::App;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream as StdTcpStreamAlias;
+
+    fn make_test_app() -> App {
+        App::builder()
+            .get("/health", |_ctx: &RequestContext, _req: &mut Request| {
+                std::future::ready(
+                    Response::ok()
+                        .header("content-type", b"text/plain".to_vec())
+                        .body(ResponseBody::Bytes(b"OK".to_vec())),
+                )
+            })
+            .get("/hello", |_ctx: &RequestContext, _req: &mut Request| {
+                std::future::ready(
+                    Response::ok()
+                        .header("content-type", b"application/json".to_vec())
+                        .body(ResponseBody::Bytes(
+                            br#"{"message":"Hello, World!"}"#.to_vec(),
+                        )),
+                )
+            })
+            .post("/echo", |_ctx: &RequestContext, req: &mut Request| {
+                let body = match req.body() {
+                    Some(Body::Bytes(b)) => b.clone(),
+                    _ => Vec::new(),
+                };
+                std::future::ready(
+                    Response::ok()
+                        .header("content-type", b"application/octet-stream".to_vec())
+                        .body(ResponseBody::Bytes(body)),
+                )
+            })
+            .build()
+    }
+
+    fn send_request(addr: SocketAddr, request: &[u8]) -> String {
+        let mut stream = StdTcpStreamAlias::connect(addr).expect("Failed to connect to TestServer");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set_read_timeout");
+        stream.write_all(request).expect("Failed to write request");
+        stream.flush().expect("Failed to flush");
+
+        let mut buf = vec![0u8; 65536];
+        let n = stream.read(&mut buf).expect("Failed to read response");
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    }
+
+    #[test]
+    fn test_server_starts_and_responds() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        let response = send_request(
+            server.addr(),
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+
+        assert!(response.contains("200 OK"), "Expected 200 OK, got: {response}");
+        assert!(response.contains("OK"), "Expected body 'OK'");
+    }
+
+    #[test]
+    fn test_server_json_response() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        let response = send_request(
+            server.addr(),
+            b"GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+
+        assert!(response.contains("200 OK"));
+        assert!(response.contains("application/json"));
+        assert!(response.contains(r#"{"message":"Hello, World!"}"#));
+    }
+
+    #[test]
+    fn test_server_post_with_body() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        let request = b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\nHello World";
+        let response = send_request(server.addr(), request);
+
+        assert!(response.contains("200 OK"));
+        assert!(response.contains("Hello World"));
+    }
+
+    #[test]
+    fn test_server_logs_requests() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        // Make a request
+        send_request(
+            server.addr(),
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+
+        let logs = server.log_entries();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].method, "GET");
+        assert_eq!(logs[0].path, "/health");
+        assert_eq!(logs[0].status, 200);
+    }
+
+    #[test]
+    fn test_server_request_count() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        assert_eq!(server.request_count(), 0);
+
+        send_request(
+            server.addr(),
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        send_request(
+            server.addr(),
+            b"GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+
+        assert_eq!(server.request_count(), 2);
+    }
+
+    #[test]
+    fn test_server_clear_logs() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        send_request(
+            server.addr(),
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert_eq!(server.request_count(), 1);
+
+        server.clear_logs();
+        assert_eq!(server.request_count(), 0);
+    }
+
+    #[test]
+    fn test_server_url_helpers() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        assert!(server.url().starts_with("http://127.0.0.1:"));
+        assert!(server.url_for("/health").ends_with("/health"));
+        assert!(server.url_for("health").ends_with("/health"));
+        assert!(server.port() > 0);
+    }
+
+    #[test]
+    fn test_server_shutdown() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+        let addr = server.addr();
+
+        // Server should respond before shutdown
+        let response = send_request(
+            addr,
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(response.contains("200 OK"));
+
+        // Signal shutdown
+        server.shutdown();
+        assert!(server.is_shutdown());
+    }
+
+    #[test]
+    fn test_server_config_no_logging() {
+        let app = make_test_app();
+        let config = TestServerConfig::new().log_requests(false);
+        let server = TestServer::start_with_config(app, config);
+
+        send_request(
+            server.addr(),
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+
+        // With logging disabled, no log entries should be recorded
+        assert_eq!(server.request_count(), 0);
+    }
+
+    #[test]
+    fn test_server_bad_request() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        // Send garbage data
+        let response = send_request(server.addr(), b"NOT_HTTP_AT_ALL");
+
+        assert!(response.contains("400 Bad Request"));
+    }
+
+    #[test]
+    fn test_server_content_length_header() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        let response = send_request(
+            server.addr(),
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+
+        // Response should include content-length
+        assert!(response.contains("content-length: 2"), "Expected content-length: 2, got: {response}");
+    }
+
+    #[test]
+    fn test_server_multiple_requests_sequential() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        for _ in 0..5 {
+            let response = send_request(
+                server.addr(),
+                b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            );
+            assert!(response.contains("200 OK"));
+        }
+
+        assert_eq!(server.request_count(), 5);
+    }
+
+    #[test]
+    fn test_server_log_entry_has_timing() {
+        let app = make_test_app();
+        let server = TestServer::start(app);
+
+        send_request(
+            server.addr(),
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+
+        let logs = server.log_entries();
+        assert_eq!(logs.len(), 1);
+        // Duration should be non-zero but reasonable (under 1 second)
+        assert!(logs[0].duration < Duration::from_secs(1));
     }
 }

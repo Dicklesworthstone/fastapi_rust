@@ -779,6 +779,7 @@ impl Default for Parser {
 
 /// Result of an incremental parse attempt.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ParseStatus {
     /// Parsing completed with a request and bytes consumed.
     Complete { request: Request, consumed: usize },

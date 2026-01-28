@@ -12,13 +12,8 @@
 
 use crate::mode::OutputMode;
 use crate::themes::FastApiTheme;
-use std::collections::HashMap;
-use std::fmt::Write;
-
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
-const ANSI_DIM: &str = "\x1b[2m";
-const ANSI_ITALIC: &str = "\x1b[3m";
 
 /// An OpenAPI endpoint for display.
 #[derive(Debug, Clone)]
@@ -188,7 +183,7 @@ impl SchemaType {
             Self::Object { properties, .. } => format!("object{{{}}}", properties.len()),
             Self::Ref { name } => format!("${name}"),
             Self::AnyOf { options } => {
-                let types: Vec<_> = options.iter().map(|o| o.short_description()).collect();
+                let types: Vec<_> = options.iter().map(SchemaType::short_description).collect();
                 types.join(" | ")
             }
             Self::Null => "null".to_string(),
@@ -312,6 +307,7 @@ impl OpenApiSummary {
 
 /// Configuration for OpenAPI display.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OpenApiDisplayConfig {
     /// Show endpoint descriptions.
     pub show_descriptions: bool,
@@ -537,7 +533,7 @@ impl OpenApiDisplay {
 
     fn render_summary_rich(&self, summary: &OpenApiSummary) -> String {
         let muted = self.theme.muted.to_ansi_fg();
-        let accent = self.theme.accent.to_ansi_fg();
+        let _accent = self.theme.accent.to_ansi_fg();
         let border = self.theme.border.to_ansi_fg();
         let header_style = self.theme.header.to_ansi_fg();
         let success = self.theme.success.to_ansi_fg();
@@ -617,14 +613,16 @@ impl OpenApiDisplay {
             let summary_text = endpoint
                 .summary
                 .as_ref()
-                .map(|s| {
-                    if s.len() > summary_width {
-                        format!("{}...", &s[..summary_width - 3])
-                    } else {
-                        s.clone()
-                    }
-                })
-                .unwrap_or_else(|| "-".to_string());
+                .map_or_else(
+                    || "-".to_string(),
+                    |s| {
+                        if s.len() > summary_width {
+                            format!("{}...", &s[..summary_width - 3])
+                        } else {
+                            s.clone()
+                        }
+                    },
+                );
 
             let deprecated_marker = if endpoint.deprecated {
                 format!(" {muted}⚠{ANSI_RESET}")
@@ -664,6 +662,7 @@ impl OpenApiDisplay {
         }
     }
 
+    #[allow(clippy::self_only_used_in_recursion)]
     fn render_schema_plain(
         &self,
         schema: &SchemaType,

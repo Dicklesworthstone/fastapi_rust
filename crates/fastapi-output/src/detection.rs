@@ -143,15 +143,9 @@ pub fn detect_environment() -> DetectionResult {
 
 /// Check for override environment variables.
 fn check_overrides() -> Option<OverrideMode> {
-    if env::var("FASTAPI_AGENT_MODE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+    if env::var("FASTAPI_AGENT_MODE").is_ok_and(|v| v == "1") {
         Some(OverrideMode::ForceAgent)
-    } else if env::var("FASTAPI_HUMAN_MODE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+    } else if env::var("FASTAPI_HUMAN_MODE").is_ok_and(|v| v == "1") {
         Some(OverrideMode::ForceHuman)
     } else {
         None
@@ -160,7 +154,7 @@ fn check_overrides() -> Option<OverrideMode> {
 
 /// Check for FORCE_COLOR override.
 fn force_color_enabled() -> bool {
-    env::var("FORCE_COLOR").map(|v| v != "0").unwrap_or(false)
+    env::var("FORCE_COLOR").is_ok_and(|v| v != "0")
 }
 
 /// Check for known agent environment variables.

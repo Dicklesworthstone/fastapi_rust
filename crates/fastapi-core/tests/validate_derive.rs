@@ -10,6 +10,11 @@
 //! - nested - Nested struct validation
 //! - multiple_of - Divisibility check
 
+// Allow clippy lints that arise from derive macro generated code or test conventions
+#![allow(clippy::similar_names)]
+#![allow(clippy::trivially_copy_pass_by_ref)]
+#![allow(clippy::ref_option_ref)]
+
 use fastapi_macros::Validate;
 
 // ============================================================================
@@ -444,7 +449,7 @@ fn test_nested_valid() {
 fn test_nested_invalid() {
     let invalid = Outer {
         inner: Inner {
-            name: "".to_string(),
+            name: String::new(),
         },
     };
     let result = invalid.validate();
@@ -568,6 +573,7 @@ fn test_vec_length_too_many_invalid() {
 // ============================================================================
 
 #[derive(Validate)]
+#[allow(dead_code)]
 struct NoValidation {
     name: String,
     age: i32,
@@ -576,7 +582,7 @@ struct NoValidation {
 #[test]
 fn test_no_validation_always_valid() {
     let valid = NoValidation {
-        name: "".to_string(), // Even empty is valid - no constraints
+        name: String::new(), // Even empty is valid - no constraints
         age: -1,              // Even negative is valid - no constraints
     };
     assert!(valid.validate().is_ok());
@@ -618,7 +624,7 @@ struct LengthZeroMinTest {
 fn test_length_min_zero_allows_empty() {
     // min = 0 means empty string is valid
     let valid = LengthZeroMinTest {
-        value: "".to_string(),
+        value: String::new(),
     };
     assert!(valid.validate().is_ok());
 }
@@ -639,7 +645,7 @@ fn test_length_min_one_boundary() {
 
     // Empty string should fail
     let invalid = LengthOneMinTest {
-        value: "".to_string(),
+        value: String::new(),
     };
     assert!(invalid.validate().is_err());
 }
@@ -832,7 +838,7 @@ fn test_deeply_nested_invalid() {
     let invalid = Level1 {
         level2: Level2 {
             level3: Level3 {
-                data: "".to_string(),
+                data: String::new(),
             },
         },
     };
@@ -1038,7 +1044,7 @@ fn validate_username(value: &str) -> Result<(), String> {
     if value
         .chars()
         .next()
-        .map(|c| c.is_alphabetic())
+        .map(char::is_alphabetic)
         .unwrap_or(false)
     {
         Ok(())
@@ -1115,13 +1121,13 @@ fn test_real_world_multiple_issues() {
 // VEC WITH NESTED VALIDATION THROUGH CUSTOM VALIDATOR
 // ============================================================================
 
-fn validate_tags(tags: &Vec<String>) -> Result<(), String> {
+fn validate_tags(tags: &[String]) -> Result<(), String> {
     for (i, tag) in tags.iter().enumerate() {
         if tag.is_empty() {
-            return Err(format!("Tag at index {} cannot be empty", i));
+            return Err(format!("Tag at index {i} cannot be empty"));
         }
         if tag.len() > 20 {
-            return Err(format!("Tag at index {} is too long (max 20 chars)", i));
+            return Err(format!("Tag at index {i} is too long (max 20 chars)"));
         }
     }
     Ok(())
@@ -1150,7 +1156,7 @@ fn test_vec_items_custom_validation_valid() {
 fn test_vec_items_custom_validation_empty_tag() {
     let invalid = TaggedItem {
         name: "My Item".to_string(),
-        tags: vec!["rust".to_string(), "".to_string()], // empty tag
+        tags: vec!["rust".to_string(), String::new()], // empty tag
     };
     assert!(invalid.validate().is_err());
 }

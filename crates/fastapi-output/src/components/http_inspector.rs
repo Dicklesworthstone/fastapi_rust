@@ -19,8 +19,6 @@
 
 use crate::mode::OutputMode;
 use crate::themes::FastApiTheme;
-use std::collections::HashMap;
-use std::fmt::Write;
 use std::time::Duration;
 
 const ANSI_RESET: &str = "\x1b[0m";
@@ -419,6 +417,7 @@ impl RequestInspector {
         lines.join("\n")
     }
 
+    #[allow(clippy::too_many_lines)]
     fn inspect_rich(&self, info: &RequestInfo) -> String {
         let method_color = self.method_color(&info.method);
         let muted = self.theme.muted.to_ansi_fg();
@@ -500,9 +499,7 @@ impl RequestInspector {
                     name.clone()
                 };
                 lines.push(format!(
-                    "{border}│{ANSI_RESET}   {accent}{:width$}{ANSI_RESET}: {value}",
-                    truncated_name,
-                    width = max_name_len
+                    "{border}│{ANSI_RESET}   {accent}{truncated_name:max_name_len$}{ANSI_RESET}: {value}",
                 ));
             }
         }
@@ -747,9 +744,7 @@ impl ResponseInspector {
                     name.clone()
                 };
                 lines.push(format!(
-                    "{border}│{ANSI_RESET}   {accent}{:width$}{ANSI_RESET}: {value}",
-                    truncated_name,
-                    width = max_name_len
+                    "{border}│{ANSI_RESET}   {accent}{truncated_name:max_name_len$}{ANSI_RESET}: {value}",
                 ));
             }
         }
@@ -800,6 +795,7 @@ impl ResponseInspector {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn status_icon(&self, status: u16) -> &'static str {
         match status {
             100..=199 => "ℹ",

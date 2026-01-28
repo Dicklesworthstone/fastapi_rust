@@ -16,9 +16,6 @@ use std::fmt::Write;
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
-const ANSI_DIM: &str = "\x1b[2m";
-const ANSI_ITALIC: &str = "\x1b[3m";
-const ANSI_UNDERLINE: &str = "\x1b[4m";
 
 /// A command-line argument or option.
 #[derive(Debug, Clone)]
@@ -345,7 +342,7 @@ impl HelpDisplay {
         // Header
         let mut header = help.name.clone();
         if let Some(version) = &help.version {
-            header.push_str(&format!(" {version}"));
+            let _ = write!(header, " {version}");
         }
         lines.push(header);
 
@@ -390,13 +387,13 @@ impl HelpDisplay {
 
                 if self.show_defaults {
                     if let Some(default) = &arg.default {
-                        line.push_str(&format!(" [default: {default}]"));
+                        let _ = write!(line, " [default: {default}]");
                     }
                 }
 
                 if self.show_env_vars {
                     if let Some(env) = &arg.env_var {
-                        line.push_str(&format!(" [env: {env}]"));
+                        let _ = write!(line, " [env: {env}]");
                     }
                 }
 
@@ -455,7 +452,7 @@ impl HelpDisplay {
         // Header
         let mut header_line = format!("{header}{ANSI_BOLD}{}{ANSI_RESET}", help.name);
         if let Some(version) = &help.version {
-            header_line.push_str(&format!(" {muted}{version}{ANSI_RESET}"));
+            let _ = write!(header_line, " {muted}{version}{ANSI_RESET}");
         }
         lines.push(header_line);
 
@@ -486,7 +483,7 @@ impl HelpDisplay {
                     .map(|v| format!(" {accent}{v}{ANSI_RESET}"))
                     .unwrap_or_default();
 
-                let mut line = format!("    {success}{name}{ANSI_RESET}{value_part}");
+                let line = format!("    {success}{name}{ANSI_RESET}{value_part}");
                 lines.push(line);
                 lines.push(format!("        {muted}{}{ANSI_RESET}", arg.description));
 
@@ -514,6 +511,7 @@ impl HelpDisplay {
         lines.join("\n")
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_rich(&self, help: &HelpInfo) -> String {
         let muted = self.theme.muted.to_ansi_fg();
         let accent = self.theme.accent.to_ansi_fg();
@@ -531,11 +529,11 @@ impl HelpDisplay {
         // Name and version
         let mut name_line = format!("{ANSI_BOLD}{}{ANSI_RESET}", help.name);
         if let Some(version) = &help.version {
-            name_line.push_str(&format!(" {muted}v{version}{ANSI_RESET}"));
+            let _ = write!(name_line, " {muted}v{version}{ANSI_RESET}");
         }
         let name_pad = (title_width
             - help.name.len()
-            - help.version.as_ref().map(|v| v.len() + 2).unwrap_or(0))
+            - help.version.as_ref().map_or(0, |v| v.len() + 2))
             / 2;
         lines.push(format!(
             "{border}│{ANSI_RESET}{}{}{}",
@@ -545,7 +543,7 @@ impl HelpDisplay {
                 title_width
                     - name_pad
                     - help.name.len()
-                    - help.version.as_ref().map(|v| v.len() + 2).unwrap_or(0)
+                    - help.version.as_ref().map_or(0, |v| v.len() + 2)
             )
         ));
 

@@ -526,14 +526,14 @@ mod tests {
     #[test]
     fn test_wide_tree() {
         let children = (0..5)
-            .map(|i| DependencyNode::new(format!("Child{}", i)))
+            .map(|i| DependencyNode::new(format!("Child{i}")))
             .collect();
         let roots = vec![DependencyNode::new("Root").children(children)];
         let display = DependencyTreeDisplay::new(OutputMode::Plain, roots);
         let output = display.render();
 
         for i in 0..5 {
-            assert_contains(&output, &format!("Child{}", i));
+            assert_contains(&output, &format!("Child{i}"));
         }
     }
 

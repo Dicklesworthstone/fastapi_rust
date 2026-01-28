@@ -450,7 +450,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "start must be <= end")]
     fn byte_range_invalid() {
-        ByteRange::new(500, 100);
+        let _ = ByteRange::new(500, 100);
     }
 
     // =========================================================================

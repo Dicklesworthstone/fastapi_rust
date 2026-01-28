@@ -325,11 +325,11 @@ impl MultipartParser {
 
             // Check if this is the final boundary (--boundary--)
             let boundary_end = pos + self.boundary.len();
-            if boundary_end + 2 <= body.len() {
-                if body[boundary_end..boundary_end + 2] == *b"--" {
-                    // End of multipart data
-                    break;
-                }
+            if boundary_end + 2 <= body.len()
+                && body[boundary_end..boundary_end + 2] == *b"--"
+            {
+                // End of multipart data
+                break;
             }
 
             // Skip boundary and CRLF
@@ -458,6 +458,7 @@ impl MultipartParser {
     }
 
     /// Find CRLF in data starting from position.
+    #[allow(clippy::unused_self)]
     fn find_crlf(&self, data: &[u8], start: usize) -> Result<usize, MultipartError> {
         for i in start..data.len().saturating_sub(1) {
             if data[i..i + 2] == *b"\r\n" {

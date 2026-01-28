@@ -1,5 +1,8 @@
 //! Integration tests for enum schema generation with the JsonSchema derive macro.
 
+// Enum variants are used by the JsonSchema derive macro, not directly in Rust code
+#![allow(dead_code)]
+
 use fastapi_macros::JsonSchema;
 use fastapi_openapi::JsonSchema as JsonSchemaTrait;
 

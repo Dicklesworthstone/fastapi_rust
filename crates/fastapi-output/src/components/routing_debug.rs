@@ -18,13 +18,10 @@
 
 use crate::mode::OutputMode;
 use crate::themes::FastApiTheme;
-use std::collections::HashMap;
-use std::fmt::Write;
 use std::time::Duration;
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
-const ANSI_DIM: &str = "\x1b[2m";
 
 /// Result of a route matching attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,6 +426,7 @@ impl RoutingDebug {
         lines.join("\n")
     }
 
+    #[allow(clippy::too_many_lines)]
     fn format_rich(&self, info: &RoutingDebugInfo) -> String {
         let muted = self.theme.muted.to_ansi_fg();
         let accent = self.theme.accent.to_ansi_fg();

@@ -97,9 +97,11 @@ pub use extract::{
     snake_to_header_case,
 };
 pub use middleware::{
-    AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, CsrfConfig, CsrfMiddleware,
-    CsrfMode, CsrfToken, Handler, Layer, Layered, Middleware, MiddlewareStack, NoopMiddleware,
-    OriginPattern, PathPrefixFilter, ReferrerPolicy, RequestId, RequestIdConfig,
+    AddResponseHeader, BoxFuture, CompositeKeyExtractor, ControlFlow, Cors, CorsConfig, CsrfConfig,
+    CsrfMiddleware, CsrfMode, CsrfToken, Handler, HeaderKeyExtractor, IpKeyExtractor,
+    KeyExtractor, Layer, Layered, Middleware, MiddlewareStack, NoopMiddleware, OriginPattern,
+    PathKeyExtractor, PathPrefixFilter, RateLimitAlgorithm, RateLimitBuilder, RateLimitConfig,
+    RateLimitMiddleware, RateLimitResult, ReferrerPolicy, RequestId, RequestIdConfig,
     RequestIdMiddleware, RequestResponseLogger, RequireHeader, SecurityHeaders,
     SecurityHeadersConfig, XFrameOptions,
 };

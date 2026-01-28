@@ -272,11 +272,12 @@ fn test_request_logging_performance() {
                 } else {
                     HttpMethod::Get
                 },
-                path: format!("/api/items/{}", i),
+                path: format!("/api/items/{i}"),
                 query: None,
                 status: if i % 10 == 0 { 500 } else { 200 },
                 timing: Some(ResponseTiming::new(Duration::from_micros(
-                    (i % 100) as u64 * 100,
+                    #[allow(clippy::cast_sign_loss)]
+                    { (i % 100) as u64 * 100 },
                 ))),
                 client_ip: Some("127.0.0.1".to_string()),
                 request_id: None,
@@ -290,8 +291,7 @@ fn test_request_logging_performance() {
         // Should complete 1000 log entries in under 100ms
         assert!(
             elapsed < Duration::from_millis(100),
-            "Logging 1000 entries took {:?}, expected < 100ms",
-            elapsed
+            "Logging 1000 entries took {elapsed:?}, expected < 100ms",
         );
     });
 }

@@ -2733,6 +2733,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn converter_convert_float_valid() {
         let result = Converter::Float.convert("3.14", "val");
         assert!(result.is_ok());
@@ -2812,8 +2813,11 @@ mod tests {
         assert_eq!(val.into_string(), None);
 
         // Float variant
+        #[allow(clippy::approx_constant)]
         let val = ParamValue::Float(3.14);
-        assert_eq!(val.as_float(), Some(3.14));
+        #[allow(clippy::approx_constant)]
+        let expected_pi = Some(3.14);
+        assert_eq!(val.as_float(), expected_pi);
         assert_eq!(val.as_int(), None);
         assert_eq!(val.into_string(), None);
 

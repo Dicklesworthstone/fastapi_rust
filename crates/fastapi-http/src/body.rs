@@ -1097,12 +1097,11 @@ where
                             self.consume(2);
                             self.state = AsyncChunkedState::ChunkSize;
                             continue;
-                        } else {
-                            self.state = AsyncChunkedState::Error;
-                            return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
-                                "expected CRLF after chunk data".to_string(),
-                            ))));
                         }
+                        self.state = AsyncChunkedState::Error;
+                        return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                            "expected CRLF after chunk data".to_string(),
+                        ))));
                     }
 
                     // Need more data
@@ -1733,7 +1732,7 @@ mod tests {
                 Poll::Ready(Some(Ok(chunk))) => collected.extend_from_slice(&chunk),
                 Poll::Ready(Some(Err(e))) => panic!("unexpected error: {e}"),
                 Poll::Ready(None) => break,
-                Poll::Pending => continue, // Continue processing
+                Poll::Pending => {} // Continue processing
             }
         }
 

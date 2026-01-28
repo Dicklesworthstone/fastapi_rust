@@ -2683,6 +2683,649 @@ impl Middleware for CompressionMiddleware {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rate Limiting Middleware
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap as StdHashMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
+/// Rate limiting algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitAlgorithm {
+    /// Token bucket: steady refill rate, allows short bursts.
+    TokenBucket,
+    /// Fixed window: resets at the start of each interval.
+    FixedWindow,
+    /// Sliding window: weighted combination of current and previous window.
+    SlidingWindow,
+}
+
+/// Result of a rate limit check.
+#[derive(Debug, Clone)]
+pub struct RateLimitResult {
+    /// Whether the request is allowed.
+    pub allowed: bool,
+    /// Maximum requests per window.
+    pub limit: u64,
+    /// Remaining requests in the current window.
+    pub remaining: u64,
+    /// Seconds until the window resets.
+    pub reset_after_secs: u64,
+}
+
+/// Extracts a rate limit key from a request.
+///
+/// Different extractors allow rate limiting by different criteria:
+/// IP address, API key header, path, or custom logic.
+pub trait KeyExtractor: Send + Sync {
+    /// Extract the key string from the request.
+    ///
+    /// Returns `None` if no key can be extracted (request is not rate-limited).
+    fn extract_key(&self, req: &Request) -> Option<String>;
+}
+
+/// Rate limit by client IP address (from `X-Forwarded-For` or `X-Real-IP` headers).
+///
+/// Falls back to `"unknown"` when no client IP is available.
+#[derive(Debug, Clone)]
+pub struct IpKeyExtractor;
+
+impl KeyExtractor for IpKeyExtractor {
+    fn extract_key(&self, req: &Request) -> Option<String> {
+        // Try X-Forwarded-For first, then X-Real-IP, then fall back
+        if let Some(forwarded) = req.headers().get("x-forwarded-for") {
+            if let Ok(s) = std::str::from_utf8(forwarded) {
+                // Take the first IP (client IP) from the chain
+                if let Some(ip) = s.split(',').next() {
+                    return Some(ip.trim().to_string());
+                }
+            }
+        }
+        if let Some(real_ip) = req.headers().get("x-real-ip") {
+            if let Ok(s) = std::str::from_utf8(real_ip) {
+                return Some(s.trim().to_string());
+            }
+        }
+        Some("unknown".to_string())
+    }
+}
+
+/// Rate limit by a specific header value (e.g., `X-API-Key`).
+#[derive(Debug, Clone)]
+pub struct HeaderKeyExtractor {
+    header_name: String,
+}
+
+impl HeaderKeyExtractor {
+    /// Create a new header key extractor.
+    #[must_use]
+    pub fn new(header_name: impl Into<String>) -> Self {
+        Self {
+            header_name: header_name.into(),
+        }
+    }
+}
+
+impl KeyExtractor for HeaderKeyExtractor {
+    fn extract_key(&self, req: &Request) -> Option<String> {
+        req.headers()
+            .get(&self.header_name)
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .map(str::to_string)
+    }
+}
+
+/// Rate limit by request path.
+#[derive(Debug, Clone)]
+pub struct PathKeyExtractor;
+
+impl KeyExtractor for PathKeyExtractor {
+    fn extract_key(&self, req: &Request) -> Option<String> {
+        Some(req.path().to_string())
+    }
+}
+
+/// A composite key extractor that combines multiple extractors.
+///
+/// Keys from all extractors are joined with `:` to form a composite key.
+/// If any extractor returns `None`, that part is omitted.
+pub struct CompositeKeyExtractor {
+    extractors: Vec<Box<dyn KeyExtractor>>,
+}
+
+impl CompositeKeyExtractor {
+    /// Create a composite key extractor from multiple extractors.
+    #[must_use]
+    pub fn new(extractors: Vec<Box<dyn KeyExtractor>>) -> Self {
+        Self { extractors }
+    }
+}
+
+impl KeyExtractor for CompositeKeyExtractor {
+    fn extract_key(&self, req: &Request) -> Option<String> {
+        let parts: Vec<String> = self
+            .extractors
+            .iter()
+            .filter_map(|e| e.extract_key(req))
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(":"))
+        }
+    }
+}
+
+/// Token bucket state for a single key.
+#[derive(Debug, Clone)]
+struct TokenBucketState {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+/// Fixed window state for a single key.
+#[derive(Debug, Clone)]
+struct FixedWindowState {
+    count: u64,
+    window_start: Instant,
+}
+
+/// Sliding window state for a single key.
+#[derive(Debug, Clone)]
+struct SlidingWindowState {
+    current_count: u64,
+    previous_count: u64,
+    current_window_start: Instant,
+}
+
+/// In-memory rate limit store.
+///
+/// Uses a `HashMap` protected by a `Mutex` for thread-safe access.
+/// Suitable for single-process deployments. For distributed systems,
+/// implement a custom store using Redis or similar.
+pub struct InMemoryRateLimitStore {
+    token_buckets: Mutex<StdHashMap<String, TokenBucketState>>,
+    fixed_windows: Mutex<StdHashMap<String, FixedWindowState>>,
+    sliding_windows: Mutex<StdHashMap<String, SlidingWindowState>>,
+}
+
+impl InMemoryRateLimitStore {
+    /// Create a new in-memory store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            token_buckets: Mutex::new(StdHashMap::new()),
+            fixed_windows: Mutex::new(StdHashMap::new()),
+            sliding_windows: Mutex::new(StdHashMap::new()),
+        }
+    }
+
+    fn check_token_bucket(
+        &self,
+        key: &str,
+        max_tokens: u64,
+        refill_rate: f64,
+        window: Duration,
+    ) -> RateLimitResult {
+        let mut buckets = self.token_buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+
+        let state = buckets
+            .entry(key.to_string())
+            .or_insert_with(|| TokenBucketState {
+                tokens: max_tokens as f64,
+                last_refill: now,
+            });
+
+        // Refill tokens based on elapsed time
+        let elapsed = now.duration_since(state.last_refill);
+        let refill = elapsed.as_secs_f64() * refill_rate;
+        state.tokens = (state.tokens + refill).min(max_tokens as f64);
+        state.last_refill = now;
+
+        if state.tokens >= 1.0 {
+            state.tokens -= 1.0;
+            RateLimitResult {
+                allowed: true,
+                limit: max_tokens,
+                remaining: state.tokens as u64,
+                reset_after_secs: if state.tokens < max_tokens as f64 {
+                    ((max_tokens as f64 - state.tokens) / refill_rate).ceil() as u64
+                } else {
+                    window.as_secs()
+                },
+            }
+        } else {
+            let wait_secs = ((1.0 - state.tokens) / refill_rate).ceil() as u64;
+            RateLimitResult {
+                allowed: false,
+                limit: max_tokens,
+                remaining: 0,
+                reset_after_secs: wait_secs,
+            }
+        }
+    }
+
+    fn check_fixed_window(
+        &self,
+        key: &str,
+        max_requests: u64,
+        window: Duration,
+    ) -> RateLimitResult {
+        let mut windows = self.fixed_windows.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+
+        let state = windows
+            .entry(key.to_string())
+            .or_insert_with(|| FixedWindowState {
+                count: 0,
+                window_start: now,
+            });
+
+        // Check if window has expired
+        let elapsed = now.duration_since(state.window_start);
+        if elapsed >= window {
+            state.count = 0;
+            state.window_start = now;
+        }
+
+        let remaining_time = window
+            .checked_sub(now.duration_since(state.window_start))
+            .unwrap_or(Duration::ZERO);
+
+        if state.count < max_requests {
+            state.count += 1;
+            RateLimitResult {
+                allowed: true,
+                limit: max_requests,
+                remaining: max_requests - state.count,
+                reset_after_secs: remaining_time.as_secs(),
+            }
+        } else {
+            RateLimitResult {
+                allowed: false,
+                limit: max_requests,
+                remaining: 0,
+                reset_after_secs: remaining_time.as_secs(),
+            }
+        }
+    }
+
+    fn check_sliding_window(
+        &self,
+        key: &str,
+        max_requests: u64,
+        window: Duration,
+    ) -> RateLimitResult {
+        let mut windows = self
+            .sliding_windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+
+        let state = windows
+            .entry(key.to_string())
+            .or_insert_with(|| SlidingWindowState {
+                current_count: 0,
+                previous_count: 0,
+                current_window_start: now,
+            });
+
+        // Check if we need to rotate windows
+        let elapsed = now.duration_since(state.current_window_start);
+        if elapsed >= window {
+            // Rotate: current becomes previous
+            state.previous_count = state.current_count;
+            state.current_count = 0;
+            state.current_window_start = now;
+        }
+
+        // Calculate weighted count using the proportion of the previous window
+        // that overlaps with the current sliding window
+        let window_elapsed = now.duration_since(state.current_window_start);
+        let window_fraction = window_elapsed.as_secs_f64() / window.as_secs_f64();
+        let previous_weight = 1.0 - window_fraction;
+        let weighted_count =
+            (state.previous_count as f64 * previous_weight) + state.current_count as f64;
+
+        let remaining_time = window
+            .checked_sub(window_elapsed)
+            .unwrap_or(Duration::ZERO);
+
+        if weighted_count < max_requests as f64 {
+            state.current_count += 1;
+            let new_weighted =
+                (state.previous_count as f64 * previous_weight) + state.current_count as f64;
+            let remaining = (max_requests as f64 - new_weighted).max(0.0) as u64;
+            RateLimitResult {
+                allowed: true,
+                limit: max_requests,
+                remaining,
+                reset_after_secs: remaining_time.as_secs(),
+            }
+        } else {
+            RateLimitResult {
+                allowed: false,
+                limit: max_requests,
+                remaining: 0,
+                reset_after_secs: remaining_time.as_secs(),
+            }
+        }
+    }
+
+    /// Check and consume a request against the rate limit.
+    pub fn check(
+        &self,
+        key: &str,
+        algorithm: RateLimitAlgorithm,
+        max_requests: u64,
+        window: Duration,
+    ) -> RateLimitResult {
+        match algorithm {
+            RateLimitAlgorithm::TokenBucket => {
+                let refill_rate = max_requests as f64 / window.as_secs_f64();
+                self.check_token_bucket(key, max_requests, refill_rate, window)
+            }
+            RateLimitAlgorithm::FixedWindow => {
+                self.check_fixed_window(key, max_requests, window)
+            }
+            RateLimitAlgorithm::SlidingWindow => {
+                self.check_sliding_window(key, max_requests, window)
+            }
+        }
+    }
+}
+
+impl Default for InMemoryRateLimitStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Configuration for the rate limiting middleware.
+#[derive(Clone)]
+pub struct RateLimitConfig {
+    /// Maximum number of requests allowed per window.
+    pub max_requests: u64,
+    /// Time window for the rate limit.
+    pub window: Duration,
+    /// The algorithm to use.
+    pub algorithm: RateLimitAlgorithm,
+    /// Whether to include rate limit headers in responses.
+    pub include_headers: bool,
+    /// Custom message for 429 responses.
+    pub retry_message: String,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_requests: 100,
+            window: Duration::from_secs(60),
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            include_headers: true,
+            retry_message: "Rate limit exceeded. Please retry later.".to_string(),
+        }
+    }
+}
+
+/// Builder for `RateLimitConfig`.
+pub struct RateLimitBuilder {
+    config: RateLimitConfig,
+    key_extractor: Option<Box<dyn KeyExtractor>>,
+}
+
+impl RateLimitBuilder {
+    /// Create a new rate limit builder with default configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: RateLimitConfig::default(),
+            key_extractor: None,
+        }
+    }
+
+    /// Set the maximum number of requests per window.
+    #[must_use]
+    pub fn requests(mut self, max: u64) -> Self {
+        self.config.max_requests = max;
+        self
+    }
+
+    /// Set the time window.
+    #[must_use]
+    pub fn per(mut self, window: Duration) -> Self {
+        self.config.window = window;
+        self
+    }
+
+    /// Shorthand: set the window to the given number of seconds.
+    #[must_use]
+    pub fn per_second(self, secs: u64) -> Self {
+        self.per(Duration::from_secs(secs))
+    }
+
+    /// Shorthand: set the window to the given number of minutes.
+    #[must_use]
+    pub fn per_minute(self, minutes: u64) -> Self {
+        self.per(Duration::from_secs(minutes * 60))
+    }
+
+    /// Shorthand: set the window to the given number of hours.
+    #[must_use]
+    pub fn per_hour(self, hours: u64) -> Self {
+        self.per(Duration::from_secs(hours * 3600))
+    }
+
+    /// Set the rate limiting algorithm.
+    #[must_use]
+    pub fn algorithm(mut self, algo: RateLimitAlgorithm) -> Self {
+        self.config.algorithm = algo;
+        self
+    }
+
+    /// Set the key extractor.
+    #[must_use]
+    pub fn key_extractor(mut self, extractor: impl KeyExtractor + 'static) -> Self {
+        self.key_extractor = Some(Box::new(extractor));
+        self
+    }
+
+    /// Whether to include rate limit headers in responses.
+    #[must_use]
+    pub fn include_headers(mut self, include: bool) -> Self {
+        self.config.include_headers = include;
+        self
+    }
+
+    /// Set the custom message for 429 responses.
+    #[must_use]
+    pub fn retry_message(mut self, msg: impl Into<String>) -> Self {
+        self.config.retry_message = msg.into();
+        self
+    }
+
+    /// Build the rate limiting middleware.
+    #[must_use]
+    pub fn build(self) -> RateLimitMiddleware {
+        let key_extractor = self
+            .key_extractor
+            .unwrap_or_else(|| Box::new(IpKeyExtractor));
+        RateLimitMiddleware {
+            config: self.config,
+            store: Arc::new(InMemoryRateLimitStore::new()),
+            key_extractor: Arc::from(key_extractor),
+        }
+    }
+}
+
+impl Default for RateLimitBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Extension type stored on requests to carry rate limit info to `after` hook.
+#[derive(Debug, Clone)]
+struct RateLimitInfo {
+    result: RateLimitResult,
+}
+
+/// Rate limiting middleware.
+///
+/// Tracks request rates per key and returns 429 Too Many Requests
+/// when a client exceeds the configured limit.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::{RateLimitMiddleware, RateLimitAlgorithm, IpKeyExtractor};
+/// use std::time::Duration;
+///
+/// let rate_limiter = RateLimitMiddleware::builder()
+///     .requests(100)
+///     .per(Duration::from_secs(60))
+///     .algorithm(RateLimitAlgorithm::TokenBucket)
+///     .key_extractor(IpKeyExtractor)
+///     .build();
+///
+/// let app = App::builder()
+///     .middleware(rate_limiter)
+///     .build();
+/// ```
+pub struct RateLimitMiddleware {
+    config: RateLimitConfig,
+    store: Arc<InMemoryRateLimitStore>,
+    key_extractor: Arc<dyn KeyExtractor>,
+}
+
+impl RateLimitMiddleware {
+    /// Create a new rate limiter with default settings (100 requests/minute, token bucket, IP-based).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::builder().build()
+    }
+
+    /// Create a builder for configuring the rate limiter.
+    #[must_use]
+    pub fn builder() -> RateLimitBuilder {
+        RateLimitBuilder::new()
+    }
+
+    /// Format a 429 response body as JSON.
+    fn too_many_requests_body(&self, result: &RateLimitResult) -> Vec<u8> {
+        format!(
+            r#"{{"detail":"{}","retry_after_secs":{}}}"#,
+            self.config.retry_message, result.reset_after_secs
+        )
+        .into_bytes()
+    }
+
+    /// Add rate limit headers to a response.
+    fn add_headers(&self, response: Response, result: &RateLimitResult) -> Response {
+        response
+            .header(
+                "X-RateLimit-Limit",
+                result.limit.to_string().into_bytes(),
+            )
+            .header(
+                "X-RateLimit-Remaining",
+                result.remaining.to_string().into_bytes(),
+            )
+            .header(
+                "X-RateLimit-Reset",
+                result.reset_after_secs.to_string().into_bytes(),
+            )
+    }
+}
+
+impl Default for RateLimitMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Middleware for RateLimitMiddleware {
+    fn before<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> BoxFuture<'a, ControlFlow> {
+        Box::pin(async move {
+            // Extract the key for this request
+            let key = match self.key_extractor.extract_key(req) {
+                Some(k) => k,
+                None => {
+                    // No key extracted — skip rate limiting for this request
+                    return ControlFlow::Continue;
+                }
+            };
+
+            // Check the rate limit
+            let result = self.store.check(
+                &key,
+                self.config.algorithm,
+                self.config.max_requests,
+                self.config.window,
+            );
+
+            if result.allowed {
+                // Store the result for the `after` hook to add headers
+                req.insert_extension(RateLimitInfo {
+                    result,
+                });
+                ControlFlow::Continue
+            } else {
+                // Return 429 Too Many Requests
+                let body = self.too_many_requests_body(&result);
+                let mut response = Response::with_status(crate::response::StatusCode::TOO_MANY_REQUESTS)
+                    .header("Content-Type", b"application/json".to_vec())
+                    .header(
+                        "Retry-After",
+                        result.reset_after_secs.to_string().into_bytes(),
+                    )
+                    .body(crate::response::ResponseBody::Bytes(body));
+
+                if self.config.include_headers {
+                    response = self.add_headers(response, &result);
+                }
+
+                ControlFlow::Break(response)
+            }
+        })
+    }
+
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a Request,
+        response: Response,
+    ) -> BoxFuture<'a, Response> {
+        Box::pin(async move {
+            if !self.config.include_headers {
+                return response;
+            }
+
+            // Retrieve the rate limit info stored in `before`
+            if let Some(info) = req.get_extension::<RateLimitInfo>() {
+                self.add_headers(response, &info.result)
+            } else {
+                response
+            }
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "RateLimit"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// End Rate Limiting Middleware
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5331,5 +5974,457 @@ mod compression_tests {
     fn compression_middleware_name() {
         let middleware = CompressionMiddleware::new();
         assert_eq!(middleware.name(), "Compression");
+    }
+
+    // -----------------------------------------------------------------------
+    // Rate Limiting Middleware Tests
+    // -----------------------------------------------------------------------
+
+    fn run_rate_limit_before(
+        mw: &RateLimitMiddleware,
+        req: &mut Request,
+    ) -> ControlFlow {
+        let ctx = test_context();
+        let fut = mw.before(&ctx, req);
+        futures_lite::future::block_on(fut)
+    }
+
+    fn run_rate_limit_after(
+        mw: &RateLimitMiddleware,
+        req: &Request,
+        resp: Response,
+    ) -> Response {
+        let ctx = test_context();
+        let fut = mw.after(&ctx, req, resp);
+        futures_lite::future::block_on(fut)
+    }
+
+    #[test]
+    fn rate_limit_default_allows_requests() {
+        let mw = RateLimitMiddleware::new();
+        let mut req = Request::new(Method::Get, "/api/test");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"192.168.1.1".to_vec());
+
+        let result = run_rate_limit_before(&mw, &mut req);
+        assert!(result.is_continue(), "first request should be allowed");
+    }
+
+    #[test]
+    fn rate_limit_fixed_window_blocks_after_limit() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(3)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(IpKeyExtractor)
+            .build();
+
+        for i in 0..3 {
+            let mut req = Request::new(Method::Get, "/api/test");
+            req.headers_mut()
+                .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+            let result = run_rate_limit_before(&mw, &mut req);
+            assert!(
+                result.is_continue(),
+                "request {i} should be allowed within limit"
+            );
+        }
+
+        // Fourth request should be blocked
+        let mut req = Request::new(Method::Get, "/api/test");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        let result = run_rate_limit_before(&mw, &mut req);
+        assert!(result.is_break(), "fourth request should be blocked");
+
+        // Verify 429 status
+        if let ControlFlow::Break(resp) = result {
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
+    #[test]
+    fn rate_limit_different_keys_independent() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(2)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(IpKeyExtractor)
+            .build();
+
+        // Two requests from IP A
+        for _ in 0..2 {
+            let mut req = Request::new(Method::Get, "/");
+            req.headers_mut()
+                .insert("x-forwarded-for", b"1.1.1.1".to_vec());
+            assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+        }
+
+        // IP A is now exhausted
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"1.1.1.1".to_vec());
+        assert!(run_rate_limit_before(&mw, &mut req).is_break());
+
+        // IP B should still be fine
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"2.2.2.2".to_vec());
+        assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+    }
+
+    #[test]
+    fn rate_limit_token_bucket_allows_burst() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(5)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::TokenBucket)
+            .key_extractor(IpKeyExtractor)
+            .build();
+
+        // Should allow 5 rapid requests (full bucket)
+        for i in 0..5 {
+            let mut req = Request::new(Method::Get, "/");
+            req.headers_mut()
+                .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+            let result = run_rate_limit_before(&mw, &mut req);
+            assert!(
+                result.is_continue(),
+                "burst request {i} should be allowed"
+            );
+        }
+
+        // 6th request should be blocked (bucket empty)
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        assert!(run_rate_limit_before(&mw, &mut req).is_break());
+    }
+
+    #[test]
+    fn rate_limit_sliding_window_basic() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(3)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::SlidingWindow)
+            .key_extractor(IpKeyExtractor)
+            .build();
+
+        for i in 0..3 {
+            let mut req = Request::new(Method::Get, "/");
+            req.headers_mut()
+                .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+            assert!(
+                run_rate_limit_before(&mw, &mut req).is_continue(),
+                "sliding window request {i} should be allowed"
+            );
+        }
+
+        // Should block once limit reached
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        assert!(run_rate_limit_before(&mw, &mut req).is_break());
+    }
+
+    #[test]
+    fn rate_limit_header_key_extractor() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(2)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(HeaderKeyExtractor::new("x-api-key"))
+            .build();
+
+        // Two requests with same API key
+        for _ in 0..2 {
+            let mut req = Request::new(Method::Get, "/");
+            req.headers_mut()
+                .insert("x-api-key", b"key-abc".to_vec());
+            assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+        }
+
+        // Same key blocked
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-api-key", b"key-abc".to_vec());
+        assert!(run_rate_limit_before(&mw, &mut req).is_break());
+
+        // Different key still allowed
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-api-key", b"key-xyz".to_vec());
+        assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+    }
+
+    #[test]
+    fn rate_limit_path_key_extractor() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(1)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(PathKeyExtractor)
+            .build();
+
+        let mut req = Request::new(Method::Get, "/api/a");
+        assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+
+        // Same path is blocked
+        let mut req = Request::new(Method::Get, "/api/a");
+        assert!(run_rate_limit_before(&mw, &mut req).is_break());
+
+        // Different path is allowed
+        let mut req = Request::new(Method::Get, "/api/b");
+        assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+    }
+
+    #[test]
+    fn rate_limit_no_key_skips_limiting() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(1)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(HeaderKeyExtractor::new("x-api-key"))
+            .build();
+
+        // Request without the header — no key extracted, should pass
+        let mut req = Request::new(Method::Get, "/");
+        assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+
+        // Still passes even with many requests (no key = no limiting)
+        for _ in 0..10 {
+            let mut req = Request::new(Method::Get, "/");
+            assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+        }
+    }
+
+    #[test]
+    fn rate_limit_response_headers_on_success() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(10)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(IpKeyExtractor)
+            .build();
+
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        let cf = run_rate_limit_before(&mw, &mut req);
+        assert!(cf.is_continue());
+
+        let resp = Response::with_status(StatusCode::OK);
+        let resp = run_rate_limit_after(&mw, &req, resp);
+
+        // Verify rate limit headers are present
+        let headers = resp.headers();
+        let has_limit = headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("x-ratelimit-limit"));
+        let has_remaining = headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("x-ratelimit-remaining"));
+        let has_reset = headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("x-ratelimit-reset"));
+
+        assert!(has_limit, "should have X-RateLimit-Limit header");
+        assert!(has_remaining, "should have X-RateLimit-Remaining header");
+        assert!(has_reset, "should have X-RateLimit-Reset header");
+
+        // Check limit value
+        let limit_val = headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("x-ratelimit-limit"))
+            .map(|(_, v)| std::str::from_utf8(v).unwrap().to_string())
+            .unwrap();
+        assert_eq!(limit_val, "10");
+    }
+
+    #[test]
+    fn rate_limit_429_response_has_retry_after() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(1)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(IpKeyExtractor)
+            .build();
+
+        // Consume the single allowed request
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+
+        // Second request should be blocked with 429
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        let result = run_rate_limit_before(&mw, &mut req);
+
+        if let ControlFlow::Break(resp) = result {
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+            // Should have Retry-After header
+            let has_retry = resp
+                .headers()
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("retry-after"));
+            assert!(has_retry, "429 response should have Retry-After header");
+
+            // Should have JSON body
+            let has_ct = resp
+                .headers()
+                .iter()
+                .any(|(n, v)| {
+                    n.eq_ignore_ascii_case("content-type")
+                        && v == b"application/json"
+                });
+            assert!(has_ct, "429 response should have JSON content type");
+        } else {
+            panic!("expected Break(429)");
+        }
+    }
+
+    #[test]
+    fn rate_limit_no_headers_when_disabled() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(10)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(IpKeyExtractor)
+            .include_headers(false)
+            .build();
+
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        assert!(run_rate_limit_before(&mw, &mut req).is_continue());
+
+        let resp = Response::with_status(StatusCode::OK);
+        let resp = run_rate_limit_after(&mw, &req, resp);
+
+        let has_limit = resp
+            .headers()
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("x-ratelimit-limit"));
+        assert!(!has_limit, "should NOT have rate limit headers when disabled");
+    }
+
+    #[test]
+    fn rate_limit_custom_retry_message() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(1)
+            .per(Duration::from_secs(60))
+            .algorithm(RateLimitAlgorithm::FixedWindow)
+            .key_extractor(IpKeyExtractor)
+            .retry_message("Slow down, partner!")
+            .build();
+
+        // Exhaust limit
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        run_rate_limit_before(&mw, &mut req);
+
+        // Check custom message in 429 body
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+        if let ControlFlow::Break(resp) = run_rate_limit_before(&mw, &mut req) {
+            if let ResponseBody::Bytes(body) = resp.body_ref() {
+                let body_str = std::str::from_utf8(body).unwrap();
+                assert!(
+                    body_str.contains("Slow down, partner!"),
+                    "expected custom message in body, got: {body_str}"
+                );
+            } else {
+                panic!("expected Bytes body");
+            }
+        } else {
+            panic!("expected Break(429)");
+        }
+    }
+
+    #[test]
+    fn rate_limit_ip_extractor_x_forwarded_for() {
+        let extractor = IpKeyExtractor;
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"1.2.3.4, 5.6.7.8".to_vec());
+        assert_eq!(extractor.extract_key(&req), Some("1.2.3.4".to_string()));
+    }
+
+    #[test]
+    fn rate_limit_ip_extractor_x_real_ip() {
+        let extractor = IpKeyExtractor;
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-real-ip", b"9.8.7.6".to_vec());
+        assert_eq!(extractor.extract_key(&req), Some("9.8.7.6".to_string()));
+    }
+
+    #[test]
+    fn rate_limit_ip_extractor_fallback() {
+        let extractor = IpKeyExtractor;
+        let req = Request::new(Method::Get, "/");
+        assert_eq!(extractor.extract_key(&req), Some("unknown".to_string()));
+    }
+
+    #[test]
+    fn rate_limit_composite_key_extractor() {
+        let extractor = CompositeKeyExtractor::new(vec![
+            Box::new(IpKeyExtractor),
+            Box::new(PathKeyExtractor),
+        ]);
+
+        let mut req = Request::new(Method::Get, "/api/users");
+        req.headers_mut()
+            .insert("x-forwarded-for", b"10.0.0.1".to_vec());
+
+        let key = extractor.extract_key(&req);
+        assert_eq!(key, Some("10.0.0.1:/api/users".to_string()));
+    }
+
+    #[test]
+    fn rate_limit_builder_defaults() {
+        let mw = RateLimitMiddleware::builder().build();
+        assert_eq!(mw.config.max_requests, 100);
+        assert_eq!(mw.config.window, Duration::from_secs(60));
+        assert_eq!(mw.config.algorithm, RateLimitAlgorithm::TokenBucket);
+        assert!(mw.config.include_headers);
+    }
+
+    #[test]
+    fn rate_limit_builder_per_minute() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(50)
+            .per_minute(2)
+            .algorithm(RateLimitAlgorithm::SlidingWindow)
+            .build();
+        assert_eq!(mw.config.max_requests, 50);
+        assert_eq!(mw.config.window, Duration::from_secs(120));
+        assert_eq!(mw.config.algorithm, RateLimitAlgorithm::SlidingWindow);
+    }
+
+    #[test]
+    fn rate_limit_builder_per_hour() {
+        let mw = RateLimitMiddleware::builder()
+            .requests(1000)
+            .per_hour(1)
+            .build();
+        assert_eq!(mw.config.window, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn rate_limit_middleware_name() {
+        let mw = RateLimitMiddleware::new();
+        assert_eq!(mw.name(), "RateLimit");
+    }
+
+    #[test]
+    fn rate_limit_default_via_default_trait() {
+        let mw = RateLimitMiddleware::default();
+        assert_eq!(mw.config.max_requests, 100);
     }
 }
