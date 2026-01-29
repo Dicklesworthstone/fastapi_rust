@@ -409,8 +409,16 @@ impl MultipartParser {
     /// Find boundary starting from position.
     fn find_boundary_from(&self, data: &[u8], start: usize) -> Result<usize, MultipartError> {
         let boundary = &self.boundary;
+        let boundary_len = boundary.len();
 
-        for i in start..data.len().saturating_sub(boundary.len()) {
+        // Must have enough data for at least one boundary check
+        if data.len() < boundary_len {
+            return Err(MultipartError::UnexpectedEof);
+        }
+
+        // Search up to and including the last position where boundary could fit
+        let end = data.len() - boundary_len + 1;
+        for i in start..end {
             if data[i..].starts_with(boundary) {
                 return Ok(i);
             }
@@ -458,7 +466,14 @@ impl MultipartParser {
     /// Find CRLF in data starting from position.
     #[allow(clippy::unused_self)]
     fn find_crlf(&self, data: &[u8], start: usize) -> Result<usize, MultipartError> {
-        for i in start..data.len().saturating_sub(1) {
+        // Need at least 2 bytes for CRLF
+        if data.len() < 2 {
+            return Err(MultipartError::UnexpectedEof);
+        }
+
+        // Search up to and including the last position where CRLF could fit
+        let end = data.len() - 1;
+        for i in start..end {
             if data[i..i + 2] == *b"\r\n" {
                 return Ok(i);
             }
@@ -490,7 +505,18 @@ fn parse_content_disposition(value: &str) -> Result<(String, Option<String>), Mu
             .strip_prefix("filename=")
             .or_else(|| part.strip_prefix("FILENAME="))
         {
-            filename = Some(unquote(f));
+            let unquoted = unquote(f);
+            // Validate filename to prevent path traversal attacks
+            if unquoted.contains("..")
+                || unquoted.contains('/')
+                || unquoted.contains('\\')
+                || unquoted.contains('\0')
+            {
+                return Err(MultipartError::InvalidContentDisposition {
+                    detail: "filename contains path traversal characters".to_string(),
+                });
+            }
+            filename = Some(unquoted);
         }
     }
 
@@ -504,7 +530,11 @@ fn parse_content_disposition(value: &str) -> Result<(String, Option<String>), Mu
 /// Remove quotes from a string.
 fn unquote(s: &str) -> String {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+    // Need at least 2 characters for paired quotes
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('\'') && s.ends_with('\'')))
+    {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()

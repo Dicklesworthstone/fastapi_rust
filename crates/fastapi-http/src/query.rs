@@ -24,6 +24,13 @@
 
 use std::borrow::Cow;
 
+/// Maximum number of query parameters to parse.
+///
+/// This limit prevents algorithmic complexity DoS attacks where an attacker
+/// sends a query string with thousands of parameters. Parameters beyond this
+/// limit are silently ignored.
+pub const MAX_QUERY_PARAMS: usize = 256;
+
 /// A parsed query string with efficient access to parameters.
 ///
 /// Query strings are parsed lazily - the input is stored and parsed
@@ -148,14 +155,18 @@ impl<'a> QueryString<'a> {
     /// assert_eq!(pairs, vec![("a", "1"), ("b", "2"), ("flag", "")]);
     /// ```
     pub fn pairs(&self) -> impl Iterator<Item = (&'a str, &'a str)> {
-        self.raw.split('&').filter(|s| !s.is_empty()).map(|pair| {
-            if let Some(eq_pos) = pair.find('=') {
-                (&pair[..eq_pos], &pair[eq_pos + 1..])
-            } else {
-                // Key without value: "flag" -> ("flag", "")
-                (pair, "")
-            }
-        })
+        self.raw
+            .split('&')
+            .filter(|s| !s.is_empty())
+            .take(MAX_QUERY_PARAMS) // Limit to prevent DoS
+            .map(|pair| {
+                if let Some(eq_pos) = pair.find('=') {
+                    (&pair[..eq_pos], &pair[eq_pos + 1..])
+                } else {
+                    // Key without value: "flag" -> ("flag", "")
+                    (pair, "")
+                }
+            })
     }
 
     /// Returns an iterator over all key-value pairs, with values percent-decoded.

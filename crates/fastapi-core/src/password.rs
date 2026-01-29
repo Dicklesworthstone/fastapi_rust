@@ -340,46 +340,20 @@ fn read_urandom(len: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Fallback salt generation using entropy mixing (**NOT cryptographically secure**).
+/// Fallback when `/dev/urandom` is unavailable.
 ///
-/// # Security Warning
+/// # Panics
 ///
-/// This fallback uses `DefaultHasher` which is NOT a CSPRNG. It is only used
-/// when `/dev/urandom` is unavailable, which should never happen on Linux/macOS.
-/// The output is fed through SHA-256 for distribution but the entropy source
-/// is fundamentally weak (timestamps, PID, thread ID are predictable).
-fn fallback_salt(len: usize) -> Vec<u8> {
-    eprintln!(
-        "WARNING: /dev/urandom unavailable, using weak entropy for salt generation. \
-         Password hashes generated with this salt may be vulnerable."
+/// Always panics. This function is only called when `/dev/urandom` is unavailable,
+/// which indicates a severely misconfigured or compromised system. Password hashing
+/// MUST use a CSPRNG - there is no safe way to generate salts without one.
+#[cold]
+fn fallback_salt(_len: usize) -> Vec<u8> {
+    panic!(
+        "FATAL: Cryptographically secure random source (/dev/urandom) is unavailable. \
+         Password hashing requires a CSPRNG for salt generation. \
+         Cannot safely generate password hashes without cryptographic entropy."
     );
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let time_seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-
-    let thread_id = format!("{:?}", std::thread::current().id());
-    let pid = std::process::id();
-
-    // Generate enough entropy by hashing diverse inputs through SHA-256
-    let mut entropy = Vec::with_capacity(len + 64);
-    for i in 0u64..=len as u64 / 32 {
-        let mut hasher = DefaultHasher::new();
-        time_seed.hash(&mut hasher);
-        i.hash(&mut hasher);
-        pid.hash(&mut hasher);
-        thread_id.hash(&mut hasher);
-        let h = hasher.finish();
-        // Feed hash output into SHA-256 for better distribution
-        let block = sha256(&h.to_le_bytes());
-        entropy.extend_from_slice(&block);
-    }
-    entropy.truncate(len);
-    entropy
 }
 
 /// Timing-safe byte comparison.
