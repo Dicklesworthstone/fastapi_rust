@@ -2504,7 +2504,7 @@ impl App {
     // Testing Support
     // =========================================================================
 
-    /// Creates a [`TestClient`] for this application.
+    /// Creates a [`crate::TestClient`] for this application.
     ///
     /// The test client provides in-process testing without network overhead,
     /// simulating HTTP requests against the full application stack including
@@ -2536,7 +2536,7 @@ impl App {
         crate::testing::TestClient::new(self)
     }
 
-    /// Creates a [`TestClient`] with a specific seed for deterministic testing.
+    /// Creates a [`crate::TestClient`] with a specific seed for deterministic testing.
     ///
     /// Using the same seed produces reproducible behavior for tests involving
     /// concurrent operations or random elements.

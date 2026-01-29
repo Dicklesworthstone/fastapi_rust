@@ -4183,9 +4183,9 @@ impl TestServer {
     /// Returns a reference to the server's shutdown controller.
     ///
     /// Use this to coordinate graceful shutdown in tests, including:
-    /// - Tracking in-flight requests via [`ShutdownController::track_request`]
-    /// - Registering shutdown hooks via [`ShutdownController::register_hook`]
-    /// - Checking shutdown phase via [`ShutdownController::phase`]
+    /// - Tracking in-flight requests via [`crate::ShutdownController::track_request`]
+    /// - Registering shutdown hooks via [`crate::ShutdownController::register_hook`]
+    /// - Checking shutdown phase via [`crate::ShutdownController::phase`]
     #[must_use]
     pub fn shutdown_controller(&self) -> &crate::shutdown::ShutdownController {
         &self.shutdown_controller
