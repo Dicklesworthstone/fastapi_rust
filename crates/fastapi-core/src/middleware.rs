@@ -4859,6 +4859,120 @@ impl Middleware for CacheControlMiddleware {
 // End Cache Control Middleware
 // ===========================================================================
 
+// ===========================================================================
+// TRACE Method Rejection Middleware (Security)
+// ===========================================================================
+
+/// Middleware that rejects HTTP TRACE requests to prevent Cross-Site Tracing (XST) attacks.
+///
+/// The HTTP TRACE method echoes the request back to the client, which can be exploited
+/// in XSS attacks to steal sensitive headers like Authorization or cookies.
+///
+/// # Security Rationale
+///
+/// - TRACE can expose Authorization headers via XSS attacks
+/// - No legitimate use case in modern APIs
+/// - OWASP recommends disabling TRACE
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::TraceRejectionMiddleware;
+///
+/// let app = App::builder()
+///     .middleware(TraceRejectionMiddleware::new())
+///     .build();
+/// ```
+///
+/// # Behavior
+///
+/// - Returns 405 Method Not Allowed for all TRACE requests
+/// - Logs TRACE attempts as security events (when log_attempts is true)
+/// - Cannot be disabled per-route (intentionally)
+#[derive(Debug, Clone)]
+pub struct TraceRejectionMiddleware {
+    /// Whether to log TRACE attempts as security events.
+    log_attempts: bool,
+}
+
+impl Default for TraceRejectionMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TraceRejectionMiddleware {
+    /// Create a new TRACE rejection middleware with default settings.
+    ///
+    /// By default, logging of TRACE attempts is enabled.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { log_attempts: true }
+    }
+
+    /// Configure whether to log TRACE attempts.
+    ///
+    /// When enabled, each TRACE request is logged as a security event
+    /// including the remote IP (if available) and request path.
+    #[must_use]
+    pub fn log_attempts(mut self, log: bool) -> Self {
+        self.log_attempts = log;
+        self
+    }
+
+    /// Create a response for rejected TRACE requests.
+    fn rejection_response(path: &str) -> Response {
+        let body = format!(
+            r#"{{"detail":"HTTP TRACE method is not allowed","path":"{}"}}"#,
+            path.replace('"', "\\\"")
+        );
+        Response::with_status(crate::response::StatusCode::METHOD_NOT_ALLOWED)
+            .header("Content-Type", b"application/json".to_vec())
+            .header("Allow", b"GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD".to_vec())
+            .body(crate::response::ResponseBody::Bytes(body.into_bytes()))
+    }
+}
+
+impl Middleware for TraceRejectionMiddleware {
+    fn before<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> BoxFuture<'a, ControlFlow> {
+        Box::pin(async move {
+            if req.method() == crate::request::Method::Trace {
+                if self.log_attempts {
+                    // Log as security event
+                    let path = req.path();
+                    let remote_ip = req
+                        .headers()
+                        .get("X-Forwarded-For")
+                        .or_else(|| req.headers().get("X-Real-IP"))
+                        .map(|v| String::from_utf8_lossy(v).to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    eprintln!(
+                        "[SECURITY] TRACE request blocked: path={}, remote_ip={}",
+                        path, remote_ip
+                    );
+                }
+
+                return ControlFlow::Break(Self::rejection_response(req.path()));
+            }
+
+            ControlFlow::Continue
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "TraceRejection"
+    }
+}
+
+// ===========================================================================
+// End TRACE Rejection Middleware
+// ===========================================================================
+
 #[cfg(test)]
 mod cache_control_tests {
     use super::*;
@@ -5076,6 +5190,208 @@ mod cache_control_tests {
         assert!(!is_leap_year(2023)); // Not divisible by 4
     }
 }
+
+// ===========================================================================
+// TRACE Rejection Middleware Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod trace_rejection_tests {
+    use super::*;
+    use crate::request::Method;
+    use crate::response::StatusCode;
+
+    fn test_context() -> RequestContext {
+        RequestContext::new(asupersync::Cx::for_testing(), 1)
+    }
+
+    fn run_before(mw: &TraceRejectionMiddleware, req: &mut Request) -> ControlFlow {
+        let ctx = test_context();
+        let fut = mw.before(&ctx, req);
+        asupersync::block_on(fut)
+    }
+
+    #[test]
+    fn trace_request_rejected() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Trace, "/");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            }
+            ControlFlow::Continue => panic!("TRACE request should have been rejected"),
+        }
+    }
+
+    #[test]
+    fn trace_request_with_path() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Trace, "/api/users/123");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            }
+            ControlFlow::Continue => panic!("TRACE request should have been rejected"),
+        }
+    }
+
+    #[test]
+    fn get_request_allowed() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Get, "/");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("GET request should be allowed"),
+        }
+    }
+
+    #[test]
+    fn post_request_allowed() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Post, "/api/users");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("POST request should be allowed"),
+        }
+    }
+
+    #[test]
+    fn put_request_allowed() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Put, "/api/users/1");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("PUT request should be allowed"),
+        }
+    }
+
+    #[test]
+    fn delete_request_allowed() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Delete, "/api/users/1");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("DELETE request should be allowed"),
+        }
+    }
+
+    #[test]
+    fn patch_request_allowed() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Patch, "/api/users/1");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("PATCH request should be allowed"),
+        }
+    }
+
+    #[test]
+    fn options_request_allowed() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Options, "/api/users");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("OPTIONS request should be allowed"),
+        }
+    }
+
+    #[test]
+    fn head_request_allowed() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Head, "/");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("HEAD request should be allowed"),
+        }
+    }
+
+    #[test]
+    fn response_includes_allow_header() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Trace, "/");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                let allow_header = response.headers().get(b"Allow");
+                assert!(allow_header.is_some(), "Response should include Allow header");
+            }
+            ControlFlow::Continue => panic!("TRACE request should have been rejected"),
+        }
+    }
+
+    #[test]
+    fn response_has_json_content_type() {
+        let mw = TraceRejectionMiddleware::new();
+        let mut req = Request::new(Method::Trace, "/");
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                let ct_header = response.headers().get(b"Content-Type");
+                assert_eq!(ct_header, Some(b"application/json".as_slice()));
+            }
+            ControlFlow::Continue => panic!("TRACE request should have been rejected"),
+        }
+    }
+
+    #[test]
+    fn default_enables_logging() {
+        let mw = TraceRejectionMiddleware::new();
+        assert!(mw.log_attempts);
+    }
+
+    #[test]
+    fn log_attempts_can_be_disabled() {
+        let mw = TraceRejectionMiddleware::new().log_attempts(false);
+        assert!(!mw.log_attempts);
+    }
+
+    #[test]
+    fn middleware_name() {
+        let mw = TraceRejectionMiddleware::new();
+        assert_eq!(mw.name(), "TraceRejection");
+    }
+
+    #[test]
+    fn default_impl() {
+        let mw = TraceRejectionMiddleware::default();
+        assert!(mw.log_attempts);
+    }
+}
+
+// ===========================================================================
+// End TRACE Rejection Middleware Tests
+// ===========================================================================
 
 // ===========================================================================
 // End ETag Middleware
