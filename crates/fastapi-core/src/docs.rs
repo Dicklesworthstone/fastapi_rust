@@ -174,7 +174,7 @@ pub fn swagger_ui_html(config: &DocsConfig, openapi_url: &str) -> String {
 
     let ui_parameters = config.swagger_ui_parameters.as_ref().map_or_else(
         || "{}".to_string(),
-        |p| p.clone(),
+        String::clone,
     );
 
     let init_oauth = config.swagger_ui_init_oauth.as_ref().map_or_else(

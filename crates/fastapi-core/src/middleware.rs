@@ -4029,7 +4029,7 @@ impl ETagMiddleware {
     }
 
     /// Check if request method is cacheable (GET or HEAD).
-    fn is_cacheable_method(method: &crate::request::Method) -> bool {
+    fn is_cacheable_method(method: crate::request::Method) -> bool {
         matches!(
             method,
             crate::request::Method::Get | crate::request::Method::Head
@@ -4063,7 +4063,7 @@ impl Middleware for ETagMiddleware {
             }
 
             // Only handle cacheable methods
-            if !Self::is_cacheable_method(&req.method()) {
+            if !Self::is_cacheable_method(req.method()) {
                 return response;
             }
 
@@ -4763,18 +4763,18 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
     }
 
     let leap = is_leap_year(year);
-    let month_days = if leap {
+    let month_days: [u64; 12] = if leap {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
         [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
 
     let mut month = 1u64;
-    for days_in_month in month_days.iter() {
-        if remaining_days < *days_in_month as u64 {
+    for &days_in_month in &month_days {
+        if remaining_days < days_in_month {
             break;
         }
-        remaining_days -= *days_in_month as u64;
+        remaining_days -= days_in_month;
         month += 1;
     }
 
@@ -4797,7 +4797,7 @@ impl Middleware for CacheControlMiddleware {
 
         Box::pin(async move {
             // Check if this request/response is cacheable
-            if !self.is_cacheable_method(&req.method()) {
+            if !self.is_cacheable_method(req.method()) {
                 return response;
             }
 
