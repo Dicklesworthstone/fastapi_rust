@@ -44,7 +44,8 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 use asupersync::Cx;
 
@@ -228,7 +229,7 @@ impl<H: Handler + 'static> TestClient<H> {
     /// Note: The jar is protected by a mutex, so concurrent access
     /// is safe but may block.
     pub fn cookies(&self) -> std::sync::MutexGuard<'_, CookieJar> {
-        self.cookies.lock().expect("cookie jar mutex poisoned")
+        self.cookies.lock()
     }
 
     /// Clears all cookies from the jar.
@@ -3341,13 +3342,13 @@ impl MockServer {
 
         // Record the request
         {
-            let mut reqs = requests.lock().expect("requests mutex poisoned");
+            let mut reqs = requests.lock();
             reqs.push(recorded.clone());
         }
 
         // Find matching response
         let response = {
-            let resps = responses.lock().expect("responses mutex poisoned");
+            let resps = responses.lock();
             match resps.get(&recorded.path) {
                 Some(r) => r.clone(),
                 None => {
@@ -3365,7 +3366,6 @@ impl MockServer {
                     matched.unwrap_or_else(|| {
                         default_response
                             .lock()
-                            .expect("default_response mutex poisoned")
                             .clone()
                     })
                 }
@@ -3493,7 +3493,7 @@ impl MockServer {
     /// server.mock_response("/api/*", MockResponse::with_status(404));
     /// ```
     pub fn mock_response(&self, path: impl Into<String>, response: MockResponse) {
-        let mut responses = self.responses.lock().expect("responses mutex poisoned");
+        let mut responses = self.responses.lock();
         responses.insert(path.into(), response);
     }
 
@@ -3501,29 +3501,28 @@ impl MockServer {
     pub fn set_default_response(&self, response: MockResponse) {
         let mut default = self
             .default_response
-            .lock()
-            .expect("default_response mutex poisoned");
+            .lock();
         *default = response;
     }
 
     /// Returns all recorded requests.
     #[must_use]
     pub fn requests(&self) -> Vec<RecordedRequest> {
-        let requests = self.requests.lock().expect("requests mutex poisoned");
+        let requests = self.requests.lock();
         requests.clone()
     }
 
     /// Returns the number of recorded requests.
     #[must_use]
     pub fn request_count(&self) -> usize {
-        let requests = self.requests.lock().expect("requests mutex poisoned");
+        let requests = self.requests.lock();
         requests.len()
     }
 
     /// Returns requests matching the given path.
     #[must_use]
     pub fn requests_for(&self, path: &str) -> Vec<RecordedRequest> {
-        let requests = self.requests.lock().expect("requests mutex poisoned");
+        let requests = self.requests.lock();
         requests
             .iter()
             .filter(|r| r.path == path)
@@ -3534,19 +3533,19 @@ impl MockServer {
     /// Returns the last recorded request.
     #[must_use]
     pub fn last_request(&self) -> Option<RecordedRequest> {
-        let requests = self.requests.lock().expect("requests mutex poisoned");
+        let requests = self.requests.lock();
         requests.last().cloned()
     }
 
     /// Clears all recorded requests.
     pub fn clear_requests(&self) {
-        let mut requests = self.requests.lock().expect("requests mutex poisoned");
+        let mut requests = self.requests.lock();
         requests.clear();
     }
 
     /// Clears all configured responses.
     pub fn clear_responses(&self) {
-        let mut responses = self.responses.lock().expect("responses mutex poisoned");
+        let mut responses = self.responses.lock();
         responses.clear();
     }
 
@@ -4150,8 +4149,7 @@ impl TestServer {
     pub fn log_entries(&self) -> Vec<TestServerLogEntry> {
         self.log_entries
             .lock()
-            .expect("log entries mutex poisoned")
-            .clone()
+                        .clone()
     }
 
     /// Returns the number of requests processed.
@@ -4159,16 +4157,14 @@ impl TestServer {
     pub fn request_count(&self) -> usize {
         self.log_entries
             .lock()
-            .expect("log entries mutex poisoned")
-            .len()
+                        .len()
     }
 
     /// Clears all recorded log entries.
     pub fn clear_logs(&self) {
         self.log_entries
             .lock()
-            .expect("log entries mutex poisoned")
-            .clear();
+                        .clear();
     }
 
     /// Sends a 503 Service Unavailable response during shutdown.
@@ -5083,8 +5079,7 @@ impl TestLogger {
     pub fn contains_message(&self, text: &str) -> bool {
         self.logs
             .lock()
-            .expect("log mutex poisoned")
-            .iter()
+                        .iter()
             .any(|log| log.contains(text))
     }
 
@@ -5093,8 +5088,7 @@ impl TestLogger {
     pub fn count_by_level(&self, level: LogLevel) -> usize {
         self.logs
             .lock()
-            .expect("log mutex poisoned")
-            .iter()
+                        .iter()
             .filter(|log| log.level == level)
             .count()
     }
@@ -5104,8 +5098,7 @@ impl TestLogger {
     pub fn logs_at_level(&self, level: LogLevel) -> Vec<CapturedLog> {
         self.logs
             .lock()
-            .expect("log mutex poisoned")
-            .iter()
+                        .iter()
             .filter(|log| log.level == level)
             .cloned()
             .collect()
@@ -5139,32 +5132,28 @@ impl TestLogger {
     pub fn start_phase(&self) {
         self.timings
             .lock()
-            .expect("timing mutex poisoned")
-            .start_phase();
+                        .start_phase();
     }
 
     /// Marks end of setup phase.
     pub fn end_setup(&self) {
         self.timings
             .lock()
-            .expect("timing mutex poisoned")
-            .end_setup();
+                        .end_setup();
     }
 
     /// Marks end of execute phase.
     pub fn end_execute(&self) {
         self.timings
             .lock()
-            .expect("timing mutex poisoned")
-            .end_execute();
+                        .end_execute();
     }
 
     /// Marks end of teardown phase.
     pub fn end_teardown(&self) {
         self.timings
             .lock()
-            .expect("timing mutex poisoned")
-            .end_teardown();
+                        .end_teardown();
     }
 
     /// Runs a closure with log capture, returning a LogCapture result.

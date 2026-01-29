@@ -49,7 +49,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 use crate::request::Method;
 
@@ -199,13 +200,13 @@ impl CoverageTracker {
 
     /// Register an endpoint for coverage tracking.
     pub fn register_endpoint(&self, method: Method, path: impl Into<String>) {
-        let mut inner = self.inner.lock().expect("coverage lock poisoned");
+        let mut inner = self.inner.lock();
         inner.registered_endpoints.push((method, path.into()));
     }
 
     /// Register multiple endpoints from a route table.
     pub fn register_endpoints<'a>(&self, endpoints: impl IntoIterator<Item = (Method, &'a str)>) {
-        let mut inner = self.inner.lock().expect("coverage lock poisoned");
+        let mut inner = self.inner.lock();
         for (method, path) in endpoints {
             inner.registered_endpoints.push((method, path.to_string()));
         }
@@ -213,7 +214,7 @@ impl CoverageTracker {
 
     /// Record a hit on an endpoint.
     pub fn record_hit(&self, method: Method, path: &str, status_code: u16) {
-        let mut inner = self.inner.lock().expect("coverage lock poisoned");
+        let mut inner = self.inner.lock();
 
         let key = (method, path.to_string());
         let hits = inner.endpoint_hits.entry(key).or_default();
@@ -231,7 +232,7 @@ impl CoverageTracker {
 
     /// Record a branch hit.
     pub fn record_branch(&self, branch_id: impl Into<String>, taken: bool) {
-        let mut inner = self.inner.lock().expect("coverage lock poisoned");
+        let mut inner = self.inner.lock();
 
         let branch = inner.branches.entry(branch_id.into()).or_default();
         if taken {
@@ -244,7 +245,7 @@ impl CoverageTracker {
     /// Generate a coverage report.
     #[must_use]
     pub fn report(&self) -> CoverageReport {
-        let inner = self.inner.lock().expect("coverage lock poisoned");
+        let inner = self.inner.lock();
 
         let mut endpoints = BTreeMap::new();
         for (method, path) in &inner.registered_endpoints {
@@ -269,7 +270,7 @@ impl CoverageTracker {
 
     /// Reset all coverage data.
     pub fn reset(&self) {
-        let mut inner = self.inner.lock().expect("coverage lock poisoned");
+        let mut inner = self.inner.lock();
         inner.endpoint_hits.clear();
         inner.branches.clear();
     }

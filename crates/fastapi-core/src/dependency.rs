@@ -24,7 +24,8 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 /// Dependency resolution scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,7 +511,7 @@ impl ResolutionStack {
     /// or `None` if it's safe to proceed.
     pub fn check_cycle<T: 'static>(&self, type_name: &str) -> Option<Vec<String>> {
         let type_id = TypeId::of::<T>();
-        let guard = self.stack.read().expect("resolution stack poisoned");
+        let guard = self.stack.read();
 
         // Check if this type is already being resolved
         if let Some(pos) = guard.iter().position(|(id, _, _)| *id == type_id) {
@@ -548,7 +549,7 @@ impl ResolutionStack {
             return None;
         }
 
-        let guard = self.stack.read().expect("resolution stack poisoned");
+        let guard = self.stack.read();
 
         // Find any request-scoped dependency on the stack
         // (i.e., an outer request-scoped dependency trying to use this function-scoped one)
@@ -568,7 +569,7 @@ impl ResolutionStack {
     ///
     /// Call this when starting to resolve a dependency.
     pub fn push<T: 'static>(&self, type_name: &str, scope: DependencyScope) {
-        let mut guard = self.stack.write().expect("resolution stack poisoned");
+        let mut guard = self.stack.write();
         guard.push((TypeId::of::<T>(), type_name.to_owned(), scope));
     }
 
@@ -576,14 +577,14 @@ impl ResolutionStack {
     ///
     /// Call this when done resolving a dependency (success or error).
     pub fn pop(&self) {
-        let mut guard = self.stack.write().expect("resolution stack poisoned");
+        let mut guard = self.stack.write();
         guard.pop();
     }
 
     /// Get the current depth of the resolution stack.
     #[must_use]
     pub fn depth(&self) -> usize {
-        let guard = self.stack.read().expect("resolution stack poisoned");
+        let guard = self.stack.read();
         guard.len()
     }
 
@@ -602,7 +603,7 @@ impl Default for ResolutionStack {
 
 impl std::fmt::Debug for ResolutionStack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let guard = self.stack.read().expect("resolution stack poisoned");
+        let guard = self.stack.read();
         f.debug_struct("ResolutionStack")
             .field("depth", &guard.len())
             .field(
@@ -756,7 +757,7 @@ impl DependencyCache {
     /// Get a cached dependency by type.
     #[must_use]
     pub fn get<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
-        let guard = self.inner.read().expect("dependency cache poisoned");
+        let guard = self.inner.read();
         guard
             .get(&TypeId::of::<T>())
             .and_then(|boxed| boxed.downcast_ref::<T>())
@@ -765,20 +766,20 @@ impl DependencyCache {
 
     /// Insert a dependency into the cache.
     pub fn insert<T: Clone + Send + Sync + 'static>(&self, value: T) {
-        let mut guard = self.inner.write().expect("dependency cache poisoned");
+        let mut guard = self.inner.write();
         guard.insert(TypeId::of::<T>(), Box::new(value));
     }
 
     /// Clear all cached dependencies.
     pub fn clear(&self) {
-        let mut guard = self.inner.write().expect("dependency cache poisoned");
+        let mut guard = self.inner.write();
         guard.clear();
     }
 
     /// Return the number of cached dependencies.
     #[must_use]
     pub fn len(&self) -> usize {
-        let guard = self.inner.read().expect("dependency cache poisoned");
+        let guard = self.inner.read();
         guard.len()
     }
 
@@ -838,7 +839,7 @@ impl DependencyOverrides {
             })
         });
 
-        let mut guard = self.inner.write().expect("dependency overrides poisoned");
+        let mut guard = self.inner.write();
         guard.insert(TypeId::of::<T>(), wrapper);
     }
 
@@ -855,7 +856,7 @@ impl DependencyOverrides {
 
     /// Clear all overrides.
     pub fn clear(&self) {
-        let mut guard = self.inner.write().expect("dependency overrides poisoned");
+        let mut guard = self.inner.write();
         guard.clear();
     }
 
@@ -869,7 +870,7 @@ impl DependencyOverrides {
         T: FromDependency,
     {
         let override_fn = {
-            let guard = self.inner.read().expect("dependency overrides poisoned");
+            let guard = self.inner.read();
             guard.get(&TypeId::of::<T>()).cloned()
         };
 
@@ -893,7 +894,7 @@ impl DependencyOverrides {
     /// Return the number of overrides registered.
     #[must_use]
     pub fn len(&self) -> usize {
-        let guard = self.inner.read().expect("dependency overrides poisoned");
+        let guard = self.inner.read();
         guard.len()
     }
 
