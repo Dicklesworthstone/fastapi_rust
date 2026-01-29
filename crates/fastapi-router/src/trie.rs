@@ -35,10 +35,10 @@
 //!
 //! Wildcards capture all remaining path segments including slashes:
 //!
-//! ```ignore
-//! // Route: /files/{*filepath}
-//! // Request: /files/css/styles/main.css
-//! // Captured: filepath = "css/styles/main.css"
+//! ```text
+//! Route: /files/{*filepath}
+//! Request: /files/css/styles/main.css
+//! Captured: filepath = "css/styles/main.css"
 //! ```
 //!
 //! Wildcards must be the final segment in a route pattern.
@@ -391,7 +391,7 @@ pub fn extract_path_params(path: &str) -> Vec<ParamInfo> {
 pub struct RouteResponse {
     /// HTTP status code (e.g., 200, 201, 404).
     pub status: u16,
-    /// Schema type name for the response body (e.g., "User", "Vec<Item>").
+    /// Schema type name for the response body (e.g., "User", "Vec\<Item\>").
     pub schema_name: String,
     /// Description of when this response is returned.
     pub description: String,
@@ -1130,7 +1130,7 @@ impl Router {
 
     /// Mount a child router at a path prefix (builder pattern).
     ///
-    /// Same as [`mount`] but panics on conflict. Use for static route definitions.
+    /// Same as `mount` but panics on conflict. Use for static route definitions.
     ///
     /// # Panics
     ///

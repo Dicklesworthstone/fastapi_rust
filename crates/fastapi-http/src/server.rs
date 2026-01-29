@@ -1111,7 +1111,7 @@ impl TcpServer {
     /// Runs the server with a Handler trait object.
     ///
     /// This is the recommended way to serve an application that implements
-    /// the [`Handler`] trait (like [`App`]).
+    /// the `Handler` trait (like `App`).
     ///
     /// # Example
     ///

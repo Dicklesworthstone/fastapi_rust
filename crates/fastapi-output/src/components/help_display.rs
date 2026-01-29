@@ -24,7 +24,7 @@ pub struct ArgInfo {
     pub short: Option<String>,
     /// Long name (e.g., "--help").
     pub long: Option<String>,
-    /// Value placeholder (e.g., "<PORT>").
+    /// Value placeholder (e.g., "\<PORT\>").
     pub value: Option<String>,
     /// Description.
     pub description: String,
