@@ -538,10 +538,12 @@ impl CoverageReport {
             } else {
                 ""
             };
+            let method_escaped = escape_html(method);
+            let path_escaped = escape_html(path);
             html.push_str(&format!(
                 r#"                <tr{tested_class}>
-                    <td><span class="method {method}">{method}</span></td>
-                    <td class="path">{path}</td>
+                    <td><span class="method {method_escaped}">{method_escaped}</span></td>
+                    <td class="path">{path_escaped}</td>
                     <td class="count">{}</td>
                     <td class="count">{}</td>
                     <td class="count">{}</td>
@@ -680,6 +682,22 @@ macro_rules! record_branch {
     ($tracker:expr, $branch_id:expr, $taken:expr) => {
         $tracker.record_branch($branch_id, $taken)
     };
+}
+
+/// Escape HTML special characters to prevent XSS in generated reports.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
