@@ -369,6 +369,27 @@ impl OpenApiDisplay {
         self
     }
 
+    /// Group endpoints by their first tag.
+    fn group_endpoints_by_tag<'a>(
+        &self,
+        endpoints: &'a [EndpointInfo],
+    ) -> Vec<(String, Vec<&'a EndpointInfo>)> {
+        use std::collections::BTreeMap;
+
+        let mut groups: BTreeMap<String, Vec<&'a EndpointInfo>> = BTreeMap::new();
+
+        for endpoint in endpoints {
+            let tag = endpoint
+                .tags
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Other".to_string());
+            groups.entry(tag).or_default().push(endpoint);
+        }
+
+        groups.into_iter().collect()
+    }
+
     /// Render an OpenAPI summary.
     #[must_use]
     pub fn render_summary(&self, summary: &OpenApiSummary) -> String {
@@ -449,14 +470,23 @@ impl OpenApiDisplay {
             };
 
             let summary_text = endpoint.summary.as_deref().unwrap_or("-");
-            let deprecated = if endpoint.deprecated {
-                " (deprecated)"
+
+            // Build indicators
+            let mut indicators = Vec::new();
+            if !endpoint.security.is_empty() {
+                indicators.push("[auth]");
+            }
+            if endpoint.deprecated {
+                indicators.push("[deprecated]");
+            }
+            let indicator_str = if indicators.is_empty() {
+                String::new()
             } else {
-                ""
+                format!(" {}", indicators.join(" "))
             };
 
             lines.push(format!(
-                "{:width$}  {:pwidth$}  {summary_text}{deprecated}",
+                "{:width$}  {:pwidth$}  {summary_text}{indicator_str}",
                 endpoint.method,
                 path,
                 width = method_width,
@@ -469,6 +499,21 @@ impl OpenApiDisplay {
                 "... and {} more",
                 summary.endpoint_count - self.config.max_endpoints
             ));
+        }
+
+        // Legend
+        let has_auth = summary.endpoints.iter().any(|e| !e.security.is_empty());
+        let has_deprecated = summary.endpoints.iter().any(|e| e.deprecated);
+
+        if has_auth || has_deprecated {
+            lines.push(String::new());
+            lines.push("Legend:".to_string());
+            if has_auth {
+                lines.push("  [auth] = Authentication required".to_string());
+            }
+            if has_deprecated {
+                lines.push("  [deprecated] = Endpoint is deprecated".to_string());
+            }
         }
 
         lines.join("\n")
@@ -510,10 +555,19 @@ impl OpenApiDisplay {
             }
 
             let method_color = self.method_color(&endpoint.method).to_ansi_fg();
-            let deprecated = if endpoint.deprecated {
-                format!(" {muted}(deprecated){ANSI_RESET}")
-            } else {
+
+            // Build indicators
+            let mut indicators = Vec::new();
+            if !endpoint.security.is_empty() {
+                indicators.push("🔒");
+            }
+            if endpoint.deprecated {
+                indicators.push("⚠");
+            }
+            let indicator_str = if indicators.is_empty() {
                 String::new()
+            } else {
+                format!(" {}", indicators.join(" "))
             };
 
             let summary_text = endpoint
@@ -523,9 +577,23 @@ impl OpenApiDisplay {
                 .unwrap_or_default();
 
             lines.push(format!(
-                "  {method_color}{:7}{ANSI_RESET} {accent}{}{ANSI_RESET}{summary_text}{deprecated}",
+                "  {method_color}{:7}{ANSI_RESET} {accent}{}{ANSI_RESET}{summary_text}{indicator_str}",
                 endpoint.method, endpoint.path
             ));
+        }
+
+        // Legend
+        let has_auth = summary.endpoints.iter().any(|e| !e.security.is_empty());
+        let has_deprecated = summary.endpoints.iter().any(|e| e.deprecated);
+
+        if has_auth || has_deprecated {
+            lines.push(String::new());
+            if has_auth {
+                lines.push(format!("{muted}🔒 = Auth required{ANSI_RESET}"));
+            }
+            if has_deprecated {
+                lines.push(format!("{muted}⚠  = Deprecated{ANSI_RESET}"));
+            }
         }
 
         lines.join("\n")
@@ -621,14 +689,22 @@ impl OpenApiDisplay {
                 },
             );
 
-            let deprecated_marker = if endpoint.deprecated {
-                format!(" {muted}⚠{ANSI_RESET}")
-            } else {
+            // Build indicators
+            let mut indicators = Vec::new();
+            if !endpoint.security.is_empty() {
+                indicators.push("🔒");
+            }
+            if endpoint.deprecated {
+                indicators.push("⚠");
+            }
+            let indicator_str = if indicators.is_empty() {
                 String::new()
+            } else {
+                format!(" {muted}{}{ANSI_RESET}", indicators.join(" "))
             };
 
             lines.push(format!(
-                "{border}│{ANSI_RESET} {method_bg}{ANSI_BOLD} {:5} {ANSI_RESET}  {:pwidth$}{deprecated_marker}  {muted}{:swidth$}{ANSI_RESET} {border}│{ANSI_RESET}",
+                "{border}│{ANSI_RESET} {method_bg}{ANSI_BOLD} {:5} {ANSI_RESET}  {:pwidth$}{indicator_str}  {muted}{:swidth$}{ANSI_RESET} {border}│{ANSI_RESET}",
                 endpoint.method,
                 path,
                 summary_text,
@@ -639,6 +715,22 @@ impl OpenApiDisplay {
 
         // Bottom border
         lines.push(format!("{border}└{}┘{ANSI_RESET}", "─".repeat(table_width)));
+
+        // Legend
+        let has_auth = summary.endpoints.iter().any(|e| !e.security.is_empty());
+        let has_deprecated = summary.endpoints.iter().any(|e| e.deprecated);
+
+        if has_auth || has_deprecated {
+            lines.push(String::new());
+            if has_auth {
+                lines.push(format!("{muted}  🔒 = Authentication required{ANSI_RESET}"));
+            }
+            if has_deprecated {
+                lines.push(format!("{muted}  ⚠  = Deprecated{ANSI_RESET}"));
+            }
+        }
+
+        lines.push(String::new());
 
         // Summary line
         lines.push(format!(
@@ -1020,5 +1112,107 @@ mod tests {
         let output = display.render_summary(&sample_summary());
 
         assert!(output.contains("and 2 more"));
+    }
+
+    #[test]
+    fn test_auth_indicator_plain() {
+        let summary = OpenApiSummary::new("Auth API", "1.0.0")
+            .endpoint(EndpointInfo::new("GET", "/public").summary("Public endpoint"))
+            .endpoint(
+                EndpointInfo::new("POST", "/protected")
+                    .summary("Protected endpoint")
+                    .security("bearer"),
+            );
+
+        let display = OpenApiDisplay::new(OutputMode::Plain);
+        let output = display.render_summary(&summary);
+
+        assert!(output.contains("[auth]"), "Should show [auth] indicator");
+        assert!(output.contains("Legend:"), "Should show legend");
+        assert!(output.contains("Authentication required"));
+    }
+
+    #[test]
+    fn test_auth_indicator_rich() {
+        let summary = OpenApiSummary::new("Auth API", "1.0.0").endpoint(
+            EndpointInfo::new("POST", "/protected")
+                .summary("Protected endpoint")
+                .security("bearer"),
+        );
+
+        let display = OpenApiDisplay::new(OutputMode::Rich);
+        let output = display.render_summary(&summary);
+
+        assert!(output.contains("🔒"), "Should show lock indicator");
+        assert!(output.contains("Authentication required"));
+    }
+
+    #[test]
+    fn test_deprecated_indicator_rich() {
+        let summary = OpenApiSummary::new("API", "1.0.0").endpoint(
+            EndpointInfo::new("GET", "/old")
+                .summary("Old endpoint")
+                .deprecated(true),
+        );
+
+        let display = OpenApiDisplay::new(OutputMode::Rich);
+        let output = display.render_summary(&summary);
+
+        assert!(output.contains("⚠"), "Should show deprecated indicator");
+        assert!(output.contains("Deprecated"));
+    }
+
+    #[test]
+    fn test_combined_indicators() {
+        let summary = OpenApiSummary::new("API", "1.0.0").endpoint(
+            EndpointInfo::new("POST", "/old-protected")
+                .summary("Old protected endpoint")
+                .security("bearer")
+                .deprecated(true),
+        );
+
+        let display = OpenApiDisplay::new(OutputMode::Rich);
+        let output = display.render_summary(&summary);
+
+        assert!(output.contains("🔒"), "Should show lock indicator");
+        assert!(output.contains("⚠"), "Should show deprecated indicator");
+    }
+
+    #[test]
+    fn test_no_legend_when_no_indicators() {
+        let summary = OpenApiSummary::new("Simple API", "1.0.0")
+            .endpoint(EndpointInfo::new("GET", "/simple").summary("Simple endpoint"));
+
+        let display = OpenApiDisplay::new(OutputMode::Plain);
+        let output = display.render_summary(&summary);
+
+        assert!(
+            !output.contains("Legend:"),
+            "Should not show legend when no special endpoints"
+        );
+    }
+
+    #[test]
+    fn test_group_endpoints_helper() {
+        let display = OpenApiDisplay::new(OutputMode::Plain);
+        let endpoints = vec![
+            EndpointInfo::new("GET", "/users").tag("users"),
+            EndpointInfo::new("POST", "/users").tag("users"),
+            EndpointInfo::new("GET", "/items").tag("items"),
+            EndpointInfo::new("GET", "/health"), // No tag, should be "Other"
+        ];
+
+        let groups = display.group_endpoints_by_tag(&endpoints);
+
+        assert_eq!(groups.len(), 3);
+
+        // Check that groups contain expected endpoints
+        let users_group = groups.iter().find(|(tag, _)| tag == "users");
+        assert!(users_group.is_some());
+        assert_eq!(users_group.unwrap().1.len(), 2);
+
+        let other_group = groups.iter().find(|(tag, _)| tag == "Other");
+        assert!(other_group.is_some());
+        assert_eq!(other_group.unwrap().1.len(), 1);
     }
 }
