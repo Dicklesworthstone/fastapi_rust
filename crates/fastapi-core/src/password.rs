@@ -414,8 +414,10 @@ fn base64_encode(data: &[u8]) -> String {
     result
 }
 
-/// Simple base64 decode (standard alphabet, no padding).
-#[allow(clippy::unnecessary_wraps)]
+/// Simple base64 decode (standard alphabet, no padding required).
+///
+/// Returns `None` if the input contains invalid characters. Padding
+/// characters (`=`) are stripped before decoding.
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     fn char_val(c: u8) -> Option<u32> {
         match c {
@@ -428,21 +430,25 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
         }
     }
 
+    // Strip padding before decoding
+    let s = s.trim_end_matches('=');
     let bytes = s.as_bytes();
     let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
-    let chunks = bytes.chunks(4);
-    for chunk in chunks {
-        let vals: Vec<u32> = chunk.iter().filter_map(|&b| char_val(b)).collect();
-        if vals.is_empty() {
-            continue;
+    for chunk in bytes.chunks(4) {
+        // Every byte in the chunk must be a valid base64 character
+        let mut vals = [0u32; 4];
+        let mut count = 0;
+        for &b in chunk {
+            vals[count] = char_val(b)?; // Return None on invalid char
+            count += 1;
         }
-        if vals.len() >= 2 {
+        if count >= 2 {
             result.push(((vals[0] << 2) | (vals[1] >> 4)) as u8);
         }
-        if vals.len() >= 3 {
+        if count >= 3 {
             result.push((((vals[1] & 0xf) << 4) | (vals[2] >> 2)) as u8);
         }
-        if vals.len() >= 4 {
+        if count >= 4 {
             result.push((((vals[2] & 0x3) << 6) | vals[3]) as u8);
         }
     }
