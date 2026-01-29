@@ -216,8 +216,8 @@ impl ExpectHandler {
         let body = format!("417 Expectation Failed: {detail}");
         // StatusCode::EXPECTATION_FAILED is 417
         Response::with_status(StatusCode::from_u16(417))
-            .header("Content-Type", b"text/plain; charset=utf-8".to_vec())
-            .header("Connection", b"close".to_vec())
+            .header("content-type", b"text/plain; charset=utf-8".to_vec())
+            .header("connection", b"close".to_vec())
             .body(ResponseBody::Bytes(body.into_bytes()))
     }
 
@@ -227,8 +227,8 @@ impl ExpectHandler {
         let detail = detail.into();
         let body = format!("401 Unauthorized: {detail}");
         Response::with_status(StatusCode::UNAUTHORIZED)
-            .header("Content-Type", b"text/plain; charset=utf-8".to_vec())
-            .header("Connection", b"close".to_vec())
+            .header("content-type", b"text/plain; charset=utf-8".to_vec())
+            .header("connection", b"close".to_vec())
             .body(ResponseBody::Bytes(body.into_bytes()))
     }
 
@@ -238,8 +238,8 @@ impl ExpectHandler {
         let detail = detail.into();
         let body = format!("403 Forbidden: {detail}");
         Response::with_status(StatusCode::FORBIDDEN)
-            .header("Content-Type", b"text/plain; charset=utf-8".to_vec())
-            .header("Connection", b"close".to_vec())
+            .header("content-type", b"text/plain; charset=utf-8".to_vec())
+            .header("connection", b"close".to_vec())
             .body(ResponseBody::Bytes(body.into_bytes()))
     }
 
@@ -249,8 +249,8 @@ impl ExpectHandler {
         let detail = detail.into();
         let body = format!("413 Payload Too Large: {detail}");
         Response::with_status(StatusCode::PAYLOAD_TOO_LARGE)
-            .header("Content-Type", b"text/plain; charset=utf-8".to_vec())
-            .header("Connection", b"close".to_vec())
+            .header("content-type", b"text/plain; charset=utf-8".to_vec())
+            .header("connection", b"close".to_vec())
             .body(ResponseBody::Bytes(body.into_bytes()))
     }
 
@@ -260,8 +260,8 @@ impl ExpectHandler {
         let detail = detail.into();
         let body = format!("415 Unsupported Media Type: {detail}");
         Response::with_status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
-            .header("Content-Type", b"text/plain; charset=utf-8".to_vec())
-            .header("Connection", b"close".to_vec())
+            .header("content-type", b"text/plain; charset=utf-8".to_vec())
+            .header("connection", b"close".to_vec())
             .body(ResponseBody::Bytes(body.into_bytes()))
     }
 }
