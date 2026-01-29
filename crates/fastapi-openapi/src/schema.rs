@@ -67,6 +67,7 @@ impl Schema {
             properties,
             required,
             additional_properties: None,
+            example: None,
         })
     }
 
@@ -135,6 +136,7 @@ impl Schema {
             max_length: None,
             pattern: None,
             enum_values: Some(values),
+            example: None,
         })
     }
 
@@ -181,6 +183,9 @@ pub struct ObjectSchema {
     /// Additional properties schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_properties: Option<Box<Schema>>,
+    /// Example value for this schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<serde_json::Value>,
 }
 
 /// Array schema.
@@ -298,6 +303,9 @@ pub struct PrimitiveSchema {
     /// Enum values (for string enums with unit variants).
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "enum")]
     pub enum_values: Option<Vec<String>>,
+    /// Example value for this schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<serde_json::Value>,
 }
 
 impl PrimitiveSchema {
@@ -315,6 +323,7 @@ impl PrimitiveSchema {
             max_length: None,
             pattern: None,
             enum_values: None,
+            example: None,
         }
     }
 
@@ -332,6 +341,7 @@ impl PrimitiveSchema {
             max_length: None,
             pattern: None,
             enum_values: None,
+            example: None,
         }
     }
 
@@ -349,6 +359,7 @@ impl PrimitiveSchema {
             max_length: None,
             pattern: None,
             enum_values: None,
+            example: None,
         }
     }
 
@@ -366,6 +377,7 @@ impl PrimitiveSchema {
             max_length: None,
             pattern: None,
             enum_values: None,
+            example: None,
         }
     }
 
@@ -383,6 +395,7 @@ impl PrimitiveSchema {
             max_length: None,
             pattern: None,
             enum_values: None,
+            example: None,
         }
     }
 

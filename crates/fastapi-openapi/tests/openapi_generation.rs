@@ -577,3 +577,39 @@ fn full_api_document_generation() {
     // Verify it can be parsed back
     let _: serde_json::Value = serde_json::from_str(&json).unwrap();
 }
+
+// ============================================================================
+// SCHEMA EXAMPLE ATTRIBUTE TESTS
+// ============================================================================
+
+mod schema_example_tests {
+    use fastapi_macros::JsonSchema;
+    use fastapi_openapi::JsonSchema as _;
+
+    #[derive(JsonSchema)]
+    #[schema(example = r#"{"name": "Alice", "age": 30}"#)]
+    struct UserWithExample {
+        name: String,
+        age: u32,
+    }
+
+    #[test]
+    fn struct_schema_example_attribute() {
+        let schema = UserWithExample::schema();
+        let json = serde_json::to_value(&schema).unwrap();
+        assert_eq!(json["example"]["name"], "Alice");
+        assert_eq!(json["example"]["age"], 30);
+    }
+
+    #[derive(JsonSchema)]
+    struct NoExampleStruct {
+        id: i64,
+    }
+
+    #[test]
+    fn struct_without_example_has_no_example_field() {
+        let schema = NoExampleStruct::schema();
+        let json = serde_json::to_value(&schema).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("example"));
+    }
+}

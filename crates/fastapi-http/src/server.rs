@@ -717,6 +717,8 @@ pub struct TcpServer {
     connection_handles: Mutex<Vec<TaskHandle<()>>>,
     /// Shutdown controller for coordinated graceful shutdown.
     shutdown_controller: Arc<ShutdownController>,
+    /// Connection pool metrics counters.
+    metrics_counters: Arc<MetricsCounters>,
 }
 
 impl TcpServer {
@@ -730,6 +732,7 @@ impl TcpServer {
             draining: Arc::new(AtomicBool::new(false)),
             connection_handles: Mutex::new(Vec::new()),
             shutdown_controller: Arc::new(ShutdownController::new()),
+            metrics_counters: Arc::new(MetricsCounters::new()),
         }
     }
 
@@ -750,6 +753,30 @@ impl TcpServer {
         self.connection_counter.load(Ordering::Relaxed)
     }
 
+    /// Returns a snapshot of the server's connection pool metrics.
+    #[must_use]
+    pub fn metrics(&self) -> ServerMetrics {
+        ServerMetrics {
+            active_connections: self.connection_counter.load(Ordering::Relaxed),
+            total_accepted: self.metrics_counters.total_accepted.load(Ordering::Relaxed),
+            total_rejected: self.metrics_counters.total_rejected.load(Ordering::Relaxed),
+            total_timed_out: self.metrics_counters.total_timed_out.load(Ordering::Relaxed),
+            total_requests: self.request_counter.load(Ordering::Relaxed),
+            bytes_in: self.metrics_counters.bytes_in.load(Ordering::Relaxed),
+            bytes_out: self.metrics_counters.bytes_out.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Records bytes read from a client.
+    fn record_bytes_in(&self, n: u64) {
+        self.metrics_counters.bytes_in.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Records bytes written to a client.
+    fn record_bytes_out(&self, n: u64) {
+        self.metrics_counters.bytes_out.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Attempts to acquire a connection slot.
     ///
     /// Returns true if a slot was acquired, false if the connection limit
@@ -759,6 +786,7 @@ impl TcpServer {
         if max == 0 {
             // Unlimited connections
             self.connection_counter.fetch_add(1, Ordering::Relaxed);
+            self.metrics_counters.total_accepted.fetch_add(1, Ordering::Relaxed);
             return true;
         }
 
@@ -766,6 +794,7 @@ impl TcpServer {
         let mut current = self.connection_counter.load(Ordering::Relaxed);
         loop {
             if current >= max as u64 {
+                self.metrics_counters.total_rejected.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
             match self.connection_counter.compare_exchange_weak(
@@ -774,7 +803,10 @@ impl TcpServer {
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return true,
+                Ok(_) => {
+                    self.metrics_counters.total_accepted.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
                 Err(actual) => current = actual,
             }
         }
@@ -1453,6 +1485,7 @@ impl TcpServer {
                             Ok(0) => return Ok(()),
                             Ok(n) => n,
                             Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                                self.metrics_counters.total_timed_out.fetch_add(1, Ordering::Relaxed);
                                 return Err(ServerError::KeepAliveTimeout);
                             }
                             Err(e) => return Err(ServerError::Io(e)),
@@ -1462,6 +1495,8 @@ impl TcpServer {
                     if bytes_read == 0 {
                         return Ok(());
                     }
+
+                    self.record_bytes_in(bytes_read as u64);
 
                     match parser.feed(&read_buffer[..bytes_read])? {
                         ParseStatus::Complete { request, .. } => request,
@@ -1493,6 +1528,9 @@ impl TcpServer {
             };
 
             let response_write = response_writer.write(response);
+            if let ResponseWrite::Full(ref bytes) = response_write {
+                self.record_bytes_out(bytes.len() as u64);
+            }
             write_response(&mut stream, response_write).await?;
 
             if !server_will_keep_alive {
@@ -1686,6 +1724,53 @@ impl TcpServer {
             |ctx, req| handler(ctx, req),
         )
         .await
+    }
+}
+
+/// Snapshot of server metrics at a point in time.
+///
+/// Returned by [`TcpServer::metrics()`]. All counters are monotonically
+/// increasing except `active_connections` which reflects the current gauge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerMetrics {
+    /// Current number of active (in-flight) connections.
+    pub active_connections: u64,
+    /// Total connections accepted since server start.
+    pub total_accepted: u64,
+    /// Total connections rejected due to connection limit.
+    pub total_rejected: u64,
+    /// Total requests that timed out.
+    pub total_timed_out: u64,
+    /// Total requests served since server start.
+    pub total_requests: u64,
+    /// Total bytes read from clients.
+    pub bytes_in: u64,
+    /// Total bytes written to clients.
+    pub bytes_out: u64,
+}
+
+/// Atomic counters backing [`ServerMetrics`].
+///
+/// These live inside `TcpServer` and are updated as connections are
+/// accepted, rejected, or timed out.
+#[derive(Debug)]
+struct MetricsCounters {
+    total_accepted: AtomicU64,
+    total_rejected: AtomicU64,
+    total_timed_out: AtomicU64,
+    bytes_in: AtomicU64,
+    bytes_out: AtomicU64,
+}
+
+impl MetricsCounters {
+    fn new() -> Self {
+        Self {
+            total_accepted: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
+            total_timed_out: AtomicU64::new(0),
+            bytes_in: AtomicU64::new(0),
+            bytes_out: AtomicU64::new(0),
+        }
     }
 }
 
@@ -2496,6 +2581,81 @@ mod tests {
         // After waiting, deadline should be in the past
         std::thread::sleep(Duration::from_millis(150));
         assert!(Instant::now() >= deadline);
+    }
+
+    #[test]
+    fn server_metrics_initial_state() {
+        let server = TcpServer::default();
+        let m = server.metrics();
+        assert_eq!(m.active_connections, 0);
+        assert_eq!(m.total_accepted, 0);
+        assert_eq!(m.total_rejected, 0);
+        assert_eq!(m.total_timed_out, 0);
+        assert_eq!(m.total_requests, 0);
+        assert_eq!(m.bytes_in, 0);
+        assert_eq!(m.bytes_out, 0);
+    }
+
+    #[test]
+    fn server_metrics_after_acquire_release() {
+        let server = TcpServer::new(ServerConfig::new("127.0.0.1:0").with_max_connections(10));
+        assert!(server.try_acquire_connection());
+        assert!(server.try_acquire_connection());
+
+        let m = server.metrics();
+        assert_eq!(m.active_connections, 2);
+        assert_eq!(m.total_accepted, 2);
+        assert_eq!(m.total_rejected, 0);
+
+        server.release_connection();
+        let m = server.metrics();
+        assert_eq!(m.active_connections, 1);
+        assert_eq!(m.total_accepted, 2); // monotonic
+    }
+
+    #[test]
+    fn server_metrics_rejection_counted() {
+        let server = TcpServer::new(ServerConfig::new("127.0.0.1:0").with_max_connections(1));
+        assert!(server.try_acquire_connection());
+        assert!(!server.try_acquire_connection()); // rejected
+
+        let m = server.metrics();
+        assert_eq!(m.total_accepted, 1);
+        assert_eq!(m.total_rejected, 1);
+        assert_eq!(m.active_connections, 1);
+    }
+
+    #[test]
+    fn server_metrics_bytes_tracking() {
+        let server = TcpServer::default();
+        server.record_bytes_in(1024);
+        server.record_bytes_in(512);
+        server.record_bytes_out(2048);
+
+        let m = server.metrics();
+        assert_eq!(m.bytes_in, 1536);
+        assert_eq!(m.bytes_out, 2048);
+    }
+
+    #[test]
+    fn server_metrics_unlimited_connections_accepted() {
+        let server = TcpServer::new(ServerConfig::new("127.0.0.1:0").with_max_connections(0));
+        for _ in 0..100 {
+            assert!(server.try_acquire_connection());
+        }
+        let m = server.metrics();
+        assert_eq!(m.total_accepted, 100);
+        assert_eq!(m.total_rejected, 0);
+        assert_eq!(m.active_connections, 100);
+    }
+
+    #[test]
+    fn server_metrics_clone_eq() {
+        let server = TcpServer::default();
+        server.record_bytes_in(42);
+        let m1 = server.metrics();
+        let m2 = m1.clone();
+        assert_eq!(m1, m2);
     }
 }
 

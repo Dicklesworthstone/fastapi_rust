@@ -479,6 +479,12 @@ pub struct MediaType {
     /// Schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Schema>,
+    /// Single example value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<serde_json::Value>,
+    /// Named examples.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub examples: HashMap<String, Example>,
 }
 
 /// Response definition.
@@ -1394,6 +1400,8 @@ impl OpenApiBuilder {
                 content_type.to_string(),
                 MediaType {
                     schema: Some(Schema::reference(schema_name)),
+                    example: None,
+                    examples: HashMap::new(),
                 },
             );
 
@@ -1505,6 +1513,7 @@ pub fn converter_to_schema(converter: &Converter) -> Schema {
             max_length: None,
             pattern: None,
             enum_values: None,
+            example: None,
         }),
         // Str and Path both map to string type
         Converter::Str | Converter::Path => Schema::string(),
@@ -2439,5 +2448,128 @@ mod security_tests {
 
         let op = doc.paths["/public"].get.as_ref().unwrap();
         assert!(op.security.is_empty());
+    }
+}
+
+// ============================================================================
+// Response Examples Tests
+// ============================================================================
+
+#[cfg(test)]
+mod response_example_tests {
+    use super::*;
+    use crate::schema::{ObjectSchema, PrimitiveSchema, Schema, SchemaType};
+
+    #[test]
+    fn media_type_with_example_serializes() {
+        let mt = MediaType {
+            schema: Some(Schema::string()),
+            example: Some(serde_json::json!("hello")),
+            examples: HashMap::new(),
+        };
+        let json = serde_json::to_value(&mt).unwrap();
+        assert_eq!(json["example"], "hello");
+    }
+
+    #[test]
+    fn media_type_without_example_omits_field() {
+        let mt = MediaType {
+            schema: Some(Schema::string()),
+            example: None,
+            examples: HashMap::new(),
+        };
+        let json = serde_json::to_value(&mt).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("example"));
+        assert!(!json.as_object().unwrap().contains_key("examples"));
+    }
+
+    #[test]
+    fn media_type_with_named_examples() {
+        let mut examples = HashMap::new();
+        examples.insert(
+            "success".to_string(),
+            Example {
+                summary: Some("A success response".to_string()),
+                description: None,
+                value: Some(serde_json::json!({"id": 1, "name": "Alice"})),
+                external_value: None,
+            },
+        );
+        let mt = MediaType {
+            schema: None,
+            example: None,
+            examples,
+        };
+        let json = serde_json::to_value(&mt).unwrap();
+        assert_eq!(json["examples"]["success"]["value"]["name"], "Alice");
+    }
+
+    #[test]
+    fn object_schema_with_example() {
+        let schema = ObjectSchema {
+            title: Some("User".to_string()),
+            description: None,
+            properties: HashMap::new(),
+            required: Vec::new(),
+            additional_properties: None,
+            example: Some(serde_json::json!({"name": "Bob", "age": 30})),
+        };
+        let json = serde_json::to_value(&schema).unwrap();
+        assert_eq!(json["example"]["name"], "Bob");
+    }
+
+    #[test]
+    fn primitive_schema_with_example() {
+        let schema = PrimitiveSchema {
+            schema_type: SchemaType::String,
+            format: Some("email".to_string()),
+            nullable: false,
+            minimum: None,
+            maximum: None,
+            exclusive_minimum: None,
+            exclusive_maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            enum_values: None,
+            example: Some(serde_json::json!("user@example.com")),
+        };
+        let json = serde_json::to_value(&schema).unwrap();
+        assert_eq!(json["example"], "user@example.com");
+        assert_eq!(json["format"], "email");
+    }
+
+    #[test]
+    fn response_with_example_content() {
+        let mut content = HashMap::new();
+        content.insert(
+            "application/json".to_string(),
+            MediaType {
+                schema: Some(Schema::reference("User")),
+                example: Some(serde_json::json!({"id": 1, "name": "Alice"})),
+                examples: HashMap::new(),
+            },
+        );
+        let response = Response {
+            description: "Success".to_string(),
+            content,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            json["content"]["application/json"]["example"]["name"],
+            "Alice"
+        );
+    }
+
+    #[test]
+    fn media_type_roundtrip() {
+        let mt = MediaType {
+            schema: Some(Schema::string()),
+            example: Some(serde_json::json!(42)),
+            examples: HashMap::new(),
+        };
+        let json = serde_json::to_string(&mt).unwrap();
+        let parsed: MediaType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.example.unwrap(), 42);
     }
 }

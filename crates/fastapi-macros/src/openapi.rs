@@ -33,6 +33,8 @@ struct SchemaAttrs {
     format: Option<String>,
     nullable: bool,
     skip: bool,
+    /// JSON string that will be parsed at runtime as the example value.
+    example: Option<String>,
 }
 
 impl SchemaAttrs {
@@ -67,6 +69,12 @@ impl SchemaAttrs {
                     result.nullable = true;
                 } else if meta.path.is_ident("skip") {
                     result.skip = true;
+                } else if meta.path.is_ident("example") {
+                    if let Ok(value) = meta.value() {
+                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
+                            result.example = Some(s.value());
+                        }
+                    }
                 }
                 Ok(())
             });
@@ -166,6 +174,7 @@ fn generate_type_schema(ty: &Type, attrs: &SchemaAttrs) -> TokenStream2 {
                 max_length: None,
                 pattern: None,
                 enum_values: None,
+                example: None,
             })
         };
     }
@@ -251,6 +260,7 @@ fn generate_type_schema(ty: &Type, attrs: &SchemaAttrs) -> TokenStream2 {
                                     properties: std::collections::HashMap::new(),
                                     required: Vec::new(),
                                     additional_properties: Some(Box::new(#value_schema)),
+                                    example: None,
                                 })
                             };
                         }
@@ -311,6 +321,7 @@ fn generate_variant_schema(variant: &Variant) -> TokenStream2 {
                     max_length: None,
                     pattern: None,
                     enum_values: Some(vec![#variant_name.to_string()]),
+                    example: None,
                 })
             }
         }
@@ -335,6 +346,7 @@ fn generate_variant_schema(variant: &Variant) -> TokenStream2 {
                             properties: props,
                             required: vec![#variant_name.to_string()],
                             additional_properties: Some(Box::new(fastapi_openapi::Schema::Boolean(false))),
+                            example: None,
                         })
                     }
                 }
@@ -353,6 +365,7 @@ fn generate_variant_schema(variant: &Variant) -> TokenStream2 {
                             properties: props,
                             required: vec![#variant_name.to_string()],
                             additional_properties: Some(Box::new(fastapi_openapi::Schema::Boolean(false))),
+                            example: None,
                         })
                     }
                 }
@@ -399,6 +412,7 @@ fn generate_variant_schema(variant: &Variant) -> TokenStream2 {
                         properties: inner_props,
                         required: inner_required,
                         additional_properties: None,
+                        example: None,
                     });
                     let mut props = std::collections::HashMap::new();
                     props.insert(#variant_name.to_string(), inner_schema);
@@ -408,6 +422,7 @@ fn generate_variant_schema(variant: &Variant) -> TokenStream2 {
                         properties: props,
                         required: vec![#variant_name.to_string()],
                         additional_properties: Some(Box::new(fastapi_openapi::Schema::Boolean(false))),
+                        example: None,
                     })
                 }
             }
@@ -479,6 +494,10 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
         .description
         .as_ref()
         .map_or_else(|| quote! { None }, |d| quote! { Some(#d.to_string()) });
+    let example_value = struct_attrs.example.as_ref().map_or_else(
+        || quote! { None },
+        |e| quote! { Some(serde_json::from_str::<serde_json::Value>(#e).expect("invalid JSON in #[schema(example = ...)]")) },
+    );
 
     // Handle struct data
     let fields = match &input.data {
@@ -573,6 +592,7 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
                     properties,
                     required,
                     additional_properties: None,
+                    example: #example_value,
                 })
             }
 
