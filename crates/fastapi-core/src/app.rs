@@ -858,6 +858,21 @@ pub struct AppConfig {
     pub max_body_size: usize,
     /// Default request timeout in milliseconds.
     pub request_timeout_ms: u64,
+    /// Root path prefix for apps behind a reverse proxy.
+    ///
+    /// When the application is served behind a reverse proxy at a sub-path,
+    /// this should be set to that sub-path. For example, if the app is
+    /// proxied at `/api/v1`, set `root_path = "/api/v1"`.
+    ///
+    /// This affects:
+    /// - URL generation via `url_for()`
+    /// - OpenAPI servers list (if `root_path_in_servers` is true)
+    pub root_path: String,
+    /// Whether to include the root_path in OpenAPI servers list.
+    ///
+    /// When true and `root_path` is set, a server entry with the root_path
+    /// will be added to the OpenAPI specification's servers array.
+    pub root_path_in_servers: bool,
 }
 
 /// Configuration loading errors.
@@ -939,6 +954,8 @@ impl Default for AppConfig {
             debug: false,
             max_body_size: 1024 * 1024, // 1MB
             request_timeout_ms: 30_000, // 30 seconds
+            root_path: String::new(),
+            root_path_in_servers: true,
         }
     }
 }
@@ -989,6 +1006,38 @@ impl AppConfig {
     #[must_use]
     pub fn request_timeout_ms(mut self, timeout: u64) -> Self {
         self.request_timeout_ms = timeout;
+        self
+    }
+
+    /// Sets the root path for apps behind a reverse proxy.
+    ///
+    /// When the application is served behind a reverse proxy at a sub-path,
+    /// set this to that sub-path. For example, if the app is proxied at
+    /// `/api/v1`, set `root_path("/api/v1")`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = AppConfig::new().root_path("/api/v1");
+    /// ```
+    #[must_use]
+    pub fn root_path(mut self, path: impl Into<String>) -> Self {
+        let mut path = path.into();
+        // Normalize: remove trailing slashes
+        while path.ends_with('/') && path.len() > 1 {
+            path.pop();
+        }
+        self.root_path = path;
+        self
+    }
+
+    /// Sets whether to include root_path in OpenAPI servers list.
+    ///
+    /// When true and `root_path` is set, a server entry with the root_path
+    /// will be added to the OpenAPI specification's servers array.
+    #[must_use]
+    pub fn root_path_in_servers(mut self, include: bool) -> Self {
+        self.root_path_in_servers = include;
         self
     }
 

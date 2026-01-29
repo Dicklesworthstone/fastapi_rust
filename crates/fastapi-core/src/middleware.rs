@@ -5208,7 +5208,14 @@ mod trace_rejection_tests {
     fn run_before(mw: &TraceRejectionMiddleware, req: &mut Request) -> ControlFlow {
         let ctx = test_context();
         let fut = mw.before(&ctx, req);
-        asupersync::block_on(fut)
+        futures_executor::block_on(fut)
+    }
+
+    fn find_header<'a>(headers: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
+        headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_slice())
     }
 
     #[test]
@@ -5341,7 +5348,7 @@ mod trace_rejection_tests {
 
         match result {
             ControlFlow::Break(response) => {
-                let allow_header = response.headers().get(b"Allow");
+                let allow_header = find_header(response.headers(), "Allow");
                 assert!(allow_header.is_some(), "Response should include Allow header");
             }
             ControlFlow::Continue => panic!("TRACE request should have been rejected"),
@@ -5357,7 +5364,7 @@ mod trace_rejection_tests {
 
         match result {
             ControlFlow::Break(response) => {
-                let ct_header = response.headers().get(b"Content-Type");
+                let ct_header = find_header(response.headers(), "Content-Type");
                 assert_eq!(ct_header, Some(b"application/json".as_slice()));
             }
             ControlFlow::Continue => panic!("TRACE request should have been rejected"),
