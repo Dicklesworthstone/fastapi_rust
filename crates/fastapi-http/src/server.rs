@@ -552,7 +552,9 @@ fn host_matches_pattern(host: &HostHeader, pattern: &str) -> bool {
         if host.host == suffix {
             return false;
         }
-        return host.host.ends_with(&format!(".{suffix}"));
+        return host.host.len() > suffix.len() + 1
+            && host.host.ends_with(suffix.as_str())
+            && host.host.as_bytes()[host.host.len() - suffix.len() - 1] == b'.';
     }
 
     if let Some(parsed) = parse_host_header(pattern) {
