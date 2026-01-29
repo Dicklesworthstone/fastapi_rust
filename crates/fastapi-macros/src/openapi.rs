@@ -500,10 +500,13 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
                 })
                 .collect::<Vec<_>>(),
             Fields::Unnamed(_) => {
-                // Tuple structs - not supported for object schema
-                return quote! {
-                    compile_error!("JsonSchema derive does not support tuple structs");
-                }
+                return syn::Error::new_spanned(
+                    name,
+                    "JsonSchema can only be derived for structs with named fields, not tuple structs.\n\
+                     Change: struct MyType(String, i32)\n\
+                     To:     struct MyType { field1: String, field2: i32 }",
+                )
+                .to_compile_error()
                 .into();
             }
             Fields::Unit => Vec::new(),
