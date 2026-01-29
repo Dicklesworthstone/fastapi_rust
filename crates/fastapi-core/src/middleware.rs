@@ -6128,6 +6128,865 @@ struct InterceptorStartTime(Instant);
 // End Response Interceptors and Transformers
 // ===========================================================================
 
+// ===========================================================================
+// Response Timing Metrics Collection
+// ===========================================================================
+//
+// This section provides comprehensive timing metrics for monitoring:
+// - Request duration
+// - Time-to-first-byte (TTFB)
+// - Server-Timing header with multiple metrics
+// - Histogram collection for aggregation
+// - Integration with logging
+
+/// A single entry in the Server-Timing header.
+///
+/// Each entry has a name, duration in milliseconds, and optional description.
+///
+/// # Server-Timing Format
+///
+/// ```text
+/// Server-Timing: name;dur=value;desc="description"
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// let entry = ServerTimingEntry::new("db", 42.5)
+///     .with_description("Database query");
+/// ```
+#[derive(Debug, Clone)]
+pub struct ServerTimingEntry {
+    /// The metric name (e.g., "db", "cache", "render").
+    name: String,
+    /// Duration in milliseconds (supports sub-millisecond precision).
+    duration_ms: f64,
+    /// Optional description for the metric.
+    description: Option<String>,
+}
+
+impl ServerTimingEntry {
+    /// Create a new Server-Timing entry.
+    #[must_use]
+    pub fn new(name: impl Into<String>, duration_ms: f64) -> Self {
+        Self {
+            name: name.into(),
+            duration_ms,
+            description: None,
+        }
+    }
+
+    /// Add a description to the entry.
+    #[must_use]
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = Some(desc.into());
+        self
+    }
+
+    /// Format this entry for the Server-Timing header.
+    #[must_use]
+    pub fn to_header_value(&self) -> String {
+        match &self.description {
+            Some(desc) => format!(
+                "{};dur={:.3};desc=\"{}\"",
+                self.name, self.duration_ms, desc
+            ),
+            None => format!("{};dur={:.3}", self.name, self.duration_ms),
+        }
+    }
+}
+
+/// Builder for constructing Server-Timing headers with multiple metrics.
+///
+/// Collects multiple timing entries and formats them as a single header value.
+///
+/// # Example
+///
+/// ```ignore
+/// let timing = ServerTimingBuilder::new()
+///     .add("total", 150.5)
+///     .add_with_desc("db", 42.0, "Database queries")
+///     .add_with_desc("cache", 5.0, "Cache lookup")
+///     .build();
+///
+/// // Result: "total;dur=150.500, db;dur=42.000;desc=\"Database queries\", cache;dur=5.000;desc=\"Cache lookup\""
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ServerTimingBuilder {
+    entries: Vec<ServerTimingEntry>,
+}
+
+impl ServerTimingBuilder {
+    /// Create a new empty builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a timing entry with just a name and duration.
+    #[must_use]
+    pub fn add(mut self, name: impl Into<String>, duration_ms: f64) -> Self {
+        self.entries.push(ServerTimingEntry::new(name, duration_ms));
+        self
+    }
+
+    /// Add a timing entry with a description.
+    #[must_use]
+    pub fn add_with_desc(
+        mut self,
+        name: impl Into<String>,
+        duration_ms: f64,
+        description: impl Into<String>,
+    ) -> Self {
+        self.entries
+            .push(ServerTimingEntry::new(name, duration_ms).with_description(description));
+        self
+    }
+
+    /// Add a pre-built entry.
+    #[must_use]
+    pub fn add_entry(mut self, entry: ServerTimingEntry) -> Self {
+        self.entries.push(entry);
+        self
+    }
+
+    /// Build the Server-Timing header value.
+    #[must_use]
+    pub fn build(&self) -> String {
+        self.entries
+            .iter()
+            .map(|e| e.to_header_value())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Return true if no entries have been added.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Return the number of entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Collected timing metrics for a single request.
+///
+/// This struct is stored in request extensions and can be read by
+/// interceptors or logging middleware to expose timing data.
+///
+/// # Usage
+///
+/// Handlers can access and modify timing metrics via request extensions:
+///
+/// ```ignore
+/// // Add a custom timing metric
+/// if let Some(metrics) = req.get_extension_mut::<TimingMetrics>() {
+///     metrics.add_metric("db", db_time.as_secs_f64() * 1000.0);
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct TimingMetrics {
+    /// When the request processing started.
+    pub start_time: Instant,
+    /// When the first byte of the response was sent (if known).
+    pub first_byte_time: Option<Instant>,
+    /// Custom metrics added by handlers (name -> duration_ms).
+    pub custom_metrics: Vec<(String, f64, Option<String>)>,
+}
+
+impl TimingMetrics {
+    /// Create new timing metrics starting now.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            start_time: Instant::now(),
+            first_byte_time: None,
+            custom_metrics: Vec::new(),
+        }
+    }
+
+    /// Create timing metrics with a specific start time.
+    #[must_use]
+    pub fn with_start_time(start_time: Instant) -> Self {
+        Self {
+            start_time,
+            first_byte_time: None,
+            custom_metrics: Vec::new(),
+        }
+    }
+
+    /// Mark the time when the first byte of the response was sent.
+    pub fn mark_first_byte(&mut self) {
+        self.first_byte_time = Some(Instant::now());
+    }
+
+    /// Add a custom metric (e.g., database query time).
+    pub fn add_metric(&mut self, name: impl Into<String>, duration_ms: f64) {
+        self.custom_metrics.push((name.into(), duration_ms, None));
+    }
+
+    /// Add a custom metric with a description.
+    pub fn add_metric_with_desc(
+        &mut self,
+        name: impl Into<String>,
+        duration_ms: f64,
+        desc: impl Into<String>,
+    ) {
+        self.custom_metrics
+            .push((name.into(), duration_ms, Some(desc.into())));
+    }
+
+    /// Get the total elapsed time in milliseconds.
+    #[must_use]
+    pub fn total_ms(&self) -> f64 {
+        self.start_time.elapsed().as_secs_f64() * 1000.0
+    }
+
+    /// Get the time-to-first-byte in milliseconds (if available).
+    #[must_use]
+    pub fn ttfb_ms(&self) -> Option<f64> {
+        self.first_byte_time
+            .map(|t| t.duration_since(self.start_time).as_secs_f64() * 1000.0)
+    }
+
+    /// Build a Server-Timing header from the collected metrics.
+    #[must_use]
+    pub fn to_server_timing(&self) -> ServerTimingBuilder {
+        let mut builder = ServerTimingBuilder::new().add_with_desc(
+            "total",
+            self.total_ms(),
+            "Total request time",
+        );
+
+        if let Some(ttfb) = self.ttfb_ms() {
+            builder = builder.add_with_desc("ttfb", ttfb, "Time to first byte");
+        }
+
+        for (name, duration, desc) in &self.custom_metrics {
+            match desc {
+                Some(d) => builder = builder.add_with_desc(name, *duration, d),
+                None => builder = builder.add(name, *duration),
+            }
+        }
+
+        builder
+    }
+}
+
+impl Default for TimingMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Configuration for the timing metrics middleware.
+#[derive(Debug, Clone)]
+pub struct TimingMetricsConfig {
+    /// Whether to add the Server-Timing header.
+    pub add_server_timing_header: bool,
+    /// Whether to add the X-Response-Time header.
+    pub add_response_time_header: bool,
+    /// Custom header name for response time (default: "X-Response-Time").
+    pub response_time_header_name: String,
+    /// Whether to include custom metrics from handlers.
+    pub include_custom_metrics: bool,
+    /// Whether to include TTFB in the Server-Timing header.
+    pub include_ttfb: bool,
+}
+
+impl Default for TimingMetricsConfig {
+    fn default() -> Self {
+        Self {
+            add_server_timing_header: true,
+            add_response_time_header: true,
+            response_time_header_name: "X-Response-Time".to_string(),
+            include_custom_metrics: true,
+            include_ttfb: true,
+        }
+    }
+}
+
+impl TimingMetricsConfig {
+    /// Create a new config with default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable Server-Timing header.
+    #[must_use]
+    pub fn server_timing(mut self, enabled: bool) -> Self {
+        self.add_server_timing_header = enabled;
+        self
+    }
+
+    /// Enable or disable X-Response-Time header.
+    #[must_use]
+    pub fn response_time(mut self, enabled: bool) -> Self {
+        self.add_response_time_header = enabled;
+        self
+    }
+
+    /// Set a custom response time header name.
+    #[must_use]
+    pub fn response_time_header(mut self, name: impl Into<String>) -> Self {
+        self.response_time_header_name = name.into();
+        self
+    }
+
+    /// Enable or disable custom metrics.
+    #[must_use]
+    pub fn custom_metrics(mut self, enabled: bool) -> Self {
+        self.include_custom_metrics = enabled;
+        self
+    }
+
+    /// Enable or disable TTFB tracking.
+    #[must_use]
+    pub fn ttfb(mut self, enabled: bool) -> Self {
+        self.include_ttfb = enabled;
+        self
+    }
+
+    /// Create a production-safe config (minimal headers).
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            add_server_timing_header: false,
+            add_response_time_header: true,
+            response_time_header_name: "X-Response-Time".to_string(),
+            include_custom_metrics: false,
+            include_ttfb: false,
+        }
+    }
+
+    /// Create a development config (all timing info exposed).
+    #[must_use]
+    pub fn development() -> Self {
+        Self::default()
+    }
+}
+
+/// Middleware that collects and exposes timing metrics.
+///
+/// This middleware:
+/// 1. Records the request start time
+/// 2. Injects `TimingMetrics` into request extensions for handlers to use
+/// 3. Adds timing headers to the response
+///
+/// # Example
+///
+/// ```ignore
+/// let timing = TimingMetricsMiddleware::new();
+/// // Or with custom config:
+/// let timing = TimingMetricsMiddleware::with_config(
+///     TimingMetricsConfig::production()
+/// );
+///
+/// middleware_stack.push(timing);
+/// ```
+#[derive(Debug, Clone)]
+pub struct TimingMetricsMiddleware {
+    config: TimingMetricsConfig,
+}
+
+impl TimingMetricsMiddleware {
+    /// Create a new timing metrics middleware with default config.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: TimingMetricsConfig::default(),
+        }
+    }
+
+    /// Create with a custom configuration.
+    #[must_use]
+    pub fn with_config(config: TimingMetricsConfig) -> Self {
+        Self { config }
+    }
+
+    /// Create a production-safe instance (minimal headers).
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            config: TimingMetricsConfig::production(),
+        }
+    }
+
+    /// Create a development instance (all timing info exposed).
+    #[must_use]
+    pub fn development() -> Self {
+        Self {
+            config: TimingMetricsConfig::development(),
+        }
+    }
+}
+
+impl Default for TimingMetricsMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Middleware for TimingMetricsMiddleware {
+    fn before<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> BoxFuture<'a, ControlFlow> {
+        // Store timing metrics in request extensions
+        req.insert_extension(TimingMetrics::new());
+        Box::pin(async { ControlFlow::Continue })
+    }
+
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a Request,
+        response: Response,
+    ) -> BoxFuture<'a, Response> {
+        let config = self.config.clone();
+
+        Box::pin(async move {
+            let mut resp = response;
+
+            // Get timing metrics from extensions
+            let metrics = req.get_extension::<TimingMetrics>();
+
+            match metrics {
+                Some(metrics) => {
+                    // Add X-Response-Time header
+                    if config.add_response_time_header {
+                        let timing = format!("{:.3}ms", metrics.total_ms());
+                        resp = resp.header(&config.response_time_header_name, timing.into_bytes());
+                    }
+
+                    // Add Server-Timing header
+                    if config.add_server_timing_header {
+                        let mut builder = ServerTimingBuilder::new().add_with_desc(
+                            "total",
+                            metrics.total_ms(),
+                            "Total request time",
+                        );
+
+                        // Add TTFB if available and enabled
+                        if config.include_ttfb {
+                            if let Some(ttfb) = metrics.ttfb_ms() {
+                                builder = builder.add_with_desc("ttfb", ttfb, "Time to first byte");
+                            }
+                        }
+
+                        // Add custom metrics if enabled
+                        if config.include_custom_metrics {
+                            for (name, duration, desc) in &metrics.custom_metrics {
+                                match desc {
+                                    Some(d) => builder = builder.add_with_desc(name, *duration, d),
+                                    None => builder = builder.add(name, *duration),
+                                }
+                            }
+                        }
+
+                        let header_value = builder.build();
+                        resp = resp.header("Server-Timing", header_value.into_bytes());
+                    }
+                }
+                None => {
+                    // No timing metrics in extensions - add basic timing
+                    // This shouldn't happen if middleware is properly registered
+                    if config.add_response_time_header {
+                        resp = resp.header(&config.response_time_header_name, b"0.000ms".to_vec());
+                    }
+                }
+            }
+
+            resp
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "TimingMetrics"
+    }
+}
+
+/// Simple histogram bucket for collecting timing distributions.
+///
+/// Useful for aggregating timing data across many requests.
+#[derive(Debug, Clone)]
+pub struct TimingHistogramBucket {
+    /// Upper bound for this bucket (milliseconds).
+    pub le: f64,
+    /// Count of observations in this bucket.
+    pub count: u64,
+}
+
+/// A histogram for collecting timing distributions.
+///
+/// This provides Prometheus-style histogram buckets for aggregating
+/// timing data across many requests.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut histogram = TimingHistogram::with_buckets(vec![
+///     1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0
+/// ]);
+///
+/// histogram.observe(42.5);  // 42.5ms response time
+/// histogram.observe(150.0);
+///
+/// let buckets = histogram.buckets();
+/// let avg = histogram.mean();
+/// ```
+#[derive(Debug, Clone)]
+pub struct TimingHistogram {
+    /// Bucket upper bounds in milliseconds.
+    bucket_bounds: Vec<f64>,
+    /// Count per bucket.
+    bucket_counts: Vec<u64>,
+    /// Sum of all observed values.
+    sum: f64,
+    /// Total count of observations.
+    count: u64,
+}
+
+impl TimingHistogram {
+    /// Create a histogram with the given bucket upper bounds.
+    ///
+    /// Bounds should be sorted in ascending order.
+    #[must_use]
+    pub fn with_buckets(bucket_bounds: Vec<f64>) -> Self {
+        let bucket_counts = vec![0; bucket_bounds.len()];
+        Self {
+            bucket_bounds,
+            bucket_counts,
+            sum: 0.0,
+            count: 0,
+        }
+    }
+
+    /// Create a histogram with default HTTP latency buckets.
+    ///
+    /// Buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s
+    #[must_use]
+    pub fn http_latency() -> Self {
+        Self::with_buckets(vec![
+            1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
+        ])
+    }
+
+    /// Record an observation.
+    pub fn observe(&mut self, value_ms: f64) {
+        self.sum += value_ms;
+        self.count += 1;
+
+        // Increment bucket counts (cumulative)
+        for (i, bound) in self.bucket_bounds.iter().enumerate() {
+            if value_ms <= *bound {
+                self.bucket_counts[i] += 1;
+            }
+        }
+    }
+
+    /// Get the total count of observations.
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// Get the sum of all observed values.
+    #[must_use]
+    pub fn sum(&self) -> f64 {
+        self.sum
+    }
+
+    /// Get the mean value.
+    #[must_use]
+    pub fn mean(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum / self.count as f64
+        }
+    }
+
+    /// Get the bucket data.
+    #[must_use]
+    pub fn buckets(&self) -> Vec<TimingHistogramBucket> {
+        self.bucket_bounds
+            .iter()
+            .zip(&self.bucket_counts)
+            .map(|(&le, &count)| TimingHistogramBucket { le, count })
+            .collect()
+    }
+
+    /// Reset the histogram.
+    pub fn reset(&mut self) {
+        self.sum = 0.0;
+        self.count = 0;
+        for count in &mut self.bucket_counts {
+            *count = 0;
+        }
+    }
+}
+
+impl Default for TimingHistogram {
+    fn default() -> Self {
+        Self::http_latency()
+    }
+}
+
+// ===========================================================================
+// End Response Timing Metrics Collection
+// ===========================================================================
+
+#[cfg(test)]
+mod timing_metrics_tests {
+    use super::*;
+    use crate::request::Method;
+    use crate::response::StatusCode;
+
+    fn test_context() -> RequestContext {
+        RequestContext::new(asupersync::Cx::for_testing(), 1)
+    }
+
+    fn test_request() -> Request {
+        Request::new(Method::Get, "/test")
+    }
+
+    fn run_middleware_before(mw: &impl Middleware, req: &mut Request) -> ControlFlow {
+        let ctx = test_context();
+        futures_executor::block_on(mw.before(&ctx, req))
+    }
+
+    fn run_middleware_after(mw: &impl Middleware, req: &Request, resp: Response) -> Response {
+        let ctx = test_context();
+        futures_executor::block_on(mw.after(&ctx, req, resp))
+    }
+
+    #[test]
+    fn server_timing_entry_basic() {
+        let entry = ServerTimingEntry::new("db", 42.5);
+        assert_eq!(entry.to_header_value(), "db;dur=42.500");
+    }
+
+    #[test]
+    fn server_timing_entry_with_description() {
+        let entry = ServerTimingEntry::new("db", 42.5).with_description("Database query");
+        assert_eq!(
+            entry.to_header_value(),
+            "db;dur=42.500;desc=\"Database query\""
+        );
+    }
+
+    #[test]
+    fn server_timing_builder_single_entry() {
+        let timing = ServerTimingBuilder::new().add("total", 150.0).build();
+        assert_eq!(timing, "total;dur=150.000");
+    }
+
+    #[test]
+    fn server_timing_builder_multiple_entries() {
+        let timing = ServerTimingBuilder::new()
+            .add("total", 150.0)
+            .add_with_desc("db", 42.0, "Database")
+            .add("cache", 5.0)
+            .build();
+
+        assert!(timing.contains("total;dur=150.000"));
+        assert!(timing.contains("db;dur=42.000;desc=\"Database\""));
+        assert!(timing.contains("cache;dur=5.000"));
+        assert!(timing.contains(", ")); // Multiple entries separated by comma
+    }
+
+    #[test]
+    fn server_timing_builder_empty() {
+        let builder = ServerTimingBuilder::new();
+        assert!(builder.is_empty());
+        assert_eq!(builder.len(), 0);
+        assert_eq!(builder.build(), "");
+    }
+
+    #[test]
+    fn timing_metrics_basic() {
+        let metrics = TimingMetrics::new();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let total = metrics.total_ms();
+        assert!(total >= 5.0, "Total should be at least 5ms");
+        assert!(metrics.ttfb_ms().is_none(), "TTFB should not be set");
+    }
+
+    #[test]
+    fn timing_metrics_custom_metrics() {
+        let mut metrics = TimingMetrics::new();
+        metrics.add_metric("db", 42.5);
+        metrics.add_metric_with_desc("cache", 5.0, "Cache lookup");
+
+        let timing = metrics.to_server_timing();
+        assert_eq!(timing.len(), 3); // total + 2 custom
+
+        let header = timing.build();
+        assert!(header.contains("total"));
+        assert!(header.contains("db;dur=42.500"));
+        assert!(header.contains("cache;dur=5.000;desc=\"Cache lookup\""));
+    }
+
+    #[test]
+    fn timing_metrics_ttfb() {
+        let mut metrics = TimingMetrics::new();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        metrics.mark_first_byte();
+
+        let ttfb = metrics.ttfb_ms().unwrap();
+        assert!(ttfb >= 5.0, "TTFB should be at least 5ms");
+    }
+
+    #[test]
+    fn timing_metrics_config_default() {
+        let config = TimingMetricsConfig::default();
+        assert!(config.add_server_timing_header);
+        assert!(config.add_response_time_header);
+        assert!(config.include_custom_metrics);
+        assert!(config.include_ttfb);
+    }
+
+    #[test]
+    fn timing_metrics_config_production() {
+        let config = TimingMetricsConfig::production();
+        assert!(!config.add_server_timing_header);
+        assert!(config.add_response_time_header);
+        assert!(!config.include_custom_metrics);
+    }
+
+    #[test]
+    fn timing_middleware_adds_metrics_to_request() {
+        let mw = TimingMetricsMiddleware::new();
+        let mut req = test_request();
+
+        // Before should insert TimingMetrics
+        let result = run_middleware_before(&mw, &mut req);
+        assert!(result.is_continue());
+
+        let metrics = req.get_extension::<TimingMetrics>();
+        assert!(metrics.is_some(), "TimingMetrics should be in extensions");
+    }
+
+    #[test]
+    fn timing_middleware_adds_response_time_header() {
+        let mw = TimingMetricsMiddleware::new();
+        let mut req = test_request();
+
+        // Run before to insert TimingMetrics
+        run_middleware_before(&mw, &mut req);
+
+        let resp = Response::with_status(StatusCode::OK);
+        let result = run_middleware_after(&mw, &req, resp);
+
+        let has_timing = result
+            .headers()
+            .iter()
+            .any(|(name, _)| name == "X-Response-Time");
+        assert!(has_timing, "Should have X-Response-Time header");
+    }
+
+    #[test]
+    fn timing_middleware_adds_server_timing_header() {
+        let mw = TimingMetricsMiddleware::new();
+        let mut req = test_request();
+
+        run_middleware_before(&mw, &mut req);
+
+        let resp = Response::with_status(StatusCode::OK);
+        let result = run_middleware_after(&mw, &req, resp);
+
+        let server_timing = result
+            .headers()
+            .iter()
+            .find(|(name, _)| name == "Server-Timing")
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string());
+
+        assert!(server_timing.is_some(), "Should have Server-Timing header");
+        let header = server_timing.unwrap();
+        assert!(header.contains("total"), "Should have total timing");
+    }
+
+    #[test]
+    fn timing_middleware_production_mode() {
+        let mw = TimingMetricsMiddleware::production();
+        let mut req = test_request();
+
+        run_middleware_before(&mw, &mut req);
+
+        let resp = Response::with_status(StatusCode::OK);
+        let result = run_middleware_after(&mw, &req, resp);
+
+        // Should have X-Response-Time
+        let has_response_time = result
+            .headers()
+            .iter()
+            .any(|(name, _)| name == "X-Response-Time");
+        assert!(has_response_time);
+
+        // Should NOT have Server-Timing
+        let has_server_timing = result
+            .headers()
+            .iter()
+            .any(|(name, _)| name == "Server-Timing");
+        assert!(!has_server_timing);
+    }
+
+    #[test]
+    fn timing_histogram_basic() {
+        let mut histogram = TimingHistogram::http_latency();
+        assert_eq!(histogram.count(), 0);
+        assert_eq!(histogram.sum(), 0.0);
+
+        histogram.observe(42.0);
+        histogram.observe(150.0);
+        histogram.observe(5.0);
+
+        assert_eq!(histogram.count(), 3);
+        assert_eq!(histogram.sum(), 197.0);
+        assert!((histogram.mean() - 65.666).abs() < 0.01);
+    }
+
+    #[test]
+    fn timing_histogram_buckets() {
+        let mut histogram = TimingHistogram::with_buckets(vec![10.0, 50.0, 100.0]);
+
+        histogram.observe(5.0); // Falls in 10 bucket
+        histogram.observe(25.0); // Falls in 50 bucket
+        histogram.observe(75.0); // Falls in 100 bucket
+        histogram.observe(150.0); // Above all buckets
+
+        let buckets = histogram.buckets();
+        assert_eq!(buckets.len(), 3);
+
+        // Buckets are cumulative
+        assert_eq!(buckets[0].count, 1); // <= 10: 1
+        assert_eq!(buckets[1].count, 2); // <= 50: 2
+        assert_eq!(buckets[2].count, 3); // <= 100: 3
+    }
+
+    #[test]
+    fn timing_histogram_reset() {
+        let mut histogram = TimingHistogram::http_latency();
+        histogram.observe(100.0);
+        histogram.observe(200.0);
+
+        assert_eq!(histogram.count(), 2);
+
+        histogram.reset();
+
+        assert_eq!(histogram.count(), 0);
+        assert_eq!(histogram.sum(), 0.0);
+    }
+}
+
 #[cfg(test)]
 mod response_interceptor_tests {
     use super::*;

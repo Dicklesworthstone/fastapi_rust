@@ -121,7 +121,9 @@ pub use middleware::{
     RequestIdMiddleware, RequestInspectionMiddleware, RequestResponseLogger, RequireHeader,
     ResponseBodyTransform, ResponseInterceptor, ResponseInterceptorContext,
     ResponseInterceptorMiddleware, ResponseInterceptorStack, SecurityHeaders,
-    SecurityHeadersConfig, TimingInterceptor, TraceRejectionMiddleware, XFrameOptions,
+    SecurityHeadersConfig, ServerTimingBuilder, ServerTimingEntry, TimingHistogram,
+    TimingHistogramBucket, TimingInterceptor, TimingMetrics, TimingMetricsConfig,
+    TimingMetricsMiddleware, TraceRejectionMiddleware, XFrameOptions,
 };
 #[cfg(feature = "compression")]
 pub use middleware::{CompressionConfig, CompressionMiddleware};
