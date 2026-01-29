@@ -4136,6 +4136,730 @@ impl Middleware for ETagMiddleware {
 }
 
 // ===========================================================================
+// HTTP Cache Control Middleware
+// ===========================================================================
+
+/// Individual Cache-Control directives.
+///
+/// These directives control how responses are cached by browsers, proxies,
+/// and CDNs. See RFC 7234 for full specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheDirective {
+    /// Response may be stored by any cache.
+    Public,
+    /// Response may only be stored by browser cache (not shared caches like CDNs).
+    Private,
+    /// Response must not be stored by any cache.
+    NoStore,
+    /// Cache must validate with server before using cached response.
+    NoCache,
+    /// Cache must not transform the response (e.g., compress images).
+    NoTransform,
+    /// Cached response must be revalidated once it becomes stale.
+    MustRevalidate,
+    /// Like must-revalidate but only for shared caches.
+    ProxyRevalidate,
+    /// Response may be served stale if origin is unreachable.
+    StaleIfError,
+    /// Response may be served stale while revalidating in background.
+    StaleWhileRevalidate,
+    /// Only cache if explicitly told to (for shared caches).
+    SMaxAge,
+    /// Do not store response in persistent storage.
+    OnlyIfCached,
+    /// Indicates an immutable response that won't change during its freshness lifetime.
+    Immutable,
+}
+
+impl CacheDirective {
+    /// Returns the directive as a Cache-Control header string fragment.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::NoStore => "no-store",
+            Self::NoCache => "no-cache",
+            Self::NoTransform => "no-transform",
+            Self::MustRevalidate => "must-revalidate",
+            Self::ProxyRevalidate => "proxy-revalidate",
+            Self::StaleIfError => "stale-if-error",
+            Self::StaleWhileRevalidate => "stale-while-revalidate",
+            Self::SMaxAge => "s-maxage",
+            Self::OnlyIfCached => "only-if-cached",
+            Self::Immutable => "immutable",
+        }
+    }
+}
+
+/// Builder for constructing Cache-Control header values.
+///
+/// Provides a fluent API for building complex cache control policies.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::CacheControlBuilder;
+///
+/// // Public, cacheable for 1 hour, must revalidate after
+/// let cache = CacheControlBuilder::new()
+///     .public()
+///     .max_age_secs(3600)
+///     .must_revalidate()
+///     .build();
+///
+/// // Private, no caching
+/// let no_cache = CacheControlBuilder::new()
+///     .private()
+///     .no_store()
+///     .build();
+///
+/// // CDN-friendly: public with different browser/CDN TTLs
+/// let cdn = CacheControlBuilder::new()
+///     .public()
+///     .max_age_secs(60)        // Browser caches for 1 minute
+///     .s_maxage_secs(3600)     // CDN caches for 1 hour
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CacheControlBuilder {
+    directives: Vec<CacheDirective>,
+    max_age: Option<u32>,
+    s_maxage: Option<u32>,
+    stale_while_revalidate: Option<u32>,
+    stale_if_error: Option<u32>,
+}
+
+impl CacheControlBuilder {
+    /// Create a new empty Cache-Control builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add the `public` directive - response may be cached by any cache.
+    #[must_use]
+    pub fn public(mut self) -> Self {
+        self.directives.push(CacheDirective::Public);
+        self
+    }
+
+    /// Add the `private` directive - response may only be cached by browser.
+    #[must_use]
+    pub fn private(mut self) -> Self {
+        self.directives.push(CacheDirective::Private);
+        self
+    }
+
+    /// Add the `no-store` directive - response must not be cached.
+    #[must_use]
+    pub fn no_store(mut self) -> Self {
+        self.directives.push(CacheDirective::NoStore);
+        self
+    }
+
+    /// Add the `no-cache` directive - must revalidate before using cache.
+    #[must_use]
+    pub fn no_cache(mut self) -> Self {
+        self.directives.push(CacheDirective::NoCache);
+        self
+    }
+
+    /// Add the `no-transform` directive - caches must not modify response.
+    #[must_use]
+    pub fn no_transform(mut self) -> Self {
+        self.directives.push(CacheDirective::NoTransform);
+        self
+    }
+
+    /// Add the `must-revalidate` directive - cache must check origin when stale.
+    #[must_use]
+    pub fn must_revalidate(mut self) -> Self {
+        self.directives.push(CacheDirective::MustRevalidate);
+        self
+    }
+
+    /// Add the `proxy-revalidate` directive - shared caches must check origin when stale.
+    #[must_use]
+    pub fn proxy_revalidate(mut self) -> Self {
+        self.directives.push(CacheDirective::ProxyRevalidate);
+        self
+    }
+
+    /// Add the `immutable` directive - response won't change during freshness lifetime.
+    #[must_use]
+    pub fn immutable(mut self) -> Self {
+        self.directives.push(CacheDirective::Immutable);
+        self
+    }
+
+    /// Set `max-age` directive - maximum time response is fresh (in seconds).
+    #[must_use]
+    pub fn max_age_secs(mut self, seconds: u32) -> Self {
+        self.max_age = Some(seconds);
+        self
+    }
+
+    /// Set `max-age` directive from a Duration.
+    #[must_use]
+    pub fn max_age(self, duration: std::time::Duration) -> Self {
+        self.max_age_secs(duration.as_secs() as u32)
+    }
+
+    /// Set `s-maxage` directive - maximum time for shared caches (in seconds).
+    #[must_use]
+    pub fn s_maxage_secs(mut self, seconds: u32) -> Self {
+        self.s_maxage = Some(seconds);
+        self
+    }
+
+    /// Set `s-maxage` directive from a Duration.
+    #[must_use]
+    pub fn s_maxage(self, duration: std::time::Duration) -> Self {
+        self.s_maxage_secs(duration.as_secs() as u32)
+    }
+
+    /// Set `stale-while-revalidate` directive - serve stale while revalidating (in seconds).
+    #[must_use]
+    pub fn stale_while_revalidate_secs(mut self, seconds: u32) -> Self {
+        self.stale_while_revalidate = Some(seconds);
+        self
+    }
+
+    /// Set `stale-if-error` directive - serve stale if origin errors (in seconds).
+    #[must_use]
+    pub fn stale_if_error_secs(mut self, seconds: u32) -> Self {
+        self.stale_if_error = Some(seconds);
+        self
+    }
+
+    /// Build the Cache-Control header value string.
+    #[must_use]
+    pub fn build(&self) -> String {
+        let mut parts = Vec::new();
+
+        // Add directives
+        for directive in &self.directives {
+            parts.push(directive.as_str().to_string());
+        }
+
+        // Add max-age
+        if let Some(age) = self.max_age {
+            parts.push(format!("max-age={age}"));
+        }
+
+        // Add s-maxage
+        if let Some(age) = self.s_maxage {
+            parts.push(format!("s-maxage={age}"));
+        }
+
+        // Add stale-while-revalidate
+        if let Some(seconds) = self.stale_while_revalidate {
+            parts.push(format!("stale-while-revalidate={seconds}"));
+        }
+
+        // Add stale-if-error
+        if let Some(seconds) = self.stale_if_error {
+            parts.push(format!("stale-if-error={seconds}"));
+        }
+
+        parts.join(", ")
+    }
+
+    /// Check if this represents a no-cache policy.
+    #[must_use]
+    pub fn is_no_cache(&self) -> bool {
+        self.directives.contains(&CacheDirective::NoStore)
+            || self.directives.contains(&CacheDirective::NoCache)
+    }
+}
+
+/// Common cache control presets for typical use cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CachePreset {
+    /// No caching: `no-store, no-cache, must-revalidate`
+    NoCache,
+    /// Private caching only: `private, max-age=0, must-revalidate`
+    PrivateNoCache,
+    /// Standard public caching: `public, max-age=3600`
+    PublicOneHour,
+    /// Long-term immutable: `public, max-age=31536000, immutable`
+    Immutable,
+    /// CDN-friendly with short browser TTL: `public, max-age=60, s-maxage=3600`
+    CdnFriendly,
+    /// Static assets: `public, max-age=86400`
+    StaticAssets,
+}
+
+impl CachePreset {
+    /// Convert preset to Cache-Control header value.
+    #[must_use]
+    pub fn to_header_value(&self) -> String {
+        match self {
+            Self::NoCache => "no-store, no-cache, must-revalidate".to_string(),
+            Self::PrivateNoCache => "private, max-age=0, must-revalidate".to_string(),
+            Self::PublicOneHour => "public, max-age=3600".to_string(),
+            Self::Immutable => "public, max-age=31536000, immutable".to_string(),
+            Self::CdnFriendly => "public, max-age=60, s-maxage=3600".to_string(),
+            Self::StaticAssets => "public, max-age=86400".to_string(),
+        }
+    }
+
+    /// Convert preset to a CacheControlBuilder for further customization.
+    #[must_use]
+    pub fn to_builder(&self) -> CacheControlBuilder {
+        match self {
+            Self::NoCache => CacheControlBuilder::new()
+                .no_store()
+                .no_cache()
+                .must_revalidate(),
+            Self::PrivateNoCache => CacheControlBuilder::new()
+                .private()
+                .max_age_secs(0)
+                .must_revalidate(),
+            Self::PublicOneHour => CacheControlBuilder::new().public().max_age_secs(3600),
+            Self::Immutable => CacheControlBuilder::new()
+                .public()
+                .max_age_secs(31536000)
+                .immutable(),
+            Self::CdnFriendly => CacheControlBuilder::new()
+                .public()
+                .max_age_secs(60)
+                .s_maxage_secs(3600),
+            Self::StaticAssets => CacheControlBuilder::new().public().max_age_secs(86400),
+        }
+    }
+}
+
+/// Configuration for the Cache Control middleware.
+#[derive(Debug, Clone)]
+pub struct CacheControlConfig {
+    /// The Cache-Control header value to set.
+    pub cache_control: String,
+    /// Optional Vary header values for content negotiation.
+    pub vary: Vec<String>,
+    /// Whether to set Expires header (deprecated but still used).
+    pub set_expires: bool,
+    /// Whether to preserve existing Cache-Control headers.
+    pub preserve_existing: bool,
+    /// HTTP methods to apply caching to (default: GET, HEAD).
+    pub methods: Vec<crate::request::Method>,
+    /// Path patterns to match (empty = match all).
+    pub path_patterns: Vec<String>,
+    /// Status codes to cache (default: 200-299).
+    pub cacheable_statuses: Vec<u16>,
+}
+
+impl Default for CacheControlConfig {
+    fn default() -> Self {
+        Self {
+            cache_control: CachePreset::NoCache.to_header_value(),
+            vary: Vec::new(),
+            set_expires: false,
+            preserve_existing: true,
+            methods: vec![
+                crate::request::Method::Get,
+                crate::request::Method::Head,
+            ],
+            path_patterns: Vec::new(),
+            cacheable_statuses: (200..300).collect(),
+        }
+    }
+}
+
+impl CacheControlConfig {
+    /// Create a new configuration with the default no-cache policy.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create configuration from a preset.
+    #[must_use]
+    pub fn from_preset(preset: CachePreset) -> Self {
+        Self {
+            cache_control: preset.to_header_value(),
+            ..Self::default()
+        }
+    }
+
+    /// Create configuration from a custom builder.
+    #[must_use]
+    pub fn from_builder(builder: CacheControlBuilder) -> Self {
+        Self {
+            cache_control: builder.build(),
+            ..Self::default()
+        }
+    }
+
+    /// Set the Cache-Control header value.
+    #[must_use]
+    pub fn cache_control(mut self, value: impl Into<String>) -> Self {
+        self.cache_control = value.into();
+        self
+    }
+
+    /// Add a Vary header value (for content negotiation).
+    #[must_use]
+    pub fn vary(mut self, header: impl Into<String>) -> Self {
+        self.vary.push(header.into());
+        self
+    }
+
+    /// Add multiple Vary header values.
+    #[must_use]
+    pub fn vary_headers(mut self, headers: Vec<String>) -> Self {
+        self.vary.extend(headers);
+        self
+    }
+
+    /// Enable setting the Expires header.
+    #[must_use]
+    pub fn with_expires(mut self, enable: bool) -> Self {
+        self.set_expires = enable;
+        self
+    }
+
+    /// Whether to preserve existing Cache-Control headers.
+    #[must_use]
+    pub fn preserve_existing(mut self, preserve: bool) -> Self {
+        self.preserve_existing = preserve;
+        self
+    }
+
+    /// Set the HTTP methods to apply caching to.
+    #[must_use]
+    pub fn methods(mut self, methods: Vec<crate::request::Method>) -> Self {
+        self.methods = methods;
+        self
+    }
+
+    /// Set path patterns to match (glob-style).
+    #[must_use]
+    pub fn path_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.path_patterns = patterns;
+        self
+    }
+
+    /// Set cacheable status codes.
+    #[must_use]
+    pub fn cacheable_statuses(mut self, statuses: Vec<u16>) -> Self {
+        self.cacheable_statuses = statuses;
+        self
+    }
+}
+
+/// Middleware for setting HTTP cache control headers.
+///
+/// This middleware adds Cache-Control, Vary, and optionally Expires headers
+/// to responses. It supports various caching strategies from no-cache to
+/// aggressive caching for static assets.
+///
+/// # Features
+///
+/// - **Cache-Control directives**: Full support for RFC 7234 directives
+/// - **Vary header**: Content negotiation support for Accept-Encoding, Accept-Language, etc.
+/// - **Expires header**: Optional legacy header support
+/// - **Per-route configuration**: Apply different policies via middleware stacks
+/// - **Method filtering**: Only cache GET/HEAD by default
+/// - **Status filtering**: Only cache successful responses
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::{CacheControlMiddleware, CacheControlConfig, CachePreset};
+///
+/// // No caching for API responses (default)
+/// let api_cache = CacheControlMiddleware::new();
+///
+/// // Public caching for static assets
+/// let static_cache = CacheControlMiddleware::with_preset(CachePreset::StaticAssets);
+///
+/// // Custom caching with Vary header
+/// let custom_cache = CacheControlMiddleware::with_config(
+///     CacheControlConfig::from_preset(CachePreset::PublicOneHour)
+///         .vary("Accept-Encoding")
+///         .vary("Accept-Language")
+///         .with_expires(true)
+/// );
+///
+/// // CDN-friendly caching
+/// let cdn_cache = CacheControlMiddleware::with_preset(CachePreset::CdnFriendly);
+/// ```
+///
+/// # Response Headers Set
+///
+/// | Header | Description |
+/// |--------|-------------|
+/// | `Cache-Control` | Main caching directive |
+/// | `Vary` | Headers that affect caching |
+/// | `Expires` | Legacy expiration (if enabled) |
+///
+pub struct CacheControlMiddleware {
+    config: CacheControlConfig,
+}
+
+impl Default for CacheControlMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CacheControlMiddleware {
+    /// Create middleware with default no-cache policy.
+    ///
+    /// This is the safest default - no caching unless explicitly configured.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: CacheControlConfig::default(),
+        }
+    }
+
+    /// Create middleware with a preset caching policy.
+    #[must_use]
+    pub fn with_preset(preset: CachePreset) -> Self {
+        Self {
+            config: CacheControlConfig::from_preset(preset),
+        }
+    }
+
+    /// Create middleware with custom configuration.
+    #[must_use]
+    pub fn with_config(config: CacheControlConfig) -> Self {
+        Self { config }
+    }
+
+    /// Check if the request method is cacheable.
+    fn is_cacheable_method(&self, method: crate::request::Method) -> bool {
+        self.config.methods.contains(&method)
+    }
+
+    /// Check if the response status is cacheable.
+    fn is_cacheable_status(&self, status: u16) -> bool {
+        self.config.cacheable_statuses.contains(&status)
+    }
+
+    /// Check if the path matches any configured patterns.
+    fn matches_path(&self, path: &str) -> bool {
+        if self.config.path_patterns.is_empty() {
+            return true; // Match all if no patterns configured
+        }
+
+        for pattern in &self.config.path_patterns {
+            if path_matches_pattern(path, pattern) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if response already has a Cache-Control header.
+    fn has_cache_control(headers: &[(String, Vec<u8>)]) -> bool {
+        headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("cache-control"))
+    }
+
+    /// Calculate Expires date from max-age value.
+    fn calculate_expires(cache_control: &str) -> Option<String> {
+        // Extract max-age value if present
+        for directive in cache_control.split(',') {
+            let directive = directive.trim();
+            if directive.starts_with("max-age=") {
+                if let Ok(seconds) = directive[8..].parse::<u64>() {
+                    // Calculate expiration time
+                    let now = std::time::SystemTime::now();
+                    if let Some(expires) = now.checked_add(std::time::Duration::from_secs(seconds)) {
+                        return Some(format_http_date(expires));
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Simple path pattern matching (supports * wildcard).
+fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    if pattern.contains('*') {
+        // Simple wildcard matching
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() == 2 {
+            let (prefix, suffix) = (parts[0], parts[1]);
+            return path.starts_with(prefix) && path.ends_with(suffix);
+        }
+        // For more complex patterns, do a simple contains check
+        let fixed_parts: Vec<&str> = pattern.split('*').filter(|s| !s.is_empty()).collect();
+        let mut remaining = path;
+        for part in fixed_parts {
+            if let Some(pos) = remaining.find(part) {
+                remaining = &remaining[pos + part.len()..];
+            } else {
+                return false;
+            }
+        }
+        true
+    } else {
+        path == pattern
+    }
+}
+
+/// Format a SystemTime as an HTTP date (RFC 7231).
+fn format_http_date(time: std::time::SystemTime) -> String {
+    // Use UNIX_EPOCH to calculate duration
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => {
+            // Calculate date components
+            let secs = duration.as_secs();
+            // Days since epoch
+            let days = secs / 86400;
+            let remaining_secs = secs % 86400;
+            let hours = remaining_secs / 3600;
+            let minutes = (remaining_secs % 3600) / 60;
+            let seconds = remaining_secs % 60;
+
+            // Calculate day of week (Jan 1, 1970 was Thursday = 4)
+            let day_of_week = ((days + 4) % 7) as usize;
+            let day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+            // Calculate date (simplified - doesn't account for leap years perfectly but good enough)
+            let (year, month, day) = days_to_date(days);
+            let month_names = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+
+            format!(
+                "{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
+                day_names[day_of_week],
+                day,
+                month_names[(month - 1) as usize],
+                year,
+                hours,
+                minutes,
+                seconds
+            )
+        }
+        Err(_) => "Thu, 01 Jan 1970 00:00:00 GMT".to_string(),
+    }
+}
+
+/// Convert days since UNIX epoch to (year, month, day).
+fn days_to_date(days: u64) -> (u64, u64, u64) {
+    // Simplified algorithm - works for dates 1970-2099
+    let mut remaining_days = days;
+    let mut year = 1970u64;
+
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let leap = is_leap_year(year);
+    let month_days = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1u64;
+    for days_in_month in month_days.iter() {
+        if remaining_days < *days_in_month as u64 {
+            break;
+        }
+        remaining_days -= *days_in_month as u64;
+        month += 1;
+    }
+
+    (year, month, remaining_days + 1)
+}
+
+/// Check if a year is a leap year.
+fn is_leap_year(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+impl Middleware for CacheControlMiddleware {
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a Request,
+        response: Response,
+    ) -> BoxFuture<'a, Response> {
+        let config = self.config.clone();
+
+        Box::pin(async move {
+            // Check if this request/response is cacheable
+            if !self.is_cacheable_method(&req.method()) {
+                return response;
+            }
+
+            if !self.is_cacheable_status(response.status().as_u16()) {
+                return response;
+            }
+
+            if !self.matches_path(req.path()) {
+                return response;
+            }
+
+            // Decompose response to modify headers
+            let (status, mut headers, body) = response.into_parts();
+
+            // Check for existing Cache-Control header
+            if config.preserve_existing && Self::has_cache_control(&headers) {
+                // Reconstruct and return unchanged
+                let mut resp = Response::with_status(status);
+                for (name, value) in headers {
+                    resp = resp.header(name, value);
+                }
+                return resp.body(body);
+            }
+
+            // Add Cache-Control header
+            headers.push((
+                "Cache-Control".to_string(),
+                config.cache_control.as_bytes().to_vec(),
+            ));
+
+            // Add Vary header if configured
+            if !config.vary.is_empty() {
+                let vary_value = config.vary.join(", ");
+                headers.push(("Vary".to_string(), vary_value.into_bytes()));
+            }
+
+            // Add Expires header if configured
+            if config.set_expires {
+                if let Some(expires) = Self::calculate_expires(&config.cache_control) {
+                    headers.push(("Expires".to_string(), expires.into_bytes()));
+                }
+            }
+
+            // Reconstruct response
+            let mut resp = Response::with_status(status);
+            for (name, value) in headers {
+                resp = resp.header(name, value);
+            }
+            resp.body(body)
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "CacheControlMiddleware"
+    }
+}
+
+// ===========================================================================
+// End Cache Control Middleware
+// ===========================================================================
+
+// ===========================================================================
 // End ETag Middleware
 // ===========================================================================
 

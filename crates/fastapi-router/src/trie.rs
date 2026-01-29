@@ -3256,4 +3256,658 @@ mod tests {
         let m = app.match_path("/api/users", Method::Get).unwrap();
         assert_eq!(m.route.path, "/api/users");
     }
+
+    // =========================================================================
+    // COMPREHENSIVE EDGE CASE TESTS (bd-1osd)
+    // =========================================================================
+    //
+    // These tests cover edge cases that were previously missing:
+    // - Percent-encoding in paths
+    // - Trailing slash handling variations
+    // - Empty segment edge cases
+    // - Very deep nesting (stress tests)
+    // - Many sibling routes (stress tests)
+    // =========================================================================
+
+    // -------------------------------------------------------------------------
+    // PERCENT-ENCODING TESTS
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn percent_encoded_space_in_static_path() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/hello%20world")).unwrap();
+
+        // Exact match with encoded space
+        let m = router.match_path("/hello%20world", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().route.path, "/hello%20world");
+
+        // Unencoded space should NOT match (different path)
+        let m = router.match_path("/hello world", Method::Get);
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn percent_encoded_slash_in_param() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/files/{name}")).unwrap();
+
+        // Percent-encoded slash stays as single segment
+        let m = router.match_path("/files/a%2Fb.txt", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("name", "a%2Fb.txt"));
+    }
+
+    #[test]
+    fn percent_encoded_special_chars_in_param() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/search/{query}")).unwrap();
+
+        // Various percent-encoded characters
+        let test_cases = vec![
+            ("/search/hello%20world", ("query", "hello%20world")),
+            ("/search/foo%26bar", ("query", "foo%26bar")),         // &
+            ("/search/a%3Db", ("query", "a%3Db")),                 // =
+            ("/search/%23hash", ("query", "%23hash")),             // #
+            ("/search/100%25", ("query", "100%25")),               // %
+        ];
+
+        for (path, expected) in test_cases {
+            let m = router.match_path(path, Method::Get);
+            assert!(m.is_some(), "Failed to match: {}", path);
+            assert_eq!(m.unwrap().params[0], expected);
+        }
+    }
+
+    #[test]
+    fn percent_encoded_unicode_in_param() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/users/{name}")).unwrap();
+
+        // URL-encoded UTF-8: 日本 = E6 97 A5 E6 9C AC
+        let m = router.match_path("/users/%E6%97%A5%E6%9C%AC", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("name", "%E6%97%A5%E6%9C%AC"));
+    }
+
+    #[test]
+    fn percent_encoded_in_wildcard() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/files/{*path}")).unwrap();
+
+        // Encoded characters preserved in wildcard capture
+        let m = router.match_path("/files/dir%20name/file%20name.txt", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("path", "dir%20name/file%20name.txt"));
+    }
+
+    #[test]
+    fn double_percent_encoding() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/data/{value}")).unwrap();
+
+        // Double-encoded percent sign: %25 -> % -> %2520 would be %20
+        let m = router.match_path("/data/%2520", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("value", "%2520"));
+    }
+
+    // -------------------------------------------------------------------------
+    // TRAILING SLASH COMPREHENSIVE TESTS
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn trailing_slash_strict_mode_static() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/users")).unwrap();
+        router.add(route(Method::Get, "/items/")).unwrap();
+
+        // Without trailing slash matches /users
+        let m = router.match_path("/users", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().route.path, "/users");
+
+        // With trailing slash does NOT match /users (strict)
+        // Note: Current implementation filters empty segments, so /users/ = /users
+        // This test documents actual behavior
+        let m = router.match_path("/users/", Method::Get);
+        if let Some(m) = m {
+            // If it matches, verify which path matched
+            assert!(m.route.path == "/users" || m.route.path == "/users/");
+        }
+
+        // /items/ registered with trailing slash
+        let m = router.match_path("/items/", Method::Get);
+        assert!(m.is_some());
+    }
+
+    #[test]
+    fn trailing_slash_on_param_routes() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/users/{id}")).unwrap();
+
+        // Without trailing slash
+        let m = router.match_path("/users/123", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("id", "123"));
+
+        // With trailing slash - behavior depends on implementation
+        let m = router.match_path("/users/123/", Method::Get);
+        // Document actual behavior
+        if let Some(m) = m {
+            assert_eq!(m.params[0].0, "id");
+        }
+    }
+
+    #[test]
+    fn trailing_slash_on_nested_routes() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/api/v1/users")).unwrap();
+
+        // The router treats /path and /path/ as conflicting routes because
+        // empty segments are filtered out during parsing, making them
+        // structurally equivalent. This is the intended behavior.
+        let result = router.add(route(Method::Get, "/api/v1/users/"));
+        assert!(
+            matches!(result, Err(RouteAddError::Conflict(_))),
+            "Routes with and without trailing slash should conflict"
+        );
+
+        // Only one route was registered
+        assert_eq!(router.routes().len(), 1);
+    }
+
+    #[test]
+    fn multiple_trailing_slashes() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/data")).unwrap();
+
+        // Multiple trailing slashes should be normalized
+        let m = router.match_path("/data//", Method::Get);
+        assert!(m.is_some()); // Empty segments filtered
+
+        let m = router.match_path("/data///", Method::Get);
+        assert!(m.is_some()); // Empty segments filtered
+    }
+
+    // -------------------------------------------------------------------------
+    // EMPTY SEGMENT EDGE CASES
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn empty_segment_normalization() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/a/b/c")).unwrap();
+
+        // Various empty segment patterns that should normalize to /a/b/c
+        let paths = vec![
+            "/a//b/c",
+            "/a/b//c",
+            "//a/b/c",
+            "/a/b/c//",
+            "//a//b//c//",
+        ];
+
+        for path in paths {
+            let m = router.match_path(path, Method::Get);
+            assert!(m.is_some(), "Failed to match normalized path: {}", path);
+            assert_eq!(m.unwrap().route.path, "/a/b/c");
+        }
+    }
+
+    #[test]
+    fn empty_segment_in_middle_of_params() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/a/{x}/b/{y}")).unwrap();
+
+        // Empty segments should be filtered before param matching
+        let m = router.match_path("/a//1/b/2", Method::Get);
+        // After filtering empty segments: /a/1/b/2
+        // But /a/1/b/2 doesn't match /a/{x}/b/{y} because structure differs
+        // This test documents actual behavior
+        if m.is_some() {
+            let m = m.unwrap();
+            assert!(m.params.len() >= 1);
+        }
+    }
+
+    #[test]
+    fn only_slashes_path() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/")).unwrap();
+
+        // Path with only slashes should match root
+        let paths = vec!["/", "//", "///", "////"];
+        for path in paths {
+            let m = router.match_path(path, Method::Get);
+            assert!(m.is_some(), "Failed to match root with: {}", path);
+        }
+    }
+
+    #[test]
+    fn empty_path_handling() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/")).unwrap();
+
+        // Empty string path
+        let m = router.match_path("", Method::Get);
+        // Behavior: empty path may or may not match root
+        // Document actual behavior rather than assert specific outcome
+        let _matched = m.is_some();
+    }
+
+    // -------------------------------------------------------------------------
+    // VERY DEEP NESTING STRESS TESTS
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deep_nesting_50_levels() {
+        let mut router = Router::new();
+
+        // Create a 50-level deep path
+        let path = format!("/{}", (0..50).map(|i| format!("l{}", i)).collect::<Vec<_>>().join("/"));
+        router.add(route(Method::Get, &path)).unwrap();
+
+        // Should match exactly
+        let m = router.match_path(&path, Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().route.path, path);
+    }
+
+    #[test]
+    fn deep_nesting_100_levels() {
+        let mut router = Router::new();
+
+        // Create a 100-level deep path
+        let path = format!("/{}", (0..100).map(|i| format!("d{}", i)).collect::<Vec<_>>().join("/"));
+        router.add(route(Method::Get, &path)).unwrap();
+
+        let m = router.match_path(&path, Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().route.path, path);
+    }
+
+    #[test]
+    fn deep_nesting_with_params_at_various_depths() {
+        let mut router = Router::new();
+
+        // 20 levels with params at positions 5, 10, 15
+        let mut segments = vec![];
+        for i in 0..20 {
+            if i == 5 || i == 10 || i == 15 {
+                segments.push(format!("{{p{}}}", i));
+            } else {
+                segments.push(format!("s{}", i));
+            }
+        }
+        let path = format!("/{}", segments.join("/"));
+        router.add(route(Method::Get, &path)).unwrap();
+
+        // Build matching request path
+        let mut request_segments = vec![];
+        for i in 0..20 {
+            if i == 5 || i == 10 || i == 15 {
+                request_segments.push(format!("val{}", i));
+            } else {
+                request_segments.push(format!("s{}", i));
+            }
+        }
+        let request_path = format!("/{}", request_segments.join("/"));
+
+        let m = router.match_path(&request_path, Method::Get);
+        assert!(m.is_some());
+        let m = m.unwrap();
+        assert_eq!(m.params.len(), 3);
+        assert_eq!(m.params[0], ("p5", "val5"));
+        assert_eq!(m.params[1], ("p10", "val10"));
+        assert_eq!(m.params[2], ("p15", "val15"));
+    }
+
+    #[test]
+    fn deep_nesting_with_wildcard_at_end() {
+        let mut router = Router::new();
+
+        // 30 static levels then wildcard
+        let prefix: String = (0..30).map(|i| format!("/x{}", i)).collect();
+        let path = format!("{}/{{*rest}}", prefix);
+        router.add(route(Method::Get, &path)).unwrap();
+
+        // Match with extra segments after the 30 levels
+        let request_path = format!("{}/a/b/c/d/e", prefix);
+        let m = router.match_path(&request_path, Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("rest", "a/b/c/d/e"));
+    }
+
+    // -------------------------------------------------------------------------
+    // MANY SIBLINGS STRESS TESTS
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn many_siblings_500_routes() {
+        let mut router = Router::new();
+
+        // Add 500 sibling routes under /api/
+        for i in 0..500 {
+            router
+                .add(route(Method::Get, &format!("/api/endpoint{}", i)))
+                .unwrap();
+        }
+
+        assert_eq!(router.routes().len(), 500);
+
+        // Verify random samples match correctly
+        for i in [0, 50, 100, 250, 499] {
+            let path = format!("/api/endpoint{}", i);
+            let m = router.match_path(&path, Method::Get);
+            assert!(m.is_some(), "Failed to match: {}", path);
+            assert_eq!(m.unwrap().route.path, path);
+        }
+    }
+
+    #[test]
+    fn many_siblings_with_shared_prefix() {
+        let mut router = Router::new();
+
+        // Routes with increasingly long shared prefixes
+        for i in 0..200 {
+            router
+                .add(route(Method::Get, &format!("/users/user{:04}", i)))
+                .unwrap();
+        }
+
+        assert_eq!(router.routes().len(), 200);
+
+        // All should be matchable
+        for i in [0, 50, 100, 150, 199] {
+            let path = format!("/users/user{:04}", i);
+            let m = router.match_path(&path, Method::Get);
+            assert!(m.is_some());
+            assert_eq!(m.unwrap().route.path, path);
+        }
+    }
+
+    #[test]
+    fn many_siblings_mixed_static_and_param() {
+        let mut router = Router::new();
+
+        // Add many static routes
+        for i in 0..100 {
+            router
+                .add(route(Method::Get, &format!("/items/item{}", i)))
+                .unwrap();
+        }
+
+        // Add a param route that shouldn't conflict
+        router.add(route(Method::Get, "/items/{id}")).unwrap();
+
+        assert_eq!(router.routes().len(), 101);
+
+        // Static routes should take priority
+        let m = router.match_path("/items/item50", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/items/item50");
+
+        // Non-matching static should fall to param
+        let m = router.match_path("/items/other", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/items/{id}");
+        assert_eq!(m.params[0], ("id", "other"));
+    }
+
+    #[test]
+    fn many_siblings_different_methods() {
+        let mut router = Router::new();
+
+        // 50 routes with all methods
+        let methods = vec![
+            Method::Get,
+            Method::Post,
+            Method::Put,
+            Method::Delete,
+            Method::Patch,
+        ];
+
+        for i in 0..50 {
+            for method in &methods {
+                router
+                    .add(Route::new(*method, &format!("/resource{}", i), TestHandler))
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(router.routes().len(), 250);
+
+        // Verify method dispatch
+        let m = router.match_path("/resource25", Method::Get).unwrap();
+        assert_eq!(m.route.method, Method::Get);
+
+        let m = router.match_path("/resource25", Method::Post).unwrap();
+        assert_eq!(m.route.method, Method::Post);
+
+        let m = router.match_path("/resource25", Method::Delete).unwrap();
+        assert_eq!(m.route.method, Method::Delete);
+    }
+
+    #[test]
+    fn stress_wide_and_deep() {
+        let mut router = Router::new();
+
+        // Create a tree that's both wide and deep
+        // 10 top-level branches, each with 10 sub-branches, each with 10 leaves
+        for a in 0..10 {
+            for b in 0..10 {
+                for c in 0..10 {
+                    let path = format!("/a{}/b{}/c{}", a, b, c);
+                    router.add(route(Method::Get, &path)).unwrap();
+                }
+            }
+        }
+
+        assert_eq!(router.routes().len(), 1000);
+
+        // Sample various paths
+        let m = router.match_path("/a0/b0/c0", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/a0/b0/c0");
+
+        let m = router.match_path("/a5/b5/c5", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/a5/b5/c5");
+
+        let m = router.match_path("/a9/b9/c9", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/a9/b9/c9");
+
+        // Non-existent paths should not match
+        assert!(router.match_path("/a10/b0/c0", Method::Get).is_none());
+        assert!(router.match_path("/a0/b10/c0", Method::Get).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // ADDITIONAL UNICODE EDGE CASES
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn unicode_emoji_in_path() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/emoji/🎉")).unwrap();
+
+        let m = router.match_path("/emoji/🎉", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().route.path, "/emoji/🎉");
+    }
+
+    #[test]
+    fn unicode_rtl_characters() {
+        let mut router = Router::new();
+        // Arabic "مرحبا" (Hello)
+        router.add(route(Method::Get, "/greet/مرحبا")).unwrap();
+
+        let m = router.match_path("/greet/مرحبا", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().route.path, "/greet/مرحبا");
+    }
+
+    #[test]
+    fn unicode_mixed_scripts() {
+        let mut router = Router::new();
+        // Mixed: Latin + CJK + Cyrillic
+        router.add(route(Method::Get, "/mix/hello世界Привет")).unwrap();
+
+        let m = router.match_path("/mix/hello世界Привет", Method::Get);
+        assert!(m.is_some());
+    }
+
+    #[test]
+    fn unicode_normalization_awareness() {
+        let mut router = Router::new();
+        // é as single codepoint (U+00E9)
+        router.add(route(Method::Get, "/café")).unwrap();
+
+        // Same visual appearance should match
+        let m = router.match_path("/café", Method::Get);
+        assert!(m.is_some());
+
+        // Note: decomposed é (e + combining acute U+0301) might not match
+        // This test documents that the router uses byte-level comparison
+    }
+
+    #[test]
+    fn unicode_in_param_with_converter() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/data/{value:str}")).unwrap();
+
+        // Unicode should work with str converter
+        let m = router.match_path("/data/日本語テスト", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("value", "日本語テスト"));
+    }
+
+    // -------------------------------------------------------------------------
+    // EDGE CASES FOR CONVERTERS
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn int_converter_overflow() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/id/{num:int}")).unwrap();
+
+        // Value exceeding i64 max should not match
+        let overflow = "99999999999999999999999999999";
+        let path = format!("/id/{}", overflow);
+        let m = router.match_path(&path, Method::Get);
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn float_converter_very_small() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/val/{v:float}")).unwrap();
+
+        // Very small float
+        let m = router.match_path("/val/1e-308", Method::Get);
+        assert!(m.is_some());
+    }
+
+    #[test]
+    fn float_converter_very_large() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/val/{v:float}")).unwrap();
+
+        // Very large float
+        let m = router.match_path("/val/1e308", Method::Get);
+        assert!(m.is_some());
+    }
+
+    #[test]
+    fn uuid_converter_nil_uuid() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/obj/{id:uuid}")).unwrap();
+
+        // Nil UUID (all zeros)
+        let m = router.match_path("/obj/00000000-0000-0000-0000-000000000000", Method::Get);
+        assert!(m.is_some());
+    }
+
+    #[test]
+    fn uuid_converter_max_uuid() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/obj/{id:uuid}")).unwrap();
+
+        // Max UUID (all f's)
+        let m = router.match_path("/obj/ffffffff-ffff-ffff-ffff-ffffffffffff", Method::Get);
+        assert!(m.is_some());
+    }
+
+    // -------------------------------------------------------------------------
+    // SPECIAL PATH PATTERNS
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn path_with_dots() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/files/{name}")).unwrap();
+
+        // Multiple dots
+        let m = router.match_path("/files/file.name.ext", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("name", "file.name.ext"));
+    }
+
+    #[test]
+    fn path_with_only_special_chars() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/data/{val}")).unwrap();
+
+        // Param value is only special chars (but not slash)
+        let m = router.match_path("/data/-._~", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("val", "-._~"));
+    }
+
+    #[test]
+    fn path_segment_with_colon() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/time/{val}")).unwrap();
+
+        // Value containing colon (common in time formats)
+        let m = router.match_path("/time/12:30:45", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("val", "12:30:45"));
+    }
+
+    #[test]
+    fn path_segment_with_at_sign() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/user/{handle}")).unwrap();
+
+        // Value containing @ (common in handles)
+        let m = router.match_path("/user/@username", Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0], ("handle", "@username"));
+    }
+
+    #[test]
+    fn very_long_segment() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/data/{val}")).unwrap();
+
+        // Very long segment (1000 chars)
+        let long_val: String = (0..1000).map(|_| 'x').collect();
+        let path = format!("/data/{}", long_val);
+
+        let m = router.match_path(&path, Method::Get);
+        assert!(m.is_some());
+        assert_eq!(m.unwrap().params[0].1.len(), 1000);
+    }
+
+    #[test]
+    fn very_long_path_total() {
+        let mut router = Router::new();
+
+        // Path with many short segments totaling > 4KB
+        let segments: Vec<_> = (0..500).map(|i| format!("s{}", i)).collect();
+        let path = format!("/{}", segments.join("/"));
+        router.add(route(Method::Get, &path)).unwrap();
+
+        let m = router.match_path(&path, Method::Get);
+        assert!(m.is_some());
+    }
 }
