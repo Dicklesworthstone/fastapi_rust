@@ -466,6 +466,8 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let name_str = name.to_string();
+    let generics = &input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     // Parse struct-level attributes
     let struct_attrs = SchemaAttrs::from_attributes(&input.attrs);
@@ -516,7 +518,7 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
             let enum_schema = generate_enum_schema(data, &name_str, &struct_attrs);
 
             let expanded = quote! {
-                impl fastapi_openapi::JsonSchema for #name {
+                impl #impl_generics fastapi_openapi::JsonSchema for #name #ty_generics #where_clause {
                     fn schema() -> fastapi_openapi::Schema {
                         #enum_schema
                     }
@@ -529,9 +531,11 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
             return TokenStream::from(expanded);
         }
         Data::Union(_) => {
-            return quote! {
-                compile_error!("JsonSchema derive does not support unions");
-            }
+            return syn::Error::new_spanned(
+                name,
+                "JsonSchema can only be derived for structs and enums, not unions.",
+            )
+            .to_compile_error()
             .into();
         }
     };
@@ -556,7 +560,7 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
         .collect();
 
     let expanded = quote! {
-        impl fastapi_openapi::JsonSchema for #name {
+        impl #impl_generics fastapi_openapi::JsonSchema for #name #ty_generics #where_clause {
             fn schema() -> fastapi_openapi::Schema {
                 let mut properties = std::collections::HashMap::new();
                 #(#property_insertions)*
