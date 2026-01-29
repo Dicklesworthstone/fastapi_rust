@@ -431,4 +431,221 @@ mod tests {
         let ctx = RequestContext::with_overrides_and_body_limit(cx, 1, overrides, 4 * 1024 * 1024);
         assert_eq!(ctx.max_body_size(), 4 * 1024 * 1024); // 4MB
     }
+
+    // ========================================================================
+    // bd-3st7: Request Isolation Tests
+    // ========================================================================
+
+    #[test]
+    fn request_id_isolation_unique_per_context() {
+        // Test that each RequestContext gets the request_id it was created with (bd-3st7)
+        let cx1 = Cx::for_testing();
+        let cx2 = Cx::for_testing();
+        let cx3 = Cx::for_testing();
+
+        let ctx1 = RequestContext::new(cx1, 100);
+        let ctx2 = RequestContext::new(cx2, 200);
+        let ctx3 = RequestContext::new(cx3, 300);
+
+        // Each context has its own request_id
+        assert_eq!(ctx1.request_id(), 100);
+        assert_eq!(ctx2.request_id(), 200);
+        assert_eq!(ctx3.request_id(), 300);
+
+        // Request IDs don't affect each other
+        assert_ne!(ctx1.request_id(), ctx2.request_id());
+        assert_ne!(ctx2.request_id(), ctx3.request_id());
+    }
+
+    #[test]
+    fn dependency_cache_isolation_per_request() {
+        // Test that each RequestContext has its own dependency cache (bd-3st7)
+        let cx1 = Cx::for_testing();
+        let cx2 = Cx::for_testing();
+
+        let ctx1 = RequestContext::new(cx1, 1);
+        let ctx2 = RequestContext::new(cx2, 2);
+
+        // Cache a value in ctx1's dependency cache
+        ctx1.dependency_cache().insert::<i32>(42);
+
+        // ctx2's cache should NOT have this value
+        let value1 = ctx1.dependency_cache().get::<i32>();
+        let value2 = ctx2.dependency_cache().get::<i32>();
+
+        assert!(value1.is_some(), "ctx1 should have cached value");
+        assert_eq!(value1.unwrap(), 42);
+        assert!(value2.is_none(), "ctx2 should NOT have ctx1's cached value");
+    }
+
+    #[test]
+    fn cleanup_stack_isolation_per_request() {
+        // Test that each RequestContext has its own cleanup stack (bd-3st7)
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cleanup_counter1 = Arc::new(AtomicUsize::new(0));
+        let cleanup_counter2 = Arc::new(AtomicUsize::new(0));
+
+        let cx1 = Cx::for_testing();
+        let cx2 = Cx::for_testing();
+
+        let ctx1 = RequestContext::new(cx1, 1);
+        let ctx2 = RequestContext::new(cx2, 2);
+
+        // Register cleanup for ctx1
+        {
+            let counter = cleanup_counter1.clone();
+            ctx1.cleanup_stack().push(Box::new(move || {
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                })
+            }));
+        }
+
+        // Register cleanup for ctx2
+        {
+            let counter = cleanup_counter2.clone();
+            ctx2.cleanup_stack().push(Box::new(move || {
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                })
+            }));
+        }
+
+        // Run ctx1's cleanups
+        futures_executor::block_on(ctx1.cleanup_stack().run_cleanups());
+
+        // Only ctx1's cleanup should have run
+        assert_eq!(cleanup_counter1.load(Ordering::SeqCst), 1, "ctx1 cleanup should have run");
+        assert_eq!(cleanup_counter2.load(Ordering::SeqCst), 0, "ctx2 cleanup should NOT have run");
+
+        // Now run ctx2's cleanups
+        futures_executor::block_on(ctx2.cleanup_stack().run_cleanups());
+        assert_eq!(cleanup_counter2.load(Ordering::SeqCst), 1, "ctx2 cleanup should have run");
+    }
+
+    #[test]
+    fn cx_cancellation_isolation_per_request() {
+        // Test that cancelling one request's Cx doesn't affect others (bd-3st7)
+        let cx1 = Cx::for_testing();
+        let cx2 = Cx::for_testing();
+        let cx3 = Cx::for_testing();
+
+        let ctx1 = RequestContext::new(cx1, 1);
+        let ctx2 = RequestContext::new(cx2, 2);
+        let ctx3 = RequestContext::new(cx3, 3);
+
+        // Initially none are cancelled
+        assert!(ctx1.checkpoint().is_ok(), "ctx1 should not be cancelled");
+        assert!(ctx2.checkpoint().is_ok(), "ctx2 should not be cancelled");
+        assert!(ctx3.checkpoint().is_ok(), "ctx3 should not be cancelled");
+
+        // Cancel ctx2 only
+        ctx2.cx().set_cancel_requested(true);
+
+        // Only ctx2 should be cancelled
+        assert!(ctx1.checkpoint().is_ok(), "ctx1 should still not be cancelled");
+        assert!(ctx2.checkpoint().is_err(), "ctx2 should be cancelled");
+        assert!(ctx3.checkpoint().is_ok(), "ctx3 should still not be cancelled");
+    }
+
+    #[test]
+    fn body_limit_isolation_per_request() {
+        // Test that body limits are per-request (bd-3st7)
+        let cx1 = Cx::for_testing();
+        let cx2 = Cx::for_testing();
+
+        // Create contexts with different body limits
+        let ctx1 = RequestContext::with_body_limit(cx1, 1, 1024); // 1KB limit
+        let ctx2 = RequestContext::with_body_limit(cx2, 2, 1024 * 1024); // 1MB limit
+
+        // Each has its own limit
+        assert_eq!(ctx1.max_body_size(), 1024);
+        assert_eq!(ctx2.max_body_size(), 1024 * 1024);
+
+        // They don't affect each other
+        assert_ne!(ctx1.max_body_size(), ctx2.max_body_size());
+    }
+
+    #[test]
+    fn concurrent_requests_fully_isolated() {
+        // Simulate concurrent requests with different values and verify isolation (bd-3st7)
+        use std::thread;
+
+        const NUM_REQUESTS: usize = 100;
+        let results = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(NUM_REQUESTS)));
+
+        let handles: Vec<_> = (0..NUM_REQUESTS)
+            .map(|i| {
+                let results = results.clone();
+                thread::spawn(move || {
+                    let cx = Cx::for_testing();
+                    let request_id = (i + 1) as u64 * 1000; // Unique ID per "request"
+                    let ctx = RequestContext::new(cx, request_id);
+
+                    // Cache a value unique to this request
+                    ctx.dependency_cache().insert::<u64>(request_id);
+
+                    // Verify we can retrieve our own value
+                    let cached = ctx.dependency_cache().get::<u64>();
+                    let retrieved = cached.unwrap_or(0);
+
+                    results.lock().push((request_id, retrieved));
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify each request got exactly its own values
+        let results = results.lock();
+        assert_eq!(results.len(), NUM_REQUESTS);
+
+        for (request_id, retrieved) in results.iter() {
+            assert_eq!(
+                request_id, retrieved,
+                "Request {request_id} should retrieve its own cached value, not another request's"
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_stack_isolation_per_request() {
+        // Test that resolution stacks are per-request for cycle detection (bd-3st7)
+        use crate::dependency::DependencyScope;
+
+        let cx1 = Cx::for_testing();
+        let cx2 = Cx::for_testing();
+
+        let ctx1 = RequestContext::new(cx1, 1);
+        let ctx2 = RequestContext::new(cx2, 2);
+
+        // Push i32 onto ctx1's resolution stack
+        ctx1.resolution_stack().push::<i32>("i32", DependencyScope::Request);
+
+        // ctx1 should detect the cycle when pushing i32 again
+        let cycle1 = ctx1.resolution_stack().check_cycle::<i32>("i32");
+        assert!(cycle1.is_some(), "ctx1 should detect cycle for i32");
+
+        // ctx2's resolution stack should be independent - no cycle
+        let cycle2 = ctx2.resolution_stack().check_cycle::<i32>("i32");
+        assert!(cycle2.is_none(), "ctx2 should NOT see ctx1's resolution stack");
+
+        // ctx2 can push i32 independently
+        ctx2.resolution_stack().push::<i32>("i32", DependencyScope::Request);
+        assert_eq!(ctx2.resolution_stack().depth(), 1);
+
+        // Both stacks are independent
+        assert_eq!(ctx1.resolution_stack().depth(), 1);
+        assert_eq!(ctx2.resolution_stack().depth(), 1);
+
+        // Clean up
+        ctx1.resolution_stack().pop();
+        ctx2.resolution_stack().pop();
+        assert!(ctx1.resolution_stack().is_empty());
+        assert!(ctx2.resolution_stack().is_empty());
+    }
 }

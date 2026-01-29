@@ -925,7 +925,7 @@ mod tests {
     use crate::request::Method;
     use asupersync::Cx;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn test_context(overrides: Option<Arc<DependencyOverrides>>) -> RequestContext {
         let cx = Cx::for_testing();
@@ -2073,6 +2073,82 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 11);
     }
 
+    #[test]
+    fn cleanup_stack_panic_continues() {
+        // Test that if one cleanup panics, remaining cleanups still run (bd-35r4)
+        let order = Arc::new(parking_lot::Mutex::new(Vec::<i32>::new()));
+
+        let stack = CleanupStack::new();
+
+        // First cleanup: runs normally
+        let order_clone = Arc::clone(&order);
+        stack.push(Box::new(move || {
+            Box::pin(async move {
+                order_clone.lock().push(1);
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }));
+
+        // Second cleanup: panics during creation
+        stack.push(Box::new(|| -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            panic!("cleanup 2 panics");
+        }));
+
+        // Third cleanup: runs normally
+        let order_clone = Arc::clone(&order);
+        stack.push(Box::new(move || {
+            Box::pin(async move {
+                order_clone.lock().push(3);
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }));
+
+        // Run cleanups - LIFO order: 3, 2 (panics), 1
+        let completed = futures_executor::block_on(stack.run_cleanups());
+
+        // Only 2 should complete (cleanup 2 panicked)
+        assert_eq!(completed, 2, "Should report 2 successful cleanups");
+
+        let executed_order = order.lock().clone();
+        // Should still run cleanup 3 and 1 despite cleanup 2 panicking
+        assert_eq!(
+            executed_order,
+            vec![3, 1],
+            "Cleanups should continue after panic"
+        );
+    }
+
+    #[test]
+    fn cleanup_runs_after_handler_error() {
+        // Test that cleanups run even when handler returns an error (bd-35r4)
+        // This simulates the server calling run_cleanups after any handler result
+
+        let cleanup_ran = Arc::new(AtomicBool::new(false));
+        let cleanup_ran_clone = Arc::clone(&cleanup_ran);
+
+        let ctx = test_context(None);
+
+        // Register a cleanup
+        ctx.cleanup_stack().push(Box::new(move || {
+            Box::pin(async move {
+                cleanup_ran_clone.store(true, Ordering::SeqCst);
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }));
+
+        // Simulate handler returning an error (we just don't use the result)
+        let handler_result: Result<(), HttpError> =
+            Err(HttpError::new(StatusCode::INTERNAL_SERVER_ERROR).with_detail("handler failed"));
+
+        // Server always runs cleanups after handler, regardless of result
+        futures_executor::block_on(ctx.cleanup_stack().run_cleanups());
+
+        assert!(
+            cleanup_ran.load(Ordering::SeqCst),
+            "Cleanup should run even after handler error"
+        );
+
+        // The handler error is still propagated
+        assert!(handler_result.is_err());
+    }
+
     // ========================================================================
     // DependsCleanup Tests (fastapi_rust-9ps)
     // ========================================================================
@@ -2484,6 +2560,132 @@ mod tests {
             counter.load(Ordering::SeqCst),
             1,
             "Request-scoped should resolve only once (cached)"
+        );
+    }
+
+    // ========================================================================
+    // Scope and Cleanup Integration Tests (bd-2290)
+    // ========================================================================
+
+    /// Test that request-scoped dependencies with cleanup are only cleaned up once
+    /// even when resolved multiple times
+    #[test]
+    fn request_scope_cleanup_only_once() {
+        let ctx = test_context(None);
+        let mut req = empty_request();
+
+        // Resolve the same cleanup dependency multiple times
+        let _ = futures_executor::block_on(DependsCleanup::<TrackedResource>::from_request(
+            &ctx, &mut req,
+        ))
+        .unwrap();
+
+        let _ = futures_executor::block_on(DependsCleanup::<TrackedResource>::from_request(
+            &ctx, &mut req,
+        ))
+        .unwrap();
+
+        // Only one cleanup should be registered due to caching
+        assert_eq!(
+            ctx.cleanup_stack().len(),
+            1,
+            "Request-scoped should only register cleanup once"
+        );
+
+        let tracker = ctx
+            .dependency_cache()
+            .get::<Arc<parking_lot::Mutex<Vec<String>>>>()
+            .unwrap();
+
+        // Setup only called once
+        assert_eq!(tracker.lock().len(), 1);
+        assert_eq!(tracker.lock()[0], "setup:resource");
+
+        // Run cleanups
+        futures_executor::block_on(ctx.cleanup_stack().run_cleanups());
+
+        // Only one cleanup ran
+        let events = tracker.lock().clone();
+        assert_eq!(
+            events,
+            vec!["setup:resource", "cleanup:resource"],
+            "Cleanup should run exactly once for cached dependency"
+        );
+    }
+
+    /// Test that function-scoped cleanup dependencies register cleanup for each resolution
+    #[test]
+    fn function_scope_cleanup_each_time() {
+        // Create a function-scoped cleanup dependency
+        #[derive(Clone)]
+        struct FunctionScopedWithCleanup {
+            id: u32,
+        }
+
+        impl FromDependencyWithCleanup for FunctionScopedWithCleanup {
+            type Value = FunctionScopedWithCleanup;
+            type Error = HttpError;
+
+            async fn setup(
+                ctx: &RequestContext,
+                _req: &mut Request,
+            ) -> Result<(Self::Value, Option<CleanupFn>), Self::Error> {
+                // Get or create a cleanup counter
+                let counter = ctx
+                    .dependency_cache()
+                    .get::<Arc<AtomicUsize>>()
+                    .unwrap_or_else(|| {
+                        let c = Arc::new(AtomicUsize::new(0));
+                        ctx.dependency_cache().insert(Arc::clone(&c));
+                        c
+                    });
+
+                let cleanup_counter = Arc::clone(&counter);
+                let cleanup = Box::new(move || {
+                    Box::pin(async move {
+                        cleanup_counter.fetch_add(1, Ordering::SeqCst);
+                    }) as Pin<Box<dyn Future<Output = ()> + Send>>
+                }) as CleanupFn;
+
+                Ok((FunctionScopedWithCleanup { id: 42 }, Some(cleanup)))
+            }
+        }
+
+        let ctx = test_context(None);
+        let mut req = empty_request();
+
+        // Resolve 3 times with NoCache
+        let _ = futures_executor::block_on(
+            DependsCleanup::<FunctionScopedWithCleanup, NoCache>::from_request(&ctx, &mut req),
+        )
+        .unwrap();
+
+        let _ = futures_executor::block_on(
+            DependsCleanup::<FunctionScopedWithCleanup, NoCache>::from_request(&ctx, &mut req),
+        )
+        .unwrap();
+
+        let _ = futures_executor::block_on(
+            DependsCleanup::<FunctionScopedWithCleanup, NoCache>::from_request(&ctx, &mut req),
+        )
+        .unwrap();
+
+        // Should have 3 cleanups registered
+        assert_eq!(
+            ctx.cleanup_stack().len(),
+            3,
+            "Function-scoped should register cleanup each time"
+        );
+
+        // Run all cleanups
+        futures_executor::block_on(ctx.cleanup_stack().run_cleanups());
+
+        // Verify all 3 cleanups ran
+        let counter = ctx.dependency_cache().get::<Arc<AtomicUsize>>().unwrap();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "All 3 cleanups should have run"
         );
     }
 }

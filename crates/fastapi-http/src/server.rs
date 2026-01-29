@@ -1189,14 +1189,9 @@ impl TcpServer {
                 }
             ));
 
-            let request_id = self.next_request_id();
-            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
-            let request_cx = Cx::for_testing_with_budget(request_budget);
-            let ctx = RequestContext::new(request_cx, request_id);
-
             // Handle the connection with the Handler trait object
             let result = self
-                .handle_connection_handler(&ctx, stream, peer_addr, &*handler)
+                .handle_connection_handler(cx, stream, peer_addr, &*handler)
                 .await;
 
             self.release_connection();
@@ -1421,22 +1416,90 @@ impl TcpServer {
     }
 
     /// Handles a single connection using the Handler trait.
+    ///
+    /// This is a specialized version for trait objects where we cannot use a closure
+    /// due to lifetime constraints of BoxFuture.
     async fn handle_connection_handler(
         &self,
-        ctx: &RequestContext,
-        stream: TcpStream,
-        peer_addr: SocketAddr,
+        cx: &Cx,
+        mut stream: TcpStream,
+        _peer_addr: SocketAddr,
         handler: &dyn fastapi_core::Handler,
     ) -> Result<(), ServerError> {
-        process_connection(
-            ctx.cx(),
-            &self.request_counter,
-            stream,
-            peer_addr,
-            &self.config,
-            |ctx, req| handler.call(&ctx, req),
-        )
-        .await
+        let mut parser = StatefulParser::new().with_limits(self.config.parse_limits.clone());
+        let mut read_buffer = vec![0u8; self.config.read_buffer_size];
+        let mut response_writer = ResponseWriter::new();
+        let mut requests_on_connection: usize = 0;
+        let max_requests = self.config.max_requests_per_connection;
+
+        loop {
+            // Check for cancellation
+            if cx.is_cancel_requested() {
+                return Ok(());
+            }
+
+            // Parse request from connection
+            let parse_result = parser.feed(&[])?;
+
+            let mut request = match parse_result {
+                ParseStatus::Complete { request, .. } => request,
+                ParseStatus::Incomplete => {
+                    let keep_alive_timeout = self.config.keep_alive_timeout;
+                    let bytes_read = if keep_alive_timeout.is_zero() {
+                        read_into_buffer(&mut stream, &mut read_buffer).await?
+                    } else {
+                        match read_with_timeout(&mut stream, &mut read_buffer, keep_alive_timeout)
+                            .await
+                        {
+                            Ok(0) => return Ok(()),
+                            Ok(n) => n,
+                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                                return Err(ServerError::KeepAliveTimeout);
+                            }
+                            Err(e) => return Err(ServerError::Io(e)),
+                        }
+                    };
+
+                    if bytes_read == 0 {
+                        return Ok(());
+                    }
+
+                    match parser.feed(&read_buffer[..bytes_read])? {
+                        ParseStatus::Complete { request, .. } => request,
+                        ParseStatus::Incomplete => continue,
+                    }
+                }
+            };
+
+            requests_on_connection += 1;
+
+            // Create request context
+            let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
+            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let ctx = RequestContext::new(request_cx, request_id);
+
+            // Call handler - ctx lives until after await
+            let response = handler.call(&ctx, &mut request).await;
+
+            // Determine keep-alive behavior
+            let client_wants_keep_alive = should_keep_alive(&request);
+            let server_will_keep_alive = client_wants_keep_alive
+                && (max_requests == 0 || requests_on_connection < max_requests);
+
+            let response = if server_will_keep_alive {
+                response.header("connection", b"keep-alive".to_vec())
+            } else {
+                response.header("connection", b"close".to_vec())
+            };
+
+            let response_write = response_writer.write(response);
+            write_response(&mut stream, response_write).await?;
+
+            if !server_will_keep_alive {
+                return Ok(());
+            }
+        }
     }
 
     /// The main accept loop.

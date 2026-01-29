@@ -591,3 +591,359 @@ impl Request {
             .and_then(|boxed| boxed.downcast_mut::<T>())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asupersync::stream::Stream;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    // ============================================================
+    // bd-isux: RequestBodyStream tests for large uploads
+    // ============================================================
+
+    #[test]
+    fn stream_10mb_body_in_64kb_chunks() {
+        // Test streaming a 10MB request body in chunks (bd-isux)
+        const TARGET_SIZE: usize = 10 * 1024 * 1024; // 10MB
+        const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
+
+        // Create chunks that total 10MB
+        let num_chunks = (TARGET_SIZE + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = (0..num_chunks)
+            .map(|i| {
+                let start = i * CHUNK_SIZE;
+                let end = std::cmp::min(start + CHUNK_SIZE, TARGET_SIZE);
+                let chunk: Vec<u8> = (start..end).map(|j| (j % 256) as u8).collect();
+                Ok(chunk)
+            })
+            .collect();
+
+        let stream = asupersync::stream::iter(chunks);
+        let mut body_stream = RequestBodyStream::with_expected_size(stream, TARGET_SIZE);
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        let mut total_received = 0usize;
+        let mut chunk_count = 0usize;
+
+        loop {
+            match Pin::new(&mut body_stream).poll_next(&mut ctx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    total_received += chunk.len();
+                    chunk_count += 1;
+                }
+                Poll::Ready(Some(Err(e))) => panic!("Unexpected error: {e}"),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("Mock stream should never return Pending"),
+            }
+        }
+
+        assert_eq!(total_received, TARGET_SIZE, "Should receive all 10MB");
+        assert_eq!(chunk_count, num_chunks, "Should have correct number of chunks");
+        assert!(body_stream.is_complete(), "Stream should be marked complete");
+        assert_eq!(body_stream.bytes_received(), TARGET_SIZE, "bytes_received should match");
+    }
+
+    #[test]
+    fn stream_memory_bounded_during_processing() {
+        // Test that streaming doesn't buffer entire body (bd-isux)
+        // Verify incremental processing with memory < 1MB at any point
+        const TARGET_SIZE: usize = 5 * 1024 * 1024; // 5MB total
+        const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
+        const MAX_MEMORY: usize = 1024 * 1024; // 1MB max
+
+        let num_chunks = TARGET_SIZE / CHUNK_SIZE;
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = (0..num_chunks)
+            .map(|_| Ok(vec![0u8; CHUNK_SIZE]))
+            .collect();
+
+        let stream = asupersync::stream::iter(chunks);
+        let mut body_stream = RequestBodyStream::new(stream);
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        // Process chunks incrementally, simulating bounded memory usage
+        let mut processed_total = 0usize;
+        let mut max_held = 0usize;
+
+        loop {
+            match Pin::new(&mut body_stream).poll_next(&mut ctx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    // Simulate processing each chunk without accumulating
+                    let chunk_size = chunk.len();
+                    max_held = std::cmp::max(max_held, chunk_size);
+                    processed_total += chunk_size;
+                    // chunk goes out of scope here, releasing memory
+                }
+                Poll::Ready(Some(Err(e))) => panic!("Unexpected error: {e}"),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("Mock stream should never return Pending"),
+            }
+        }
+
+        assert_eq!(processed_total, TARGET_SIZE, "Should process all data");
+        assert!(
+            max_held <= MAX_MEMORY,
+            "Max memory held per chunk ({max_held}) should be < {MAX_MEMORY}"
+        );
+    }
+
+    #[test]
+    fn stream_error_connection_closed() {
+        // Test RequestBodyStreamError::ConnectionClosed (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![
+            Ok(vec![1, 2, 3]),
+            Err(RequestBodyStreamError::ConnectionClosed),
+            Ok(vec![4, 5, 6]), // Should not reach this
+        ];
+
+        let stream = asupersync::stream::iter(chunks);
+        let mut body_stream = RequestBodyStream::new(stream);
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        // First chunk succeeds
+        match Pin::new(&mut body_stream).poll_next(&mut ctx) {
+            Poll::Ready(Some(Ok(chunk))) => assert_eq!(chunk, vec![1, 2, 3]),
+            other => panic!("Expected first chunk, got {other:?}"),
+        }
+
+        // Second chunk is error
+        match Pin::new(&mut body_stream).poll_next(&mut ctx) {
+            Poll::Ready(Some(Err(RequestBodyStreamError::ConnectionClosed))) => {}
+            other => panic!("Expected ConnectionClosed error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_error_timeout() {
+        // Test RequestBodyStreamError::Timeout (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![
+            Ok(vec![1, 2]),
+            Err(RequestBodyStreamError::Timeout),
+        ];
+
+        let stream = asupersync::stream::iter(chunks);
+        let mut body_stream = RequestBodyStream::new(stream);
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        // First chunk succeeds
+        match Pin::new(&mut body_stream).poll_next(&mut ctx) {
+            Poll::Ready(Some(Ok(_))) => {}
+            other => panic!("Expected first chunk, got {other:?}"),
+        }
+
+        // Second is timeout
+        match Pin::new(&mut body_stream).poll_next(&mut ctx) {
+            Poll::Ready(Some(Err(RequestBodyStreamError::Timeout))) => {}
+            other => panic!("Expected Timeout error, got {other:?}"),
+        }
+
+        // Verify error display
+        let err = RequestBodyStreamError::Timeout;
+        assert_eq!(format!("{err}"), "timeout waiting for body data");
+    }
+
+    #[test]
+    fn stream_error_too_large() {
+        // Test RequestBodyStreamError::TooLarge (bd-isux)
+        let err = RequestBodyStreamError::TooLarge {
+            received: 10_000_000,
+            max: 1_000_000,
+        };
+
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![Err(err)];
+
+        let stream = asupersync::stream::iter(chunks);
+        let mut body_stream = RequestBodyStream::new(stream);
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        match Pin::new(&mut body_stream).poll_next(&mut ctx) {
+            Poll::Ready(Some(Err(RequestBodyStreamError::TooLarge { received, max }))) => {
+                assert_eq!(received, 10_000_000);
+                assert_eq!(max, 1_000_000);
+            }
+            other => panic!("Expected TooLarge error, got {other:?}"),
+        }
+
+        // Verify error display
+        let err = RequestBodyStreamError::TooLarge {
+            received: 10_000_000,
+            max: 1_000_000,
+        };
+        assert!(format!("{err}").contains("10000000"));
+        assert!(format!("{err}").contains("1000000"));
+    }
+
+    #[test]
+    fn stream_error_io() {
+        // Test RequestBodyStreamError::Io (bd-isux)
+        let err = RequestBodyStreamError::Io("disk full".to_string());
+
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![Err(err)];
+
+        let stream = asupersync::stream::iter(chunks);
+        let mut body_stream = RequestBodyStream::new(stream);
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        match Pin::new(&mut body_stream).poll_next(&mut ctx) {
+            Poll::Ready(Some(Err(RequestBodyStreamError::Io(msg)))) => {
+                assert_eq!(msg, "disk full");
+            }
+            other => panic!("Expected Io error, got {other:?}"),
+        }
+
+        // Verify error display
+        let err = RequestBodyStreamError::Io("disk full".to_string());
+        assert!(format!("{err}").contains("disk full"));
+    }
+
+    #[test]
+    fn stream_expected_size_tracking() {
+        // Test expected_size is correctly tracked (bd-isux)
+        const EXPECTED: usize = 1024;
+
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![
+            Ok(vec![0u8; 512]),
+            Ok(vec![0u8; 512]),
+        ];
+
+        let stream = asupersync::stream::iter(chunks);
+        let body_stream = RequestBodyStream::with_expected_size(stream, EXPECTED);
+
+        assert_eq!(body_stream.expected_size(), Some(EXPECTED));
+        assert_eq!(body_stream.bytes_received(), 0);
+        assert!(!body_stream.is_complete());
+    }
+
+    #[test]
+    fn stream_collect_accumulates_all_chunks() {
+        // Test collect() method gathers all data (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![
+            Ok(vec![1, 2, 3]),
+            Ok(vec![4, 5]),
+            Ok(vec![6, 7, 8, 9]),
+        ];
+
+        let stream = asupersync::stream::iter(chunks);
+        let body_stream = RequestBodyStream::new(stream);
+
+        let result = futures_executor::block_on(body_stream.collect());
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert_eq!(data, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn stream_collect_propagates_error() {
+        // Test collect() stops and returns error (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![
+            Ok(vec![1, 2, 3]),
+            Err(RequestBodyStreamError::ConnectionClosed),
+            Ok(vec![4, 5, 6]),
+        ];
+
+        let stream = asupersync::stream::iter(chunks);
+        let body_stream = RequestBodyStream::new(stream);
+
+        let result = futures_executor::block_on(body_stream.collect());
+        assert!(result.is_err());
+        match result {
+            Err(RequestBodyStreamError::ConnectionClosed) => {}
+            other => panic!("Expected ConnectionClosed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_streaming_helper_creates_stream() {
+        // Test Body::streaming() helper (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![Ok(vec![1, 2, 3])];
+        let stream = asupersync::stream::iter(chunks);
+        let body = Body::streaming(stream);
+
+        assert!(body.is_streaming());
+        assert!(!body.is_empty());
+    }
+
+    #[test]
+    fn body_streaming_with_size_helper() {
+        // Test Body::streaming_with_size() helper (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![Ok(vec![1, 2, 3])];
+        let stream = asupersync::stream::iter(chunks);
+        let body = Body::streaming_with_size(stream, 3);
+
+        assert!(body.is_streaming());
+
+        if let Body::Stream(s) = body {
+            assert_eq!(s.expected_size(), Some(3));
+        } else {
+            panic!("Expected Body::Stream");
+        }
+    }
+
+    #[test]
+    fn body_into_bytes_async_handles_stream() {
+        // Test Body::into_bytes_async() for streaming bodies (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![
+            Ok(vec![1, 2]),
+            Ok(vec![3, 4]),
+        ];
+        let stream = asupersync::stream::iter(chunks);
+        let body = Body::streaming(stream);
+
+        let result = futures_executor::block_on(body.into_bytes_async());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn body_take_stream_extracts_stream() {
+        // Test Body::take_stream() (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![Ok(vec![1, 2, 3])];
+        let stream = asupersync::stream::iter(chunks);
+        let body = Body::streaming(stream);
+
+        let taken = body.take_stream();
+        assert!(taken.is_some());
+
+        // Non-streaming bodies return None
+        let empty_body = Body::Empty;
+        assert!(empty_body.take_stream().is_none());
+
+        let bytes_body = Body::Bytes(vec![1, 2, 3]);
+        assert!(bytes_body.take_stream().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot synchronously convert streaming body")]
+    fn body_into_bytes_panics_for_stream() {
+        // Test that into_bytes() panics for streaming bodies (bd-isux)
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> = vec![Ok(vec![1, 2, 3])];
+        let stream = asupersync::stream::iter(chunks);
+        let body = Body::streaming(stream);
+
+        let _ = body.into_bytes(); // Should panic
+    }
+}

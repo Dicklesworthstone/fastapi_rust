@@ -6603,14 +6603,25 @@ mod test_server_tests {
         assert_eq!(server.in_flight_count(), 0);
 
         // The in-flight guard is managed internally by the server loop,
-        // so after request completion it should be 0
+        // so after request completion it should return to 0
         send_request(
             server.addr(),
             b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
         );
-        // After the request completes (synchronous), in-flight should be 0
-        // (guard dropped at end of handle_connection)
-        assert_eq!(server.in_flight_count(), 0);
+
+        // Wait for the in-flight count to return to 0 (bd-2emz fix)
+        // There's a small race between client receiving response and
+        // server dropping the InFlightGuard, so we spin briefly.
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+        while server.in_flight_count() > 0 && start.elapsed() < timeout {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            server.in_flight_count(),
+            0,
+            "In-flight count should return to 0 after request completes"
+        );
     }
 
     #[test]

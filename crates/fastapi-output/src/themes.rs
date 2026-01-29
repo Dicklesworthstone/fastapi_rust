@@ -329,8 +329,8 @@ impl ThemeSpacing {
             table_cell_padding: 1,
             section_gap: 1,
             item_gap: 0,
-            method_width: 7,  // "OPTIONS" is longest at 7 chars
-            status_width: 3,  // "500" is 3 chars
+            method_width: 7, // "OPTIONS" is longest at 7 chars
+            status_width: 3, // "500" is 3 chars
         }
     }
 
@@ -952,13 +952,13 @@ impl FastApiTheme {
             info: Color::from_hex(0x00FFFF),    // Bright cyan
 
             // HTTP methods - distinct, high-contrast colors
-            http_get: Color::from_hex(0x00FFFF),    // Cyan
-            http_post: Color::from_hex(0x00FF00),   // Green
-            http_put: Color::from_hex(0xFFFF00),    // Yellow
-            http_delete: Color::from_hex(0xFF0000), // Red
-            http_patch: Color::from_hex(0xFF00FF),  // Magenta
+            http_get: Color::from_hex(0x00FFFF),     // Cyan
+            http_post: Color::from_hex(0x00FF00),    // Green
+            http_put: Color::from_hex(0xFFFF00),     // Yellow
+            http_delete: Color::from_hex(0xFF0000),  // Red
+            http_patch: Color::from_hex(0xFF00FF),   // Magenta
             http_options: Color::from_hex(0xFFFFFF), // White
-            http_head: Color::from_hex(0xFF00FF),   // Magenta
+            http_head: Color::from_hex(0xFF00FF),    // Magenta
 
             // Status codes - clear semantic mapping
             status_1xx: Color::from_hex(0xFFFFFF), // White
@@ -1114,7 +1114,15 @@ impl ThemePreset {
     /// List all available preset names.
     #[must_use]
     pub fn available_presets() -> &'static [&'static str] {
-        &["default", "fastapi", "neon", "minimal", "monokai", "light", "accessible"]
+        &[
+            "default",
+            "fastapi",
+            "neon",
+            "minimal",
+            "monokai",
+            "light",
+            "accessible",
+        ]
     }
 }
 
@@ -1435,7 +1443,10 @@ mod tests {
             "accessible".parse::<ThemePreset>().unwrap(),
             ThemePreset::Accessible
         );
-        assert_eq!("a11y".parse::<ThemePreset>().unwrap(), ThemePreset::Accessible);
+        assert_eq!(
+            "a11y".parse::<ThemePreset>().unwrap(),
+            ThemePreset::Accessible
+        );
     }
 
     #[test]

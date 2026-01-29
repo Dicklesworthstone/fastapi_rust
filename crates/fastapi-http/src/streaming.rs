@@ -831,4 +831,137 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(test_file);
     }
+
+    // =========================================================================
+    // Large Streaming Tests (bd-3iwd)
+    // =========================================================================
+
+    #[test]
+    fn stream_large_response_in_chunks() {
+        // Test streaming a 10MB response in chunks
+        const TARGET_SIZE: usize = 10 * 1024 * 1024; // 10MB
+        const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
+
+        // Create 10MB of data
+        let data: Vec<u8> = (0..TARGET_SIZE).map(|i| (i % 256) as u8).collect();
+        let mut stream = ChunkedBytes::new(data.clone(), CHUNK_SIZE);
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        let mut total_received = 0usize;
+        let mut chunk_count = 0usize;
+
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut ctx) {
+                Poll::Ready(Some(chunk)) => {
+                    // Verify chunk size (last chunk may be smaller)
+                    if total_received + CHUNK_SIZE <= TARGET_SIZE {
+                        assert_eq!(chunk.len(), CHUNK_SIZE, "Non-final chunks should be {CHUNK_SIZE} bytes");
+                    }
+                    total_received += chunk.len();
+                    chunk_count += 1;
+                }
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("ChunkedBytes should never return Pending"),
+            }
+        }
+
+        assert_eq!(total_received, TARGET_SIZE, "Should receive all 10MB");
+        let expected_chunks = (TARGET_SIZE + CHUNK_SIZE - 1) / CHUNK_SIZE; // Ceiling division
+        assert_eq!(chunk_count, expected_chunks, "Should have correct number of chunks");
+    }
+
+    #[test]
+    fn cancel_aware_stream_stops_on_cancellation() {
+        // Test that stream stops when cancellation is requested
+        let data = vec![1, 2, 3, 4, 5];
+        let inner = asupersync::stream::iter(data);
+        let cx = Cx::for_testing();
+
+        // Request cancellation (testing API)
+        cx.set_cancel_requested(true);
+
+        let mut stream = CancelAwareStream::new(inner, cx);
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        // First poll should detect cancellation and return None
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut ctx), Poll::Ready(None));
+        assert!(stream.is_cancelled(), "Stream should be marked as cancelled");
+    }
+
+    #[test]
+    fn file_stream_reads_complete_file() {
+        // Create a test file with known content
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_file_stream_complete.bin");
+
+        // Write 256KB of test data
+        const FILE_SIZE: usize = 256 * 1024;
+        let data: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 256) as u8).collect();
+        std::fs::write(&test_file, &data).unwrap();
+
+        let cx = Cx::for_testing();
+        let config = StreamConfig::new().with_chunk_size(32 * 1024);
+        let mut stream = FileStream::open(&test_file, cx, config).unwrap();
+
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+
+        let mut total_received = 0usize;
+        let mut received_data = Vec::new();
+
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut ctx) {
+                Poll::Ready(Some(chunk)) => {
+                    total_received += chunk.len();
+                    received_data.extend(chunk);
+                }
+                Poll::Ready(None) => break,
+                Poll::Pending => {
+                    // FileStream may return Pending; for sync test just continue
+                    continue;
+                }
+            }
+        }
+
+        assert_eq!(total_received, FILE_SIZE, "Should receive complete file");
+        assert_eq!(received_data, data, "Data should match original");
+
+        // Cleanup
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn chunked_bytes_total_size_is_correct() {
+        // Verify Content-Length equivalent is known for in-memory streams
+        const SIZE: usize = 1024 * 100; // 100KB
+        let data: Vec<u8> = vec![0u8; SIZE];
+        let stream = ChunkedBytes::new(data, 1024);
+
+        assert_eq!(stream.total_size(), SIZE, "Total size should be known upfront");
+    }
+
+    #[test]
+    fn file_stream_size_is_known_via_remaining() {
+        // Test that file size is available via remaining() for Content-Length header
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_file_size_known.txt");
+
+        const FILE_SIZE: usize = 12345;
+        let data: Vec<u8> = vec![b'X'; FILE_SIZE];
+        std::fs::write(&test_file, &data).unwrap();
+
+        let cx = Cx::for_testing();
+        let config = StreamConfig::default();
+        let stream = FileStream::open(&test_file, cx, config).unwrap();
+
+        // At the start, remaining() equals file size
+        assert_eq!(stream.remaining(), FILE_SIZE as u64, "File size should be known via remaining()");
+
+        // Cleanup
+        let _ = std::fs::remove_file(test_file);
+    }
 }
