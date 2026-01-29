@@ -3792,6 +3792,353 @@ fn push_indent(output: &mut String, level: usize) {
 // End Request Inspection Middleware
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// ETag Middleware
+// ===========================================================================
+
+/// Configuration for ETag generation strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ETagMode {
+    /// Automatically generate ETag from response body hash.
+    /// Uses FNV-1a hash for fast, consistent ETag generation.
+    Auto,
+    /// Expect handler to set ETag manually. Middleware only handles
+    /// conditional request logic (If-None-Match checking).
+    Manual,
+    /// Disable ETag handling entirely.
+    Disabled,
+}
+
+impl Default for ETagMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+/// Configuration for ETag middleware.
+#[derive(Debug, Clone)]
+pub struct ETagConfig {
+    /// ETag generation mode.
+    pub mode: ETagMode,
+    /// Generate weak ETags (W/"...") instead of strong ETags.
+    /// Weak ETags indicate semantic equivalence, allowing minor changes.
+    pub weak: bool,
+    /// Minimum response body size to generate ETag.
+    /// Responses smaller than this won't get an ETag.
+    pub min_size: usize,
+}
+
+impl Default for ETagConfig {
+    fn default() -> Self {
+        Self {
+            mode: ETagMode::Auto,
+            weak: false,
+            min_size: 0,
+        }
+    }
+}
+
+impl ETagConfig {
+    /// Create a new ETag configuration with default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the ETag generation mode.
+    #[must_use]
+    pub fn mode(mut self, mode: ETagMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Enable weak ETags.
+    #[must_use]
+    pub fn weak(mut self, weak: bool) -> Self {
+        self.weak = weak;
+        self
+    }
+
+    /// Set minimum body size for ETag generation.
+    #[must_use]
+    pub fn min_size(mut self, size: usize) -> Self {
+        self.min_size = size;
+        self
+    }
+}
+
+/// Middleware for ETag generation and conditional request handling.
+///
+/// Implements HTTP caching through ETags as defined in RFC 7232.
+///
+/// # Features
+///
+/// - **Automatic ETag generation**: Computes ETag from response body hash
+/// - **If-None-Match handling**: Returns 304 Not Modified for GET/HEAD when ETag matches
+/// - **Weak and strong ETags**: Configurable ETag strength
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::{ETagMiddleware, ETagConfig, ETagMode};
+///
+/// // Default: auto-generate strong ETags
+/// let middleware = ETagMiddleware::new();
+///
+/// // With custom configuration
+/// let middleware = ETagMiddleware::with_config(
+///     ETagConfig::new()
+///         .mode(ETagMode::Auto)
+///         .weak(true)
+///         .min_size(1024)
+/// );
+/// ```
+///
+/// # Conditional Request Flow
+///
+/// For GET/HEAD requests with `If-None-Match` header:
+/// 1. Generate ETag for response body
+/// 2. Compare with client's cached ETag
+/// 3. If match: return 304 Not Modified (empty body)
+/// 4. If no match: return full response with ETag header
+///
+/// # Note on If-Match
+///
+/// `If-Match` handling for PUT/PATCH/DELETE is typically done at the
+/// application level since it requires knowledge of the current resource
+/// state before the modification occurs.
+pub struct ETagMiddleware {
+    config: ETagConfig,
+}
+
+impl Default for ETagMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ETagMiddleware {
+    /// Create ETag middleware with default configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: ETagConfig::default(),
+        }
+    }
+
+    /// Create ETag middleware with custom configuration.
+    #[must_use]
+    pub fn with_config(config: ETagConfig) -> Self {
+        Self { config }
+    }
+
+    /// Generate an ETag from response body bytes using FNV-1a hash.
+    ///
+    /// FNV-1a is chosen for:
+    /// - Speed: Very fast for small to medium data
+    /// - Consistency: Deterministic output
+    /// - Simplicity: No external dependencies
+    fn generate_etag(data: &[u8], weak: bool) -> String {
+        // FNV-1a 64-bit hash
+        const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+
+        let mut hash = FNV_OFFSET_BASIS;
+        for &byte in data {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+
+        // Format as quoted hex string
+        if weak {
+            format!("W/\"{:016x}\"", hash)
+        } else {
+            format!("\"{:016x}\"", hash)
+        }
+    }
+
+    /// Parse ETags from If-None-Match header value.
+    ///
+    /// Handles:
+    /// - Single ETag: "abc123"
+    /// - Multiple ETags: "abc123", "def456"
+    /// - Wildcard: *
+    /// - Weak ETags: W/"abc123"
+    fn parse_if_none_match(value: &str) -> Vec<String> {
+        let trimmed = value.trim();
+
+        // Handle wildcard
+        if trimmed == "*" {
+            return vec!["*".to_string()];
+        }
+
+        let mut etags = Vec::new();
+        let mut current = String::new();
+        let mut in_quote = false;
+        let mut prev_char = '\0';
+
+        for ch in trimmed.chars() {
+            match ch {
+                '"' if prev_char != '\\' => {
+                    current.push(ch);
+                    if in_quote {
+                        // End of ETag value
+                        let etag = current.trim().to_string();
+                        if !etag.is_empty() {
+                            etags.push(etag);
+                        }
+                        current.clear();
+                    }
+                    in_quote = !in_quote;
+                }
+                ',' if !in_quote => {
+                    // ETag separator, already handled by quote closing
+                    current.clear();
+                }
+                _ => {
+                    current.push(ch);
+                }
+            }
+            prev_char = ch;
+        }
+
+        etags
+    }
+
+    /// Check if two ETags match according to weak comparison rules.
+    ///
+    /// Weak comparison (for If-None-Match with GET/HEAD):
+    /// - W/"a" matches W/"a"
+    /// - W/"a" matches "a"
+    /// - "a" matches W/"a"
+    /// - "a" matches "a"
+    fn etags_match_weak(etag1: &str, etag2: &str) -> bool {
+        // Strip W/ prefix for weak comparison
+        let e1 = Self::strip_weak_prefix(etag1);
+        let e2 = Self::strip_weak_prefix(etag2);
+        e1 == e2
+    }
+
+    /// Strip the weak ETag prefix (W/) if present.
+    fn strip_weak_prefix(s: &str) -> &str {
+        if s.starts_with("W/") || s.starts_with("w/") {
+            &s[2..]
+        } else {
+            s
+        }
+    }
+
+    /// Check if request method is cacheable (GET or HEAD).
+    fn is_cacheable_method(method: &crate::request::Method) -> bool {
+        matches!(
+            method,
+            crate::request::Method::Get | crate::request::Method::Head
+        )
+    }
+
+    /// Get existing ETag from response headers.
+    fn get_existing_etag(headers: &[(String, Vec<u8>)]) -> Option<String> {
+        for (name, value) in headers {
+            if name.eq_ignore_ascii_case("etag") {
+                return std::str::from_utf8(value).ok().map(String::from);
+            }
+        }
+        None
+    }
+}
+
+impl Middleware for ETagMiddleware {
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a Request,
+        response: Response,
+    ) -> BoxFuture<'a, Response> {
+        let config = self.config.clone();
+
+        Box::pin(async move {
+            // Skip if disabled
+            if config.mode == ETagMode::Disabled {
+                return response;
+            }
+
+            // Only handle cacheable methods
+            if !Self::is_cacheable_method(&req.method()) {
+                return response;
+            }
+
+            // Decompose response to work with parts
+            let (status, headers, body) = response.into_parts();
+
+            // Check for existing ETag (for Manual mode or pre-set ETags)
+            let existing_etag = Self::get_existing_etag(&headers);
+
+            // Get body bytes if available
+            let body_bytes = match &body {
+                crate::response::ResponseBody::Bytes(bytes) => Some(bytes.clone()),
+                crate::response::ResponseBody::Empty => Some(Vec::new()),
+                crate::response::ResponseBody::Stream(_) => None,
+            };
+
+            // Determine the ETag to use
+            let etag = if let Some(existing) = existing_etag {
+                Some(existing)
+            } else if config.mode == ETagMode::Auto {
+                if let Some(ref bytes) = body_bytes {
+                    if bytes.len() >= config.min_size {
+                        Some(Self::generate_etag(bytes, config.weak))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Check If-None-Match header
+            if let Some(ref etag_value) = etag {
+                if let Some(if_none_match) = req.headers().get("if-none-match") {
+                    if let Ok(value) = std::str::from_utf8(if_none_match) {
+                        let client_etags = Self::parse_if_none_match(value);
+
+                        // Check for wildcard or matching ETag
+                        let matches = client_etags.iter().any(|client_etag| {
+                            client_etag == "*" || Self::etags_match_weak(client_etag, etag_value)
+                        });
+
+                        if matches {
+                            // Return 304 Not Modified with ETag header
+                            return Response::with_status(crate::response::StatusCode::NOT_MODIFIED)
+                                .header("etag", etag_value.as_bytes().to_vec());
+                        }
+                    }
+                }
+            }
+
+            // Rebuild response with ETag header if we have one
+            let mut new_response = Response::with_status(status)
+                .body(body)
+                .rebuild_with_headers(headers);
+
+            if let Some(etag_value) = etag {
+                new_response = new_response.header("etag", etag_value.into_bytes());
+            }
+
+            new_response
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "ETagMiddleware"
+    }
+}
+
+// ===========================================================================
+// End ETag Middleware
+// ===========================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7925,5 +8272,267 @@ mod rate_limit_tests {
     fn rate_limit_default_via_default_trait() {
         let mw = RateLimitMiddleware::default();
         assert_eq!(mw.config.max_requests, 100);
+    }
+
+    // ========================================================================
+    // ETag Middleware Tests
+    // ========================================================================
+
+    #[test]
+    fn etag_middleware_generates_etag_for_get() {
+        let mw = ETagMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/resource");
+
+        // Create response with body
+        let response = Response::ok()
+            .header("content-type", b"application/json".to_vec())
+            .body(ResponseBody::Bytes(br#"{"status":"ok"}"#.to_vec()));
+
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // Should have ETag header
+        let etag = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"));
+        assert!(etag.is_some(), "Response should have ETag header");
+
+        // ETag should be a quoted hex string
+        let etag_value = std::str::from_utf8(&etag.unwrap().1).unwrap();
+        assert!(etag_value.starts_with('"'), "ETag should start with quote");
+        assert!(etag_value.ends_with('"'), "ETag should end with quote");
+    }
+
+    #[test]
+    fn etag_middleware_returns_304_on_match() {
+        let mw = ETagMiddleware::new();
+        let ctx = test_context();
+
+        // First request to get the ETag
+        let mut req1 = Request::new(crate::request::Method::Get, "/resource");
+        let body = br#"{"status":"ok"}"#.to_vec();
+        let response1 = Response::ok().body(ResponseBody::Bytes(body.clone()));
+        let response1 = futures_executor::block_on(mw.after(&ctx, &req1, response1));
+
+        let etag = response1
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+            .map(|(_, v)| std::str::from_utf8(v).unwrap().to_string())
+            .unwrap();
+
+        // Second request with If-None-Match header
+        let mut req2 = Request::new(crate::request::Method::Get, "/resource");
+        req2.set_header("if-none-match", etag.as_bytes().to_vec());
+
+        let response2 = Response::ok().body(ResponseBody::Bytes(body));
+        let response2 = futures_executor::block_on(mw.after(&ctx, &req2, response2));
+
+        // Should return 304 Not Modified
+        assert_eq!(response2.status().as_u16(), 304);
+        assert!(response2.body_ref().is_empty());
+    }
+
+    #[test]
+    fn etag_middleware_returns_full_response_on_mismatch() {
+        let mw = ETagMiddleware::new();
+        let ctx = test_context();
+
+        let mut req = Request::new(crate::request::Method::Get, "/resource");
+        req.set_header("if-none-match", b"\"old-etag\"".to_vec());
+
+        let body = br#"{"status":"updated"}"#.to_vec();
+        let response = Response::ok().body(ResponseBody::Bytes(body.clone()));
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // Should return 200 OK with body
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(!response.body_ref().is_empty());
+    }
+
+    #[test]
+    fn etag_middleware_weak_etag_generation() {
+        let config = ETagConfig::new().weak(true);
+        let mw = ETagMiddleware::with_config(config);
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/resource");
+
+        let response = Response::ok().body(ResponseBody::Bytes(b"data".to_vec()));
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        let etag = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+            .map(|(_, v)| std::str::from_utf8(v).unwrap().to_string())
+            .unwrap();
+
+        assert!(etag.starts_with("W/"), "Weak ETag should start with W/");
+    }
+
+    #[test]
+    fn etag_middleware_skips_post_requests() {
+        let mw = ETagMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Post, "/resource");
+
+        let response = Response::ok().body(ResponseBody::Bytes(b"created".to_vec()));
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // POST should not get ETag
+        let etag = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"));
+        assert!(etag.is_none(), "POST should not have ETag");
+    }
+
+    #[test]
+    fn etag_middleware_handles_head_requests() {
+        let mw = ETagMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Head, "/resource");
+
+        let response = Response::ok().body(ResponseBody::Bytes(b"data".to_vec()));
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // HEAD should get ETag
+        let etag = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"));
+        assert!(etag.is_some(), "HEAD should have ETag");
+    }
+
+    #[test]
+    fn etag_middleware_disabled_mode() {
+        let config = ETagConfig::new().mode(ETagMode::Disabled);
+        let mw = ETagMiddleware::with_config(config);
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/resource");
+
+        let response = Response::ok().body(ResponseBody::Bytes(b"data".to_vec()));
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // Should not have ETag when disabled
+        let etag = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"));
+        assert!(etag.is_none(), "Disabled mode should not add ETag");
+    }
+
+    #[test]
+    fn etag_middleware_min_size_filter() {
+        let config = ETagConfig::new().min_size(1000);
+        let mw = ETagMiddleware::with_config(config);
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/resource");
+
+        // Small body below min_size
+        let response = Response::ok().body(ResponseBody::Bytes(b"small".to_vec()));
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // Should not have ETag for small body
+        let etag = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"));
+        assert!(etag.is_none(), "Small body should not get ETag");
+    }
+
+    #[test]
+    fn etag_middleware_preserves_existing_etag() {
+        let config = ETagConfig::new().mode(ETagMode::Manual);
+        let mw = ETagMiddleware::with_config(config);
+        let ctx = test_context();
+
+        // First request to set up cached ETag
+        let mut req = Request::new(crate::request::Method::Get, "/resource");
+        req.set_header("if-none-match", b"\"custom-etag\"".to_vec());
+
+        // Response with pre-set ETag matching the request
+        let response = Response::ok()
+            .header("etag", b"\"custom-etag\"".to_vec())
+            .body(ResponseBody::Bytes(b"data".to_vec()));
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // Should return 304 since custom ETag matches
+        assert_eq!(response.status().as_u16(), 304);
+    }
+
+    #[test]
+    fn etag_middleware_wildcard_if_none_match() {
+        let mw = ETagMiddleware::new();
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Get, "/resource");
+        req.set_header("if-none-match", b"*".to_vec());
+
+        let response = Response::ok().body(ResponseBody::Bytes(b"data".to_vec()));
+        let response = futures_executor::block_on(mw.after(&ctx, &req, response));
+
+        // Wildcard should match any ETag
+        assert_eq!(response.status().as_u16(), 304);
+    }
+
+    #[test]
+    fn etag_middleware_weak_comparison_matches() {
+        let mw = ETagMiddleware::new();
+        let ctx = test_context();
+
+        // Get the strong ETag
+        let mut req1 = Request::new(crate::request::Method::Get, "/resource");
+        let body = b"test data".to_vec();
+        let response1 = Response::ok().body(ResponseBody::Bytes(body.clone()));
+        let response1 = futures_executor::block_on(mw.after(&ctx, &req1, response1));
+
+        let etag = response1
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+            .map(|(_, v)| std::str::from_utf8(v).unwrap().to_string())
+            .unwrap();
+
+        // Send request with weak version of the same ETag
+        let mut req2 = Request::new(crate::request::Method::Get, "/resource");
+        let weak_etag = format!("W/{}", etag);
+        req2.set_header("if-none-match", weak_etag.as_bytes().to_vec());
+
+        let response2 = Response::ok().body(ResponseBody::Bytes(body));
+        let response2 = futures_executor::block_on(mw.after(&ctx, &req2, response2));
+
+        // Weak comparison should match
+        assert_eq!(response2.status().as_u16(), 304);
+    }
+
+    #[test]
+    fn etag_middleware_name() {
+        let mw = ETagMiddleware::new();
+        assert_eq!(mw.name(), "ETagMiddleware");
+    }
+
+    #[test]
+    fn etag_config_builder() {
+        let config = ETagConfig::new()
+            .mode(ETagMode::Auto)
+            .weak(true)
+            .min_size(512);
+
+        assert_eq!(config.mode, ETagMode::Auto);
+        assert!(config.weak);
+        assert_eq!(config.min_size, 512);
+    }
+
+    #[test]
+    fn etag_generates_consistent_hash() {
+        // Same data should produce same ETag
+        let etag1 = ETagMiddleware::generate_etag(b"hello world", false);
+        let etag2 = ETagMiddleware::generate_etag(b"hello world", false);
+        assert_eq!(etag1, etag2);
+
+        // Different data should produce different ETag
+        let etag3 = ETagMiddleware::generate_etag(b"hello world!", false);
+        assert_ne!(etag1, etag3);
     }
 }

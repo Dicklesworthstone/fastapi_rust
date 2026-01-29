@@ -2151,8 +2151,18 @@ impl App {
                 ctx.cleanup_stack().run_cleanups().await;
 
                 // Apply any response mutations set by the handler
-                if let Some(mutations) = req.get_extension::<crate::extract::ResponseMutations>() {
+                let response = if let Some(mutations) =
+                    req.get_extension::<crate::extract::ResponseMutations>()
+                {
                     mutations.clone().apply(response)
+                } else {
+                    response
+                };
+
+                // Handle HEAD requests: strip body but preserve Content-Length
+                // HEAD should return same headers as GET but with no body
+                if req.method() == Method::Head {
+                    strip_body_for_head(response)
                 } else {
                     response
                 }
@@ -2456,6 +2466,53 @@ impl<'a> Handler for RouteHandler<'a> {
     }
 }
 
+/// Strip the body from a response for HEAD requests.
+///
+/// Per HTTP spec (RFC 7231 Section 4.3.2), HEAD responses must have the
+/// same headers as the corresponding GET response, including Content-Length
+/// if applicable, but with an empty message body.
+///
+/// This function:
+/// - Preserves Content-Length header if already present
+/// - Adds Content-Length for known-length bodies (Bytes) if not present
+/// - Does not add Content-Length for streaming bodies (length unknown)
+/// - Strips the body, returning an empty response
+fn strip_body_for_head(response: Response) -> Response {
+    use crate::response::ResponseBody;
+
+    // Check if Content-Length already exists
+    let has_content_length = response
+        .headers()
+        .iter()
+        .any(|(name, _): &(String, Vec<u8>)| name.eq_ignore_ascii_case("content-length"));
+
+    // Decompose the response
+    let (status, headers, body) = response.into_parts();
+
+    // Determine if we should add Content-Length
+    // Only add if not present and body has known length (Bytes, not Stream)
+    let content_length_to_add: Option<usize> = if !has_content_length {
+        match &body {
+            ResponseBody::Bytes(b) => Some(b.len()),
+            ResponseBody::Empty => Some(0),
+            ResponseBody::Stream(_) => None, // Unknown length, can't add
+        }
+    } else {
+        None
+    };
+
+    // Build new response with empty body but preserved headers
+    let mut new_response = Response::with_status(status)
+        .body(ResponseBody::Empty)
+        .rebuild_with_headers(headers);
+
+    if let Some(len) = content_length_to_add {
+        new_response = new_response.header("content-length", len.to_string().as_bytes().to_vec());
+    }
+
+    new_response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2719,6 +2776,163 @@ mod tests {
 
         let response = futures_executor::block_on(app.handle(&ctx, &mut req));
         assert_eq!(response.status().as_u16(), 405);
+    }
+
+    // ========================================================================
+    // HEAD Method Tests
+    // ========================================================================
+
+    #[test]
+    fn head_request_returns_empty_body() {
+        // GET handler returns a body
+        let app = App::builder().get("/", test_handler).build();
+
+        let ctx = test_context();
+        let mut req = Request::new(Method::Head, "/");
+
+        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
+        assert_eq!(response.status().as_u16(), 200);
+        // Body should be empty for HEAD
+        assert!(response.body_ref().is_empty());
+    }
+
+    #[test]
+    fn head_request_preserves_content_type() {
+        // Handler that sets Content-Type
+        fn json_handler(
+            _ctx: &RequestContext,
+            _req: &mut Request,
+        ) -> std::future::Ready<Response> {
+            std::future::ready(
+                Response::ok()
+                    .header("content-type", b"application/json".to_vec())
+                    .body(ResponseBody::Bytes(br#"{"status":"ok"}"#.to_vec())),
+            )
+        }
+
+        let app = App::builder().get("/api", json_handler).build();
+
+        let ctx = test_context();
+        let mut req = Request::new(Method::Head, "/api");
+
+        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(response.body_ref().is_empty());
+
+        // Content-Type should be preserved
+        let content_type = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"));
+        assert!(content_type.is_some());
+        assert_eq!(content_type.unwrap().1, b"application/json");
+    }
+
+    #[test]
+    fn head_request_adds_content_length_for_known_body() {
+        let app = App::builder().get("/", test_handler).build();
+
+        let ctx = test_context();
+        let mut req = Request::new(Method::Head, "/");
+
+        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(response.body_ref().is_empty());
+
+        // Content-Length should be set to original body length ("Hello, World!" = 13 bytes)
+        let content_length = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+        assert!(content_length.is_some());
+        assert_eq!(content_length.unwrap().1, b"13");
+    }
+
+    #[test]
+    fn head_request_preserves_existing_content_length() {
+        // Handler that explicitly sets Content-Length
+        fn explicit_length_handler(
+            _ctx: &RequestContext,
+            _req: &mut Request,
+        ) -> std::future::Ready<Response> {
+            std::future::ready(
+                Response::ok()
+                    .header("content-length", b"999".to_vec()) // Explicit, different from actual
+                    .body(ResponseBody::Bytes(b"short".to_vec())),
+            )
+        }
+
+        let app = App::builder().get("/", explicit_length_handler).build();
+
+        let ctx = test_context();
+        let mut req = Request::new(Method::Head, "/");
+
+        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(response.body_ref().is_empty());
+
+        // Should preserve the explicit Content-Length, not replace it
+        let content_length = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+        assert!(content_length.is_some());
+        assert_eq!(content_length.unwrap().1, b"999");
+    }
+
+    #[test]
+    fn head_request_for_empty_body_adds_zero_content_length() {
+        fn empty_handler(
+            _ctx: &RequestContext,
+            _req: &mut Request,
+        ) -> std::future::Ready<Response> {
+            std::future::ready(Response::ok().body(ResponseBody::Empty))
+        }
+
+        let app = App::builder().get("/", empty_handler).build();
+
+        let ctx = test_context();
+        let mut req = Request::new(Method::Head, "/");
+
+        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(response.body_ref().is_empty());
+
+        // Content-Length should be 0 for empty body
+        let content_length = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+        assert!(content_length.is_some());
+        assert_eq!(content_length.unwrap().1, b"0");
+    }
+
+    #[test]
+    fn head_falls_through_to_get_route() {
+        // Only register GET, HEAD should still work
+        let app = App::builder()
+            .get("/resource", test_handler)
+            .post("/resource", test_handler) // Different route for POST
+            .build();
+
+        let ctx = test_context();
+
+        // HEAD to GET route should work
+        let mut head_req = Request::new(Method::Head, "/resource");
+        let response = futures_executor::block_on(app.handle(&ctx, &mut head_req));
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(response.body_ref().is_empty());
+    }
+
+    #[test]
+    fn head_to_unknown_path_returns_404() {
+        let app = App::builder().get("/", test_handler).build();
+
+        let ctx = test_context();
+        let mut req = Request::new(Method::Head, "/unknown");
+
+        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
+        assert_eq!(response.status().as_u16(), 404);
     }
 
     #[test]
