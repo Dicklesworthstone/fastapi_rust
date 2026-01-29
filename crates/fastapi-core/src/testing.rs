@@ -5506,6 +5506,471 @@ impl ResponseDiff {
     }
 }
 
+// ============================================================================
+// Snapshot Testing Utilities
+// ============================================================================
+
+/// A serializable snapshot of an HTTP response for fixture-based testing.
+///
+/// Snapshots capture status code, selected headers, and body content,
+/// enabling API contract verification by comparing responses against
+/// stored fixtures.
+///
+/// # Usage
+///
+/// ```ignore
+/// let response = client.get("/api/users").send();
+/// let snapshot = ResponseSnapshot::from_test_response(&response);
+///
+/// // First run: save the snapshot
+/// snapshot.save("tests/snapshots/get_users.json").unwrap();
+///
+/// // Subsequent runs: compare against saved snapshot
+/// let expected = ResponseSnapshot::load("tests/snapshots/get_users.json").unwrap();
+/// assert_eq!(snapshot, expected, "{}", snapshot.diff(&expected));
+/// ```
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ResponseSnapshot {
+    /// HTTP status code.
+    pub status: u16,
+    /// Selected response headers (name, value) — sorted for determinism.
+    pub headers: Vec<(String, String)>,
+    /// Response body as a string.
+    pub body: String,
+    /// If the body is valid JSON, the parsed value for structural comparison.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_json: Option<serde_json::Value>,
+}
+
+impl ResponseSnapshot {
+    /// Create a snapshot from a `TestResponse`.
+    ///
+    /// Captures the status code, all response headers, and body text.
+    /// If the body is valid JSON, it's also parsed for structural comparison.
+    pub fn from_test_response(resp: &TestResponse) -> Self {
+        let body = resp.text().to_string();
+        let body_json = serde_json::from_str::<serde_json::Value>(&body).ok();
+
+        let mut headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                std::str::from_utf8(value)
+                    .ok()
+                    .map(|v| (name.to_lowercase(), v.to_string()))
+            })
+            .collect();
+        headers.sort();
+
+        Self {
+            status: resp.status().as_u16(),
+            headers,
+            body,
+            body_json,
+        }
+    }
+
+    /// Create a snapshot with only specific headers (for ignoring dynamic headers).
+    pub fn from_test_response_with_headers(resp: &TestResponse, header_names: &[&str]) -> Self {
+        let mut snapshot = Self::from_test_response(resp);
+        let names: Vec<String> = header_names.iter().map(|n| n.to_lowercase()).collect();
+        snapshot.headers.retain(|(name, _)| names.contains(name));
+        snapshot
+    }
+
+    /// Mask dynamic fields in the JSON body (replace with a placeholder).
+    ///
+    /// This is useful for fields like timestamps, UUIDs, or auto-increment IDs
+    /// that change between test runs.
+    ///
+    /// `paths` are dot-separated JSON paths, e.g. `["id", "created_at", "items.0.id"]`.
+    #[must_use]
+    pub fn mask_fields(mut self, paths: &[&str], placeholder: &str) -> Self {
+        if let Some(ref mut json) = self.body_json {
+            for path in paths {
+                mask_json_path(json, path, placeholder);
+            }
+            self.body = serde_json::to_string_pretty(json).unwrap_or(self.body);
+        }
+        self
+    }
+
+    /// Save the snapshot to a JSON file.
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(path, json)
+    }
+
+    /// Load a snapshot from a JSON file.
+    pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let data = std::fs::read_to_string(path)?;
+        serde_json::from_str(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// Compare two snapshots and return a human-readable diff.
+    #[must_use]
+    pub fn diff(&self, other: &Self) -> String {
+        let mut output = String::new();
+
+        if self.status != other.status {
+            output.push_str(&format!("Status: {} vs {}\n", self.status, other.status));
+        }
+
+        // Header diffs
+        for (name, value) in &self.headers {
+            match other.headers.iter().find(|(n, _)| n == name) {
+                Some((_, other_value)) if value != other_value => {
+                    output.push_str(&format!(
+                        "Header '{}': {:?} vs {:?}\n",
+                        name, value, other_value
+                    ));
+                }
+                None => {
+                    output.push_str(&format!("Header '{}': present vs missing\n", name));
+                }
+                _ => {}
+            }
+        }
+        for (name, _) in &other.headers {
+            if !self.headers.iter().any(|(n, _)| n == name) {
+                output.push_str(&format!("Header '{}': missing vs present\n", name));
+            }
+        }
+
+        // Body diff
+        if self.body != other.body {
+            output.push_str(&format!(
+                "Body:\n  expected: {:?}\n  actual:   {:?}\n",
+                other.body, self.body
+            ));
+        }
+
+        if output.is_empty() {
+            "No differences".to_string()
+        } else {
+            output
+        }
+    }
+
+    /// Check if two snapshots match, optionally ignoring specific headers.
+    pub fn matches_ignoring_headers(&self, other: &Self, ignore: &[&str]) -> bool {
+        if self.status != other.status {
+            return false;
+        }
+
+        let ignore_lower: Vec<String> = ignore.iter().map(|s| s.to_lowercase()).collect();
+
+        let self_headers: Vec<_> = self
+            .headers
+            .iter()
+            .filter(|(n, _)| !ignore_lower.contains(n))
+            .collect();
+        let other_headers: Vec<_> = other
+            .headers
+            .iter()
+            .filter(|(n, _)| !ignore_lower.contains(n))
+            .collect();
+
+        if self_headers != other_headers {
+            return false;
+        }
+
+        // Compare JSON structurally if available, else compare strings
+        match (&self.body_json, &other.body_json) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.body == other.body,
+        }
+    }
+}
+
+/// Helper to mask a value at a dot-separated JSON path.
+fn mask_json_path(value: &mut serde_json::Value, path: &str, placeholder: &str) {
+    let parts: Vec<&str> = path.splitn(2, '.').collect();
+    match parts.as_slice() {
+        [key] => {
+            if let Some(obj) = value.as_object_mut() {
+                if obj.contains_key(*key) {
+                    obj.insert(
+                        key.to_string(),
+                        serde_json::Value::String(placeholder.to_string()),
+                    );
+                }
+            }
+            if let Some(arr) = value.as_array_mut() {
+                if let Ok(idx) = key.parse::<usize>() {
+                    if idx < arr.len() {
+                        arr[idx] = serde_json::Value::String(placeholder.to_string());
+                    }
+                }
+            }
+        }
+        [key, rest] => {
+            if let Some(obj) = value.as_object_mut() {
+                if let Some(child) = obj.get_mut(*key) {
+                    mask_json_path(child, rest, placeholder);
+                }
+            }
+            if let Some(arr) = value.as_array_mut() {
+                if let Ok(idx) = key.parse::<usize>() {
+                    if let Some(child) = arr.get_mut(idx) {
+                        mask_json_path(child, rest, placeholder);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Macro for snapshot testing a response against a file fixture.
+///
+/// On first run (or when `SNAPSHOT_UPDATE=1`), saves the snapshot.
+/// On subsequent runs, compares against the saved snapshot.
+///
+/// # Usage
+///
+/// ```ignore
+/// let response = client.get("/api/users").send();
+/// assert_response_snapshot!(response, "tests/snapshots/get_users.json");
+///
+/// // With field masking:
+/// assert_response_snapshot!(response, "tests/snapshots/get_users.json", mask: ["id", "created_at"]);
+/// ```
+#[macro_export]
+macro_rules! assert_response_snapshot {
+    ($response:expr, $path:expr) => {{
+        let snapshot = $crate::ResponseSnapshot::from_test_response(&$response);
+        let path = std::path::Path::new($path);
+
+        if std::env::var("SNAPSHOT_UPDATE").is_ok() || !path.exists() {
+            snapshot.save(path).expect("failed to save snapshot");
+        } else {
+            let expected =
+                $crate::ResponseSnapshot::load(path).expect("failed to load snapshot");
+            assert!(
+                snapshot == expected,
+                "Snapshot mismatch for {}:\n{}",
+                $path,
+                snapshot.diff(&expected)
+            );
+        }
+    }};
+    ($response:expr, $path:expr, mask: [$($field:expr),* $(,)?]) => {{
+        let snapshot = $crate::ResponseSnapshot::from_test_response(&$response)
+            .mask_fields(&[$($field),*], "<MASKED>");
+        let path = std::path::Path::new($path);
+
+        if std::env::var("SNAPSHOT_UPDATE").is_ok() || !path.exists() {
+            snapshot.save(path).expect("failed to save snapshot");
+        } else {
+            let expected =
+                $crate::ResponseSnapshot::load(path).expect("failed to load snapshot");
+            assert!(
+                snapshot == expected,
+                "Snapshot mismatch for {}:\n{}",
+                $path,
+                snapshot.diff(&expected)
+            );
+        }
+    }};
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn mock_test_response(status: u16, body: &str, headers: &[(&str, &str)]) -> TestResponse {
+        let mut resp =
+            crate::response::Response::with_status(crate::response::StatusCode::from_u16(status));
+        for (name, value) in headers {
+            resp = resp.header(*name, value.as_bytes().to_vec());
+        }
+        resp = resp.body(crate::response::ResponseBody::Bytes(
+            body.as_bytes().to_vec(),
+        ));
+        TestResponse::new(resp, 0)
+    }
+
+    #[test]
+    fn snapshot_from_test_response() {
+        let resp = mock_test_response(
+            200,
+            r#"{"id":1,"name":"Alice"}"#,
+            &[("content-type", "application/json")],
+        );
+        let snap = ResponseSnapshot::from_test_response(&resp);
+
+        assert_eq!(snap.status, 200);
+        assert!(snap.body_json.is_some());
+        assert_eq!(snap.body_json.as_ref().unwrap()["name"], "Alice");
+    }
+
+    #[test]
+    fn snapshot_equality() {
+        let resp = mock_test_response(200, "hello", &[]);
+        let snap1 = ResponseSnapshot::from_test_response(&resp);
+        let snap2 = ResponseSnapshot::from_test_response(&resp);
+        assert_eq!(snap1, snap2);
+    }
+
+    #[test]
+    fn snapshot_diff_status() {
+        let s1 = ResponseSnapshot {
+            status: 200,
+            headers: vec![],
+            body: "ok".to_string(),
+            body_json: None,
+        };
+        let s2 = ResponseSnapshot {
+            status: 404,
+            ..s1.clone()
+        };
+        let diff = s1.diff(&s2);
+        assert!(diff.contains("200 vs 404"));
+    }
+
+    #[test]
+    fn snapshot_diff_body() {
+        let s1 = ResponseSnapshot {
+            status: 200,
+            headers: vec![],
+            body: "hello".to_string(),
+            body_json: None,
+        };
+        let s2 = ResponseSnapshot {
+            body: "world".to_string(),
+            ..s1.clone()
+        };
+        let diff = s1.diff(&s2);
+        assert!(diff.contains("Body:"));
+    }
+
+    #[test]
+    fn snapshot_diff_no_differences() {
+        let s = ResponseSnapshot {
+            status: 200,
+            headers: vec![],
+            body: "ok".to_string(),
+            body_json: None,
+        };
+        assert_eq!(s.diff(&s), "No differences");
+    }
+
+    #[test]
+    fn snapshot_mask_fields() {
+        let resp = mock_test_response(
+            200,
+            r#"{"id":42,"name":"Alice","created_at":"2026-01-01"}"#,
+            &[],
+        );
+        let snap = ResponseSnapshot::from_test_response(&resp)
+            .mask_fields(&["id", "created_at"], "<MASKED>");
+
+        let json = snap.body_json.unwrap();
+        assert_eq!(json["id"], "<MASKED>");
+        assert_eq!(json["name"], "Alice");
+        assert_eq!(json["created_at"], "<MASKED>");
+    }
+
+    #[test]
+    fn snapshot_mask_nested_fields() {
+        let resp = mock_test_response(200, r#"{"user":{"id":1,"name":"Bob"}}"#, &[]);
+        let snap =
+            ResponseSnapshot::from_test_response(&resp).mask_fields(&["user.id"], "<MASKED>");
+
+        let json = snap.body_json.unwrap();
+        assert_eq!(json["user"]["id"], "<MASKED>");
+        assert_eq!(json["user"]["name"], "Bob");
+    }
+
+    #[test]
+    fn snapshot_save_and_load() {
+        let snap = ResponseSnapshot {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: r#"{"ok":true}"#.to_string(),
+            body_json: Some(serde_json::json!({"ok": true})),
+        };
+
+        let dir = std::env::temp_dir().join("fastapi_snapshot_test");
+        let path = dir.join("test_snap.json");
+        snap.save(&path).unwrap();
+
+        let loaded = ResponseSnapshot::load(&path).unwrap();
+        assert_eq!(snap, loaded);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_matches_ignoring_headers() {
+        let s1 = ResponseSnapshot {
+            status: 200,
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-request-id".to_string(), "abc".to_string()),
+            ],
+            body: "ok".to_string(),
+            body_json: None,
+        };
+        let s2 = ResponseSnapshot {
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-request-id".to_string(), "xyz".to_string()),
+            ],
+            ..s1.clone()
+        };
+
+        assert!(!s1.matches_ignoring_headers(&s2, &[]));
+        assert!(s1.matches_ignoring_headers(&s2, &["X-Request-Id"]));
+    }
+
+    #[test]
+    fn snapshot_with_selected_headers() {
+        let resp = mock_test_response(
+            200,
+            "ok",
+            &[
+                ("content-type", "text/plain"),
+                ("x-request-id", "abc123"),
+                ("x-trace-id", "trace-456"),
+            ],
+        );
+        let snap = ResponseSnapshot::from_test_response_with_headers(&resp, &["content-type"]);
+
+        assert_eq!(snap.headers.len(), 1);
+        assert_eq!(snap.headers[0].0, "content-type");
+    }
+
+    #[test]
+    fn snapshot_json_structural_comparison() {
+        // Same JSON, different key order
+        let s1 = ResponseSnapshot {
+            status: 200,
+            headers: vec![],
+            body: r#"{"a":1,"b":2}"#.to_string(),
+            body_json: Some(serde_json::json!({"a": 1, "b": 2})),
+        };
+        let s2 = ResponseSnapshot {
+            body: r#"{"b":2,"a":1}"#.to_string(),
+            body_json: Some(serde_json::json!({"b": 2, "a": 1})),
+            ..s1.clone()
+        };
+
+        // PartialEq compares body strings too, so they differ
+        assert_ne!(s1, s2);
+        // But matches_ignoring_headers uses JSON structural comparison
+        assert!(s1.matches_ignoring_headers(&s2, &[]));
+    }
+}
+
 #[cfg(test)]
 mod mock_server_tests {
     use super::*;

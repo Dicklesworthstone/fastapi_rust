@@ -66,10 +66,7 @@ fn bench_request_line_parsing(c: &mut Criterion) {
             "with_query",
             b"GET /search?q=rust+web+framework&page=1&limit=20 HTTP/1.1\r\n",
         ),
-        (
-            "post",
-            b"POST /api/v1/items HTTP/1.1\r\n",
-        ),
+        ("post", b"POST /api/v1/items HTTP/1.1\r\n"),
         (
             "delete_with_path",
             b"DELETE /api/v1/items/42/comments/7 HTTP/1.1\r\n",
@@ -125,7 +122,10 @@ fn bench_query_string_parsing(c: &mut Criterion) {
         ("3_params", "a=1&b=2&c=3".to_string()),
         ("10_params", large_query_string(10)),
         ("30_params", large_query_string(30)),
-        ("percent_encoded", "name=hello%20world&q=%E4%B8%AD%E6%96%87".to_string()),
+        (
+            "percent_encoded",
+            "name=hello%20world&q=%E4%B8%AD%E6%96%87".to_string(),
+        ),
     ];
 
     for (name, qs_raw) in &queries {
@@ -192,7 +192,10 @@ fn bench_header_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("headers");
 
     let header_blocks: Vec<(&str, Vec<u8>)> = vec![
-        ("2_headers", b"Host: example.com\r\nAccept: */*\r\n\r\n".to_vec()),
+        (
+            "2_headers",
+            b"Host: example.com\r\nAccept: */*\r\n\r\n".to_vec(),
+        ),
         (
             "typical_browser",
             b"Host: example.com\r\n\

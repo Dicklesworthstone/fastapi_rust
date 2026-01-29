@@ -137,7 +137,8 @@ pub use request::{
 pub use response::{
     Binary, BinaryWithType, BodyStream, FileResponse, Html, IntoResponse, NoContent, Redirect,
     Response, ResponseBody, ResponseModel, ResponseModelConfig, ResponseProduces, StatusCode, Text,
-    ValidatedResponse, exclude_fields, include_fields, mime_type_for_extension,
+    ValidatedResponse, apply_conditional, check_if_match, check_if_none_match, exclude_fields,
+    include_fields, mime_type_for_extension,
 };
 pub use sse::{SseConfig, SseEvent, SseResponse, SseStream, sse_response};
 pub use static_files::{StaticFiles, StaticFilesConfig};
@@ -149,8 +150,8 @@ pub use asupersync::{Budget, Cx, Outcome, RegionId, TaskId};
 pub use testing::{
     CapturedLog, CookieJar, E2ECapture, E2EReport, E2EScenario, E2EStep, E2EStepResult,
     FixtureGuard, IntegrationTest, IntegrationTestContext, LogCapture, RequestBuilder,
-    ResponseDiff, TestClient, TestFixture, TestLogger, TestResponse, TestServer, TestServerConfig,
-    TestServerLogEntry, TestTimings, json_contains,
+    ResponseDiff, ResponseSnapshot, TestClient, TestFixture, TestLogger, TestResponse, TestServer,
+    TestServerConfig, TestServerLogEntry, TestTimings, json_contains,
 };
 // Note: e2e_test!, assert_with_logs!, assert_eq_with_logs! macros are automatically exported
 // at crate root via #[macro_export]
@@ -205,5 +206,6 @@ pub use shutdown::{
 
 // Re-export routing utilities
 pub use routing::{
-    Converter, ParamInfo, PathSegment, RouteLookup, RoutePattern, RouteTable, format_allow_header,
+    Converter, ParamInfo, PathSegment, RouteLookup, RoutePattern, RouteTable, TrailingSlashMode,
+    format_allow_header,
 };

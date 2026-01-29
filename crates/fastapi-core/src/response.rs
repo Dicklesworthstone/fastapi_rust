@@ -61,6 +61,8 @@ impl StatusCode {
     pub const METHOD_NOT_ALLOWED: Self = Self(405);
     /// 406 Not Acceptable
     pub const NOT_ACCEPTABLE: Self = Self(406);
+    /// 412 Precondition Failed
+    pub const PRECONDITION_FAILED: Self = Self(412);
     /// 413 Payload Too Large
     pub const PAYLOAD_TOO_LARGE: Self = Self(413);
     /// 415 Unsupported Media Type
@@ -122,6 +124,8 @@ impl StatusCode {
             403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            406 => "Not Acceptable",
+            412 => "Precondition Failed",
             413 => "Payload Too Large",
             415 => "Unsupported Media Type",
             416 => "Range Not Satisfiable",
@@ -293,6 +297,51 @@ impl Response {
     #[must_use]
     pub fn range_not_satisfiable() -> Self {
         Self::with_status(StatusCode::RANGE_NOT_SATISFIABLE)
+    }
+
+    /// Create a 304 Not Modified response.
+    ///
+    /// Used for conditional requests where the resource has not changed.
+    /// The response body is empty per HTTP spec.
+    #[must_use]
+    pub fn not_modified() -> Self {
+        Self::with_status(StatusCode::NOT_MODIFIED)
+    }
+
+    /// Create a 412 Precondition Failed response.
+    ///
+    /// Used when a conditional request's precondition (e.g., `If-Match`) fails.
+    #[must_use]
+    pub fn precondition_failed() -> Self {
+        Self::with_status(StatusCode::PRECONDITION_FAILED)
+    }
+
+    /// Set the ETag header on this response.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let response = Response::ok()
+    ///     .with_etag("\"abc123\"")
+    ///     .body(b"content".to_vec());
+    /// ```
+    #[must_use]
+    pub fn with_etag(self, etag: impl Into<String>) -> Self {
+        self.header("ETag", etag.into().into_bytes())
+    }
+
+    /// Set a weak ETag header on this response.
+    ///
+    /// Automatically prefixes with `W/` if not already present.
+    #[must_use]
+    pub fn with_weak_etag(self, etag: impl Into<String>) -> Self {
+        let etag = etag.into();
+        let value = if etag.starts_with("W/") {
+            etag
+        } else {
+            format!("W/{}", etag)
+        };
+        self.header("ETag", value.into_bytes())
     }
 
     /// Add a header.
@@ -1352,6 +1401,164 @@ pub fn include_fields<T: Serialize + ResponseModel>(
     )
 }
 
+// ============================================================================
+// Conditional request (ETag / If-None-Match / If-Match) utilities
+// ============================================================================
+
+/// Check an `If-None-Match` header value against an ETag.
+///
+/// Returns `true` if the condition is met (i.e., the resource HAS changed and the
+/// full response should be sent). Returns `false` if a 304 Not Modified should be
+/// returned instead.
+///
+/// Handles:
+/// - `*` wildcard (matches any ETag)
+/// - Multiple comma-separated ETags
+/// - Weak ETag comparison (W/ prefix stripped for comparison)
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::response::check_if_none_match;
+///
+/// let current_etag = "\"abc123\"";
+/// let if_none_match = "\"abc123\"";
+/// // Returns false: ETag matches, so send 304
+/// assert!(!check_if_none_match(if_none_match, current_etag));
+/// ```
+pub fn check_if_none_match(if_none_match: &str, current_etag: &str) -> bool {
+    let if_none_match = if_none_match.trim();
+
+    // Wildcard matches everything
+    if if_none_match == "*" {
+        return false; // Resource exists, send 304
+    }
+
+    let current_stripped = strip_weak_prefix(current_etag.trim());
+
+    // Check each ETag in the comma-separated list
+    for candidate in if_none_match.split(',') {
+        let candidate = strip_weak_prefix(candidate.trim());
+        if candidate == current_stripped {
+            return false; // Match found, send 304
+        }
+    }
+
+    true // No match, send full response
+}
+
+/// Check an `If-Match` header value against an ETag.
+///
+/// Returns `true` if the precondition is met (the resource matches and the
+/// request should proceed). Returns `false` if a 412 Precondition Failed
+/// should be returned.
+///
+/// Uses strong comparison (W/ weak ETags never match).
+pub fn check_if_match(if_match: &str, current_etag: &str) -> bool {
+    let if_match = if_match.trim();
+
+    // Wildcard matches everything
+    if if_match == "*" {
+        return true;
+    }
+
+    let current = current_etag.trim();
+
+    // Weak ETags never match for If-Match (strong comparison required)
+    if current.starts_with("W/") {
+        return false;
+    }
+
+    for candidate in if_match.split(',') {
+        let candidate = candidate.trim();
+        // Weak ETags don't match in strong comparison
+        if candidate.starts_with("W/") {
+            continue;
+        }
+        if candidate == current {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Strip the `W/` weak ETag prefix for weak comparison.
+fn strip_weak_prefix(etag: &str) -> &str {
+    etag.strip_prefix("W/").unwrap_or(etag)
+}
+
+/// Evaluate conditional request headers against a response and return the
+/// appropriate response (304, 412, or the original).
+///
+/// This checks `If-None-Match` (for GET/HEAD) and `If-Match` (for PUT/PATCH/DELETE)
+/// against the response's ETag header.
+///
+/// # Arguments
+///
+/// * `request_headers` - Iterator of (name, value) pairs from the request
+/// * `method` - The HTTP method
+/// * `response` - The prepared response (must have ETag header set)
+///
+/// # Returns
+///
+/// Either the original response or a 304/412 response as appropriate.
+pub fn apply_conditional(
+    request_headers: &[(String, Vec<u8>)],
+    method: &crate::request::Method,
+    response: Response,
+) -> Response {
+    // Find the ETag from the response
+    let response_etag = response
+        .headers()
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+        .and_then(|(_, value)| std::str::from_utf8(value).ok())
+        .map(String::from);
+
+    let response_etag = match response_etag {
+        Some(etag) => etag,
+        None => return response, // No ETag, can't do conditional
+    };
+
+    // Check If-None-Match (for GET/HEAD - returns 304)
+    if matches!(
+        method,
+        crate::request::Method::Get | crate::request::Method::Head
+    ) {
+        if let Some(if_none_match) = find_header(request_headers, "if-none-match") {
+            if !check_if_none_match(&if_none_match, &response_etag) {
+                return Response::not_modified().with_etag(response_etag);
+            }
+        }
+    }
+
+    // Check If-Match (for unsafe methods - returns 412)
+    if matches!(
+        method,
+        crate::request::Method::Put
+            | crate::request::Method::Patch
+            | crate::request::Method::Delete
+    ) {
+        if let Some(if_match) = find_header(request_headers, "if-match") {
+            if !check_if_match(&if_match, &response_etag) {
+                return Response::precondition_failed();
+            }
+        }
+    }
+
+    response
+}
+
+/// Find a header value by name (case-insensitive).
+fn find_header(headers: &[(String, Vec<u8>)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .and_then(|(_, v)| std::str::from_utf8(v).ok())
+        .map(String::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2289,5 +2496,176 @@ mod tests {
         } else {
             panic!("Expected Bytes body");
         }
+    }
+
+    // ====================================================================
+    // Conditional request (ETag) tests
+    // ====================================================================
+
+    #[test]
+    fn status_code_precondition_failed() {
+        assert_eq!(StatusCode::PRECONDITION_FAILED.as_u16(), 412);
+        assert_eq!(
+            StatusCode::PRECONDITION_FAILED.canonical_reason(),
+            "Precondition Failed"
+        );
+    }
+
+    #[test]
+    fn response_not_modified_status() {
+        let resp = Response::not_modified();
+        assert_eq!(resp.status().as_u16(), 304);
+    }
+
+    #[test]
+    fn response_precondition_failed_status() {
+        let resp = Response::precondition_failed();
+        assert_eq!(resp.status().as_u16(), 412);
+    }
+
+    #[test]
+    fn response_with_etag() {
+        let resp = Response::ok().with_etag("\"abc123\"");
+        let etag = resp
+            .headers()
+            .iter()
+            .find(|(n, _)| n == "ETag")
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string());
+        assert_eq!(etag, Some("\"abc123\"".to_string()));
+    }
+
+    #[test]
+    fn response_with_weak_etag() {
+        let resp = Response::ok().with_weak_etag("\"abc123\"");
+        let etag = resp
+            .headers()
+            .iter()
+            .find(|(n, _)| n == "ETag")
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string());
+        assert_eq!(etag, Some("W/\"abc123\"".to_string()));
+    }
+
+    #[test]
+    fn response_with_weak_etag_already_prefixed() {
+        let resp = Response::ok().with_weak_etag("W/\"abc123\"");
+        let etag = resp
+            .headers()
+            .iter()
+            .find(|(n, _)| n == "ETag")
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string());
+        assert_eq!(etag, Some("W/\"abc123\"".to_string()));
+    }
+
+    #[test]
+    fn check_if_none_match_exact() {
+        // Exact match -> false (send 304)
+        assert!(!check_if_none_match("\"abc\"", "\"abc\""));
+    }
+
+    #[test]
+    fn check_if_none_match_no_match() {
+        // No match -> true (send full response)
+        assert!(check_if_none_match("\"abc\"", "\"def\""));
+    }
+
+    #[test]
+    fn check_if_none_match_wildcard() {
+        assert!(!check_if_none_match("*", "\"anything\""));
+    }
+
+    #[test]
+    fn check_if_none_match_multiple_etags() {
+        // Second ETag matches
+        assert!(!check_if_none_match("\"aaa\", \"bbb\", \"ccc\"", "\"bbb\""));
+        // None match
+        assert!(check_if_none_match("\"aaa\", \"bbb\"", "\"ccc\""));
+    }
+
+    #[test]
+    fn check_if_none_match_weak_comparison() {
+        // Weak ETags should match in If-None-Match (weak comparison)
+        assert!(!check_if_none_match("W/\"abc\"", "\"abc\""));
+        assert!(!check_if_none_match("\"abc\"", "W/\"abc\""));
+        assert!(!check_if_none_match("W/\"abc\"", "W/\"abc\""));
+    }
+
+    #[test]
+    fn check_if_match_exact() {
+        // Exact match -> true (proceed)
+        assert!(check_if_match("\"abc\"", "\"abc\""));
+    }
+
+    #[test]
+    fn check_if_match_no_match() {
+        // No match -> false (412)
+        assert!(!check_if_match("\"abc\"", "\"def\""));
+    }
+
+    #[test]
+    fn check_if_match_wildcard() {
+        assert!(check_if_match("*", "\"anything\""));
+    }
+
+    #[test]
+    fn check_if_match_weak_etag_fails() {
+        // If-Match requires strong comparison - weak ETags never match
+        assert!(!check_if_match("W/\"abc\"", "\"abc\""));
+        assert!(!check_if_match("\"abc\"", "W/\"abc\""));
+    }
+
+    #[test]
+    fn check_if_match_multiple_etags() {
+        assert!(check_if_match("\"aaa\", \"bbb\"", "\"bbb\""));
+        assert!(!check_if_match("\"aaa\", \"bbb\"", "\"ccc\""));
+    }
+
+    #[test]
+    fn apply_conditional_get_304() {
+        use crate::request::Method;
+
+        let headers = vec![("If-None-Match".to_string(), b"\"abc123\"".to_vec())];
+        let response = Response::ok().with_etag("\"abc123\"");
+        let result = apply_conditional(&headers, &Method::Get, response);
+        assert_eq!(result.status().as_u16(), 304);
+    }
+
+    #[test]
+    fn apply_conditional_get_no_match_200() {
+        use crate::request::Method;
+
+        let headers = vec![("If-None-Match".to_string(), b"\"old\"".to_vec())];
+        let response = Response::ok().with_etag("\"new\"");
+        let result = apply_conditional(&headers, &Method::Get, response);
+        assert_eq!(result.status().as_u16(), 200);
+    }
+
+    #[test]
+    fn apply_conditional_put_412() {
+        use crate::request::Method;
+
+        let headers = vec![("If-Match".to_string(), b"\"old\"".to_vec())];
+        let response = Response::ok().with_etag("\"new\"");
+        let result = apply_conditional(&headers, &Method::Put, response);
+        assert_eq!(result.status().as_u16(), 412);
+    }
+
+    #[test]
+    fn apply_conditional_put_match_200() {
+        use crate::request::Method;
+
+        let headers = vec![("If-Match".to_string(), b"\"current\"".to_vec())];
+        let response = Response::ok().with_etag("\"current\"");
+        let result = apply_conditional(&headers, &Method::Put, response);
+        assert_eq!(result.status().as_u16(), 200);
+    }
+
+    #[test]
+    fn apply_conditional_no_etag_passthrough() {
+        use crate::request::Method;
+
+        let headers = vec![("If-None-Match".to_string(), b"\"abc\"".to_vec())];
+        let response = Response::ok(); // No ETag
+        let result = apply_conditional(&headers, &Method::Get, response);
+        assert_eq!(result.status().as_u16(), 200);
     }
 }

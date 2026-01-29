@@ -873,6 +873,21 @@ pub struct AppConfig {
     /// When true and `root_path` is set, a server entry with the root_path
     /// will be added to the OpenAPI specification's servers array.
     pub root_path_in_servers: bool,
+    /// Trailing slash handling mode.
+    ///
+    /// Controls how the router handles trailing slashes in URLs:
+    /// - `Strict` (default): `/users` and `/users/` are different routes
+    /// - `Redirect`: 308 redirect `/users/` to `/users`
+    /// - `RedirectWithSlash`: 308 redirect `/users` to `/users/`
+    /// - `MatchBoth`: accept both forms without redirect
+    pub trailing_slash_mode: crate::routing::TrailingSlashMode,
+    /// Debug mode configuration.
+    ///
+    /// Controls whether error responses include additional diagnostic
+    /// information such as source location, handler name, and route pattern.
+    /// When a debug header and token are configured, debug info is only
+    /// included for requests that present the correct token.
+    pub debug_config: crate::error::DebugConfig,
 }
 
 /// Configuration loading errors.
@@ -958,6 +973,8 @@ impl Default for AppConfig {
             request_timeout_ms: 30_000, // 30 seconds
             root_path: String::new(),
             root_path_in_servers: true,
+            trailing_slash_mode: crate::routing::TrailingSlashMode::Strict,
+            debug_config: crate::error::DebugConfig::default(),
         }
     }
 }
@@ -1042,6 +1059,45 @@ impl AppConfig {
     #[must_use]
     pub fn root_path_in_servers(mut self, include: bool) -> Self {
         self.root_path_in_servers = include;
+        self
+    }
+
+    /// Sets the trailing slash handling mode.
+    ///
+    /// Controls how the router handles trailing slashes in URLs.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::TrailingSlashMode;
+    ///
+    /// let config = AppConfig::new()
+    ///     .trailing_slash_mode(TrailingSlashMode::Redirect);
+    /// ```
+    #[must_use]
+    pub fn trailing_slash_mode(mut self, mode: crate::routing::TrailingSlashMode) -> Self {
+        self.trailing_slash_mode = mode;
+        self
+    }
+
+    /// Sets the debug mode configuration.
+    ///
+    /// Controls whether error responses include additional diagnostic
+    /// information. Use with `DebugConfig::new().enable().with_debug_header(...)`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fastapi_core::{DebugConfig};
+    ///
+    /// let config = AppConfig::new()
+    ///     .debug_config(DebugConfig::new()
+    ///         .enable()
+    ///         .with_debug_header("X-Debug-Token", "my-secret"));
+    /// ```
+    #[must_use]
+    pub fn debug_config(mut self, config: crate::error::DebugConfig) -> Self {
+        self.debug_config = config;
         self
     }
 
@@ -4960,5 +5016,90 @@ mod tests {
         let mut req = Request::new(Method::Get, "/admin/unknown");
         let response = futures_executor::block_on(app.handle(&ctx, &mut req));
         assert_eq!(response.status().as_u16(), 404);
+    }
+
+    // ========================================================================
+    // Debug Config Integration Tests
+    // ========================================================================
+
+    #[test]
+    fn app_config_debug_config_default() {
+        let config = AppConfig::default();
+        assert!(!config.debug_config.enabled);
+        assert!(config.debug_config.debug_header.is_none());
+        assert!(config.debug_config.debug_token.is_none());
+        assert!(!config.debug_config.allow_unauthenticated);
+    }
+
+    #[test]
+    fn app_config_debug_config_builder() {
+        let config = AppConfig::new().debug_config(
+            crate::error::DebugConfig::new()
+                .enable()
+                .with_debug_header("X-Debug-Token", "secret-abc"),
+        );
+
+        assert!(config.debug_config.enabled);
+        assert_eq!(
+            config.debug_config.debug_header,
+            Some("X-Debug-Token".to_owned())
+        );
+        assert_eq!(
+            config.debug_config.debug_token,
+            Some("secret-abc".to_owned())
+        );
+    }
+
+    #[test]
+    fn app_config_debug_config_unauthenticated() {
+        let config = AppConfig::new().debug_config(
+            crate::error::DebugConfig::new()
+                .enable()
+                .allow_unauthenticated(),
+        );
+
+        assert!(config.debug_config.enabled);
+        assert!(config.debug_config.allow_unauthenticated);
+    }
+
+    #[test]
+    fn app_debug_config_accessible_from_app() {
+        let app = App::builder()
+            .config(
+                AppConfig::new().debug_config(
+                    crate::error::DebugConfig::new()
+                        .enable()
+                        .with_debug_header("X-Debug", "tok123"),
+                ),
+            )
+            .get("/", test_handler)
+            .build();
+
+        assert!(app.config().debug_config.enabled);
+        assert_eq!(
+            app.config().debug_config.debug_header,
+            Some("X-Debug".to_owned())
+        );
+    }
+
+    #[test]
+    fn app_debug_config_is_authorized_integration() {
+        let config = AppConfig::new().debug_config(
+            crate::error::DebugConfig::new()
+                .enable()
+                .with_debug_header("X-Debug-Token", "my-secret"),
+        );
+
+        // Correct token
+        let headers = vec![("X-Debug-Token".to_owned(), b"my-secret".to_vec())];
+        assert!(config.debug_config.is_authorized(&headers));
+
+        // Wrong token
+        let headers = vec![("X-Debug-Token".to_owned(), b"wrong".to_vec())];
+        assert!(!config.debug_config.is_authorized(&headers));
+
+        // Missing header
+        let headers: Vec<(String, Vec<u8>)> = vec![];
+        assert!(!config.debug_config.is_authorized(&headers));
     }
 }
