@@ -1655,7 +1655,7 @@ impl fmt::Display for Link {
 /// # Example
 ///
 /// ```
-/// use fastapi_core::response::{LinkHeader, LinkRel};
+/// use fastapi_core::{LinkHeader, LinkRel};
 ///
 /// let header = LinkHeader::new()
 ///     .link("https://api.example.com/users?page=2", LinkRel::Next)
