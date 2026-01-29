@@ -135,10 +135,10 @@ pub use request::{
     Body, Headers, HttpVersion, Method, Request, RequestBodyStream, RequestBodyStreamError,
 };
 pub use response::{
-    Binary, BinaryWithType, BodyStream, FileResponse, Html, IntoResponse, NoContent, Redirect,
-    Response, ResponseBody, ResponseModel, ResponseModelConfig, ResponseProduces, StatusCode, Text,
-    ValidatedResponse, apply_conditional, check_if_match, check_if_none_match, exclude_fields,
-    include_fields, mime_type_for_extension,
+    Binary, BinaryWithType, BodyStream, FileResponse, Html, IntoResponse, Link, LinkHeader, LinkRel,
+    NoContent, Redirect, Response, ResponseBody, ResponseModel, ResponseModelConfig,
+    ResponseProduces, StatusCode, Text, ValidatedResponse, apply_conditional, check_if_match,
+    check_if_none_match, exclude_fields, include_fields, mime_type_for_extension,
 };
 pub use sse::{SseConfig, SseEvent, SseResponse, SseStream, sse_response};
 pub use static_files::{StaticFiles, StaticFilesConfig};

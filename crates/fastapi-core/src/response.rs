@@ -1559,6 +1559,223 @@ fn find_header(headers: &[(String, Vec<u8>)], name: &str) -> Option<String> {
         .map(String::from)
 }
 
+// ============================================================================
+// Link Header (RFC 8288)
+// ============================================================================
+
+/// Link relation type per RFC 8288.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkRel {
+    /// The current resource.
+    Self_,
+    /// Next page in a paginated collection.
+    Next,
+    /// Previous page in a paginated collection.
+    Prev,
+    /// First page in a paginated collection.
+    First,
+    /// Last page in a paginated collection.
+    Last,
+    /// A related resource.
+    Related,
+    /// An alternate representation.
+    Alternate,
+    /// Custom relation type.
+    Custom(String),
+}
+
+impl fmt::Display for LinkRel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Self_ => write!(f, "self"),
+            Self::Next => write!(f, "next"),
+            Self::Prev => write!(f, "prev"),
+            Self::First => write!(f, "first"),
+            Self::Last => write!(f, "last"),
+            Self::Related => write!(f, "related"),
+            Self::Alternate => write!(f, "alternate"),
+            Self::Custom(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+/// A single link entry in a Link header.
+#[derive(Debug, Clone)]
+pub struct Link {
+    url: String,
+    rel: LinkRel,
+    title: Option<String>,
+    media_type: Option<String>,
+}
+
+impl Link {
+    /// Create a new link with the given URL and relation.
+    pub fn new(url: impl Into<String>, rel: LinkRel) -> Self {
+        Self {
+            url: url.into(),
+            rel,
+            title: None,
+            media_type: None,
+        }
+    }
+
+    /// Set the title parameter.
+    #[must_use]
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the type parameter (media type).
+    #[must_use]
+    pub fn media_type(mut self, media_type: impl Into<String>) -> Self {
+        self.media_type = Some(media_type.into());
+        self
+    }
+}
+
+impl fmt::Display for Link {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{}>; rel=\"{}\"", self.url, self.rel)?;
+        if let Some(ref title) = self.title {
+            write!(f, "; title=\"{title}\"")?;
+        }
+        if let Some(ref mt) = self.media_type {
+            write!(f, "; type=\"{mt}\"")?;
+        }
+        Ok(())
+    }
+}
+
+/// Builder for constructing RFC 8288 Link headers.
+///
+/// Supports multiple links in a single header value, pagination helpers,
+/// and custom relation types.
+///
+/// # Example
+///
+/// ```
+/// use fastapi_core::response::{LinkHeader, LinkRel};
+///
+/// let header = LinkHeader::new()
+///     .link("https://api.example.com/users?page=2", LinkRel::Next)
+///     .link("https://api.example.com/users?page=1", LinkRel::Prev)
+///     .link("https://api.example.com/users?page=1", LinkRel::First)
+///     .link("https://api.example.com/users?page=5", LinkRel::Last);
+///
+/// assert!(header.to_string().contains("rel=\"next\""));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct LinkHeader {
+    links: Vec<Link>,
+}
+
+impl LinkHeader {
+    /// Create an empty link header builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a link with the given URL and relation.
+    #[must_use]
+    pub fn link(mut self, url: impl Into<String>, rel: LinkRel) -> Self {
+        self.links.push(Link::new(url, rel));
+        self
+    }
+
+    /// Add a fully configured [`Link`] entry.
+    #[must_use]
+    pub fn add(mut self, link: Link) -> Self {
+        self.links.push(link);
+        self
+    }
+
+    /// Add pagination links from page/per_page/total parameters.
+    ///
+    /// Generates `first`, `last`, `next`, `prev`, and `self` links
+    /// using the given base URL and query parameters.
+    #[must_use]
+    pub fn paginate(
+        self,
+        base_url: &str,
+        page: u64,
+        per_page: u64,
+        total: u64,
+    ) -> Self {
+        let last_page = if total == 0 {
+            1
+        } else {
+            (total + per_page - 1) / per_page
+        };
+        let sep = if base_url.contains('?') { '&' } else { '?' };
+
+        let mut h = self.link(
+            format!("{base_url}{sep}page={page}&per_page={per_page}"),
+            LinkRel::Self_,
+        );
+        h = h.link(
+            format!("{base_url}{sep}page=1&per_page={per_page}"),
+            LinkRel::First,
+        );
+        h = h.link(
+            format!("{base_url}{sep}page={last_page}&per_page={per_page}"),
+            LinkRel::Last,
+        );
+        if page > 1 {
+            h = h.link(
+                format!("{base_url}{sep}page={}&per_page={per_page}", page - 1),
+                LinkRel::Prev,
+            );
+        }
+        if page < last_page {
+            h = h.link(
+                format!("{base_url}{sep}page={}&per_page={per_page}", page + 1),
+                LinkRel::Next,
+            );
+        }
+        h
+    }
+
+    /// Returns true if no links have been added.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.links.is_empty()
+    }
+
+    /// Returns the number of links.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.links.len()
+    }
+
+    /// Convert to the header value string (RFC 8288 format).
+    #[must_use]
+    pub fn to_header_value(&self) -> String {
+        self.to_string()
+    }
+
+    /// Apply this Link header to a response.
+    pub fn apply(self, response: Response) -> Response {
+        if self.is_empty() {
+            return response;
+        }
+        response.header("link", self.to_string().into_bytes())
+    }
+}
+
+impl fmt::Display for LinkHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, link) in self.links.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{link}")?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2667,5 +2884,118 @@ mod tests {
         let response = Response::ok(); // No ETag
         let result = apply_conditional(&headers, &Method::Get, response);
         assert_eq!(result.status().as_u16(), 200);
+    }
+
+    // ====================================================================
+    // Link Header Tests
+    // ====================================================================
+
+    #[test]
+    fn link_header_single() {
+        let h = LinkHeader::new().link("https://example.com/next", LinkRel::Next);
+        assert_eq!(h.to_string(), r#"<https://example.com/next>; rel="next""#);
+    }
+
+    #[test]
+    fn link_header_multiple() {
+        let h = LinkHeader::new()
+            .link("/page/2", LinkRel::Next)
+            .link("/page/0", LinkRel::Prev);
+        let s = h.to_string();
+        assert!(s.contains(r#"</page/2>; rel="next""#));
+        assert!(s.contains(r#"</page/0>; rel="prev""#));
+        assert!(s.contains(", "));
+    }
+
+    #[test]
+    fn link_with_title_and_type() {
+        let link = Link::new("https://api.example.com", LinkRel::Related)
+            .title("API Docs")
+            .media_type("text/html");
+        let s = link.to_string();
+        assert!(s.contains(r#"title="API Docs""#));
+        assert!(s.contains(r#"type="text/html""#));
+    }
+
+    #[test]
+    fn link_header_custom_rel() {
+        let h = LinkHeader::new().link("/schema", LinkRel::Custom("describedby".to_string()));
+        assert!(h.to_string().contains(r#"rel="describedby""#));
+    }
+
+    #[test]
+    fn link_header_paginate_first_page() {
+        let h = LinkHeader::new().paginate("/users", 1, 10, 50);
+        let s = h.to_string();
+        assert!(s.contains(r#"rel="self""#));
+        assert!(s.contains(r#"rel="first""#));
+        assert!(s.contains(r#"rel="last""#));
+        assert!(s.contains(r#"rel="next""#));
+        assert!(!s.contains(r#"rel="prev""#)); // No prev on first page
+        assert!(s.contains("page=5")); // last page = 50/10 = 5
+    }
+
+    #[test]
+    fn link_header_paginate_middle_page() {
+        let h = LinkHeader::new().paginate("/users", 3, 10, 50);
+        let s = h.to_string();
+        assert!(s.contains(r#"rel="prev""#));
+        assert!(s.contains(r#"rel="next""#));
+        assert!(s.contains("page=2")); // prev
+        assert!(s.contains("page=4")); // next
+    }
+
+    #[test]
+    fn link_header_paginate_last_page() {
+        let h = LinkHeader::new().paginate("/users", 5, 10, 50);
+        let s = h.to_string();
+        assert!(s.contains(r#"rel="prev""#));
+        assert!(!s.contains(r#"rel="next""#)); // No next on last page
+    }
+
+    #[test]
+    fn link_header_paginate_with_existing_query() {
+        let h = LinkHeader::new().paginate("/users?sort=name", 1, 10, 20);
+        let s = h.to_string();
+        assert!(s.contains("sort=name&page="));
+    }
+
+    #[test]
+    fn link_header_empty() {
+        let h = LinkHeader::new();
+        assert!(h.is_empty());
+        assert_eq!(h.len(), 0);
+        assert_eq!(h.to_string(), "");
+    }
+
+    #[test]
+    fn link_header_apply_to_response() {
+        let h = LinkHeader::new().link("/next", LinkRel::Next);
+        let response = h.apply(Response::ok());
+        let link_hdr = response
+            .headers()
+            .iter()
+            .find(|(n, _)| n == "link")
+            .map(|(_, v)| std::str::from_utf8(v).unwrap().to_string());
+        assert!(link_hdr.unwrap().contains("rel=\"next\""));
+    }
+
+    #[test]
+    fn link_header_apply_empty_noop() {
+        let h = LinkHeader::new();
+        let response = h.apply(Response::ok());
+        let has_link = response.headers().iter().any(|(n, _)| n == "link");
+        assert!(!has_link);
+    }
+
+    #[test]
+    fn link_rel_display() {
+        assert_eq!(LinkRel::Self_.to_string(), "self");
+        assert_eq!(LinkRel::Next.to_string(), "next");
+        assert_eq!(LinkRel::Prev.to_string(), "prev");
+        assert_eq!(LinkRel::First.to_string(), "first");
+        assert_eq!(LinkRel::Last.to_string(), "last");
+        assert_eq!(LinkRel::Related.to_string(), "related");
+        assert_eq!(LinkRel::Alternate.to_string(), "alternate");
     }
 }

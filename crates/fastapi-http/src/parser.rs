@@ -2282,4 +2282,51 @@ mod tests {
         let result = parser.feed(b"GET /path HTTP/1.1\r\nContent-Length: 5\r\n\r\nHello");
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn stateful_parser_pipelining_two_requests_in_one_buffer() {
+        let mut parser = StatefulParser::new();
+
+        // Send two complete requests in a single buffer (HTTP pipelining)
+        let pipelined = b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let result = parser.feed(pipelined).unwrap();
+
+        // First request should be returned
+        match result {
+            ParseStatus::Complete { request, .. } => {
+                assert_eq!(request.path(), "/first");
+            }
+            ParseStatus::Incomplete => panic!("expected first request"),
+        }
+
+        // Second request should already be buffered — feed empty to retrieve it
+        let result = parser.feed(&[]).unwrap();
+        match result {
+            ParseStatus::Complete { request, .. } => {
+                assert_eq!(request.path(), "/second");
+            }
+            ParseStatus::Incomplete => panic!("expected second pipelined request"),
+        }
+    }
+
+    #[test]
+    fn stateful_parser_pipelining_three_requests() {
+        let mut parser = StatefulParser::new();
+
+        let pipelined = b"GET /a HTTP/1.1\r\nHost: h\r\n\r\n\
+                           GET /b HTTP/1.1\r\nHost: h\r\n\r\n\
+                           GET /c HTTP/1.1\r\nHost: h\r\n\r\n";
+        let r1 = parser.feed(pipelined).unwrap();
+        assert!(matches!(r1, ParseStatus::Complete { .. }));
+
+        let r2 = parser.feed(&[]).unwrap();
+        assert!(matches!(r2, ParseStatus::Complete { .. }));
+
+        let r3 = parser.feed(&[]).unwrap();
+        assert!(matches!(r3, ParseStatus::Complete { .. }));
+
+        // No more requests buffered
+        let r4 = parser.feed(&[]).unwrap();
+        assert!(matches!(r4, ParseStatus::Incomplete));
+    }
 }
