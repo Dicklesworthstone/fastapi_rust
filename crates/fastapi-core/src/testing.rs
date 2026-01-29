@@ -228,7 +228,7 @@ impl<H: Handler + 'static> TestClient<H> {
     ///
     /// Note: The jar is protected by a mutex, so concurrent access
     /// is safe but may block.
-    pub fn cookies(&self) -> std::sync::MutexGuard<'_, CookieJar> {
+    pub fn cookies(&self) -> parking_lot::MutexGuard<'_, CookieJar> {
         self.cookies.lock()
     }
 
@@ -3980,9 +3980,7 @@ impl TestServer {
                 duration,
                 timestamp: start_time,
             };
-            if let Ok(mut entries) = log_entries.lock() {
-                entries.push(entry);
-            }
+            log_entries.lock().push(entry);
         }
 
         // Serialize the Response to HTTP/1.1 bytes and send
@@ -4954,9 +4952,9 @@ impl CapturedLog {
 #[derive(Debug, Clone)]
 pub struct TestLogger {
     /// Captured log entries.
-    logs: std::sync::Arc<std::sync::Mutex<Vec<CapturedLog>>>,
+    logs: Arc<Mutex<Vec<CapturedLog>>>,
     /// Test phase timings.
-    timings: std::sync::Arc<std::sync::Mutex<TestTimings>>,
+    timings: Arc<Mutex<TestTimings>>,
     /// Whether to echo logs to stderr (for debugging).
     echo_logs: bool,
 }
@@ -5026,8 +5024,8 @@ impl TestLogger {
     /// Creates a new test logger.
     pub fn new() -> Self {
         Self {
-            logs: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            timings: std::sync::Arc::new(std::sync::Mutex::new(TestTimings::default())),
+            logs: Arc::new(Mutex::new(Vec::new())),
+            timings: Arc::new(Mutex::new(TestTimings::default())),
             echo_logs: std::env::var("FASTAPI_TEST_ECHO_LOGS").is_ok(),
         }
     }
@@ -5044,7 +5042,7 @@ impl TestLogger {
         if self.echo_logs {
             eprintln!("[LOG] {}", entry.format());
         }
-        self.logs.lock().expect("log mutex poisoned").push(entry);
+        self.logs.lock().push(entry);
     }
 
     /// Captures a log from a LogEntry.
@@ -5060,18 +5058,18 @@ impl TestLogger {
     /// Gets all captured logs.
     #[must_use]
     pub fn logs(&self) -> Vec<CapturedLog> {
-        self.logs.lock().expect("log mutex poisoned").clone()
+        self.logs.lock().clone()
     }
 
     /// Gets the number of captured logs.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.logs.lock().expect("log mutex poisoned").len()
+        self.logs.lock().len()
     }
 
     /// Clears all captured logs.
     pub fn clear(&self) {
-        self.logs.lock().expect("log mutex poisoned").clear();
+        self.logs.lock().clear();
     }
 
     /// Checks if any log contains the given message substring.
@@ -5107,7 +5105,7 @@ impl TestLogger {
     /// Gets the last N logs for failure context.
     #[must_use]
     pub fn failure_context(&self, n: usize) -> String {
-        let logs = self.logs.lock().expect("log mutex poisoned");
+        let logs = self.logs.lock();
         let start = logs.len().saturating_sub(n);
         let recent: Vec<_> = logs[start..].iter().map(CapturedLog::format).collect();
 
@@ -5125,7 +5123,7 @@ impl TestLogger {
     /// Gets timing breakdown.
     #[must_use]
     pub fn timings(&self) -> TestTimings {
-        self.timings.lock().expect("timing mutex poisoned").clone()
+        self.timings.lock().clone()
     }
 
     /// Starts timing a phase.
@@ -7135,17 +7133,17 @@ mod test_server_tests {
 
         let order1 = Arc::clone(&execution_order);
         server.shutdown_controller().register_hook(move || {
-            order1.lock().expect("mutex").push(1);
+            order1.lock().push(1);
         });
 
         let order2 = Arc::clone(&execution_order);
         server.shutdown_controller().register_hook(move || {
-            order2.lock().expect("mutex").push(2);
+            order2.lock().push(2);
         });
 
         let order3 = Arc::clone(&execution_order);
         server.shutdown_controller().register_hook(move || {
-            order3.lock().expect("mutex").push(3);
+            order3.lock().push(3);
         });
 
         // Trigger shutdown and wait for thread to finish
@@ -7153,7 +7151,7 @@ mod test_server_tests {
         drop(server);
 
         // Hooks should run in LIFO order (3, 2, 1)
-        let order = execution_order.lock().expect("mutex");
+        let order = execution_order.lock();
         assert_eq!(*order, vec![3, 2, 1]);
     }
 
