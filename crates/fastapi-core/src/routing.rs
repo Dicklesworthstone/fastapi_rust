@@ -555,7 +555,11 @@ pub enum UrlError {
     /// A required path parameter was missing.
     MissingParam { name: String, param: String },
     /// A path parameter value was invalid for its converter type.
-    InvalidParam { name: String, param: String, value: String },
+    InvalidParam {
+        name: String,
+        param: String,
+        value: String,
+    },
 }
 
 impl std::fmt::Display for UrlError {
@@ -713,9 +717,12 @@ impl UrlRegistry {
         params: &[(&str, &str)],
         query: &[(&str, &str)],
     ) -> Result<String, UrlError> {
-        let pattern = self.routes.get(name).ok_or_else(|| UrlError::RouteNotFound {
-            name: name.to_string(),
-        })?;
+        let pattern = self
+            .routes
+            .get(name)
+            .ok_or_else(|| UrlError::RouteNotFound {
+                name: name.to_string(),
+            })?;
 
         // Build parameter map for fast lookup
         let param_map: HashMap<&str, &str> = params.iter().copied().collect();
@@ -817,8 +824,16 @@ pub fn url_encode(s: &str) -> String {
             // Everything else gets percent-encoded
             _ => {
                 result.push('%');
-                result.push(char::from_digit((byte >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-                result.push(char::from_digit((byte & 0xF) as u32, 16).unwrap().to_ascii_uppercase());
+                result.push(
+                    char::from_digit(u32::from(byte >> 4), 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+                result.push(
+                    char::from_digit(u32::from(byte & 0xF), 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
             }
         }
     }
@@ -840,8 +855,16 @@ pub fn url_encode_path_segment(s: &str) -> String {
             // Everything else gets percent-encoded
             _ => {
                 result.push('%');
-                result.push(char::from_digit((byte >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-                result.push(char::from_digit((byte & 0xF) as u32, 16).unwrap().to_ascii_uppercase());
+                result.push(
+                    char::from_digit(u32::from(byte >> 4), 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+                result.push(
+                    char::from_digit(u32::from(byte & 0xF), 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
             }
         }
     }

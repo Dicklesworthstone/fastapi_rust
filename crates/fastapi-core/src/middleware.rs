@@ -9266,7 +9266,8 @@ mod rate_limit_tests {
 
         // Second request with If-None-Match header
         let mut req2 = Request::new(crate::request::Method::Get, "/resource");
-        req2.headers_mut().insert("if-none-match", etag.as_bytes().to_vec());
+        req2.headers_mut()
+            .insert("if-none-match", etag.as_bytes().to_vec());
 
         let response2 = Response::ok().body(ResponseBody::Bytes(body));
         let response2 = futures_executor::block_on(mw.after(&ctx, &req2, response2));
@@ -9282,7 +9283,8 @@ mod rate_limit_tests {
         let ctx = test_context();
 
         let mut req = Request::new(crate::request::Method::Get, "/resource");
-        req.headers_mut().insert("if-none-match", b"\"old-etag\"".to_vec());
+        req.headers_mut()
+            .insert("if-none-match", b"\"old-etag\"".to_vec());
 
         let body = br#"{"status":"updated"}"#.to_vec();
         let response = Response::ok().body(ResponseBody::Bytes(body.clone()));
@@ -9392,7 +9394,8 @@ mod rate_limit_tests {
 
         // First request to set up cached ETag
         let mut req = Request::new(crate::request::Method::Get, "/resource");
-        req.headers_mut().insert("if-none-match", b"\"custom-etag\"".to_vec());
+        req.headers_mut()
+            .insert("if-none-match", b"\"custom-etag\"".to_vec());
 
         // Response with pre-set ETag matching the request
         let response = Response::ok()
@@ -9439,7 +9442,8 @@ mod rate_limit_tests {
         // Send request with weak version of the same ETag
         let mut req2 = Request::new(crate::request::Method::Get, "/resource");
         let weak_etag = format!("W/{}", etag);
-        req2.headers_mut().insert("if-none-match", weak_etag.as_bytes().to_vec());
+        req2.headers_mut()
+            .insert("if-none-match", weak_etag.as_bytes().to_vec());
 
         let response2 = Response::ok().body(ResponseBody::Bytes(body));
         let response2 = futures_executor::block_on(mw.after(&ctx, &req2, response2));

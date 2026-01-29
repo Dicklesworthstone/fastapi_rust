@@ -52,7 +52,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::response::{mime_type_for_extension, Response, ResponseBody, StatusCode};
+use crate::response::{Response, ResponseBody, StatusCode, mime_type_for_extension};
 
 /// Configuration for static file serving.
 #[derive(Debug, Clone)]
@@ -252,7 +252,10 @@ impl StaticFiles {
         }
 
         // Build the full file path
-        let file_path = self.config.directory.join(path_without_prefix.trim_start_matches('/'));
+        let file_path = self
+            .config
+            .directory
+            .join(path_without_prefix.trim_start_matches('/'));
 
         // Canonicalize to resolve any remaining path tricks
         let canonical_path = match self.resolve_path(&file_path) {
@@ -269,7 +272,9 @@ impl StaticFiles {
         if !canonical_path.starts_with(&canonical_dir) {
             return Response::with_status(StatusCode::FORBIDDEN)
                 .header("content-type", b"text/plain".to_vec())
-                .body(ResponseBody::Bytes(b"Forbidden: Path traversal detected".to_vec()));
+                .body(ResponseBody::Bytes(
+                    b"Forbidden: Path traversal detected".to_vec(),
+                ));
         }
 
         // Check if it's a directory
@@ -287,8 +292,7 @@ impl StaticFiles {
             return path;
         }
 
-        path.strip_prefix(&self.config.prefix)
-            .unwrap_or(path)
+        path.strip_prefix(&self.config.prefix).unwrap_or(path)
     }
 
     /// Resolve the file path, handling symlinks according to config.
@@ -419,12 +423,10 @@ impl StaticFiles {
         }
 
         // Sort: directories first, then by name
-        entries.sort_by(|a, b| {
-            match (a.is_dir, b.is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.name.cmp(&b.name),
-            }
+        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
         });
 
         // Generate HTML
@@ -535,8 +537,7 @@ fn format_http_date(time: SystemTime) -> String {
 
             let (year, month, day) = days_to_date(days);
             let month_names = [
-                "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
             ];
 
             format!(
@@ -646,7 +647,8 @@ fn generate_listing_html(path: &str, entries: &[DirectoryEntry]) -> String {
             format_size(entry.size)
         };
 
-        let modified_str = entry.modified
+        let modified_str = entry
+            .modified
             .map(|t| format_http_date(t))
             .unwrap_or_else(|| "-".to_string());
 
