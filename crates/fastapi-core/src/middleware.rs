@@ -2768,7 +2768,7 @@ impl Middleware for CompressionMiddleware {
 // ---------------------------------------------------------------------------
 
 use std::collections::HashMap as StdHashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 /// Rate limiting algorithm.
@@ -2952,8 +2952,7 @@ impl InMemoryRateLimitStore {
     ) -> RateLimitResult {
         let mut buckets = self
             .token_buckets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .lock();
         let now = Instant::now();
 
         let state = buckets
@@ -3000,8 +2999,7 @@ impl InMemoryRateLimitStore {
     ) -> RateLimitResult {
         let mut windows = self
             .fixed_windows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .lock();
         let now = Instant::now();
 
         let state = windows
@@ -3049,8 +3047,7 @@ impl InMemoryRateLimitStore {
     ) -> RateLimitResult {
         let mut windows = self
             .sliding_windows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .lock();
         let now = Instant::now();
 
         let state = windows

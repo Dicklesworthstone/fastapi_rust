@@ -339,10 +339,19 @@ fn read_urandom(len: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Fallback salt generation using entropy mixing (non-cryptographic).
+/// Fallback salt generation using entropy mixing (**NOT cryptographically secure**).
 ///
-/// Only used when `/dev/urandom` is unavailable.
+/// # Security Warning
+///
+/// This fallback uses `DefaultHasher` which is NOT a CSPRNG. It is only used
+/// when `/dev/urandom` is unavailable, which should never happen on Linux/macOS.
+/// The output is fed through SHA-256 for distribution but the entropy source
+/// is fundamentally weak (timestamps, PID, thread ID are predictable).
 fn fallback_salt(len: usize) -> Vec<u8> {
+    eprintln!(
+        "WARNING: /dev/urandom unavailable, using weak entropy for salt generation. \
+         Password hashes generated with this salt may be vulnerable."
+    );
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::{SystemTime, UNIX_EPOCH};
