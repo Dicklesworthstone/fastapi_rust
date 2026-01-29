@@ -4973,6 +4973,329 @@ impl Middleware for TraceRejectionMiddleware {
 // End TRACE Rejection Middleware
 // ===========================================================================
 
+// ===========================================================================
+// HTTPS Redirect and HSTS Middleware (Security)
+// ===========================================================================
+
+/// Configuration for HTTPS redirect behavior.
+#[derive(Debug, Clone)]
+pub struct HttpsRedirectConfig {
+    /// Enable HTTP to HTTPS redirects.
+    pub redirect_enabled: bool,
+    /// Use permanent (301) or temporary (307) redirects.
+    pub permanent_redirect: bool,
+    /// HSTS max-age in seconds (0 = disabled).
+    pub hsts_max_age_secs: u64,
+    /// Include subdomains in HSTS.
+    pub hsts_include_subdomains: bool,
+    /// Enable HSTS preload.
+    pub hsts_preload: bool,
+    /// Paths to exclude from redirect (e.g., health checks).
+    pub exclude_paths: Vec<String>,
+    /// Port for HTTPS (default 443).
+    pub https_port: u16,
+}
+
+impl Default for HttpsRedirectConfig {
+    fn default() -> Self {
+        Self {
+            redirect_enabled: true,
+            permanent_redirect: true, // 301
+            hsts_max_age_secs: 31_536_000, // 1 year
+            hsts_include_subdomains: false,
+            hsts_preload: false,
+            exclude_paths: Vec::new(),
+            https_port: 443,
+        }
+    }
+}
+
+/// Middleware that redirects HTTP requests to HTTPS and sets HSTS headers.
+///
+/// This middleware provides two critical security features:
+///
+/// 1. **HTTP to HTTPS Redirect**: Automatically redirects insecure HTTP requests
+///    to their HTTPS equivalents, ensuring all traffic is encrypted.
+///
+/// 2. **HSTS (Strict Transport Security)**: Adds the `Strict-Transport-Security`
+///    header to HTTPS responses, instructing browsers to always use HTTPS.
+///
+/// # Proxy Awareness
+///
+/// The middleware respects the `X-Forwarded-Proto` header, so it works correctly
+/// behind reverse proxies like nginx or HAProxy. If the proxy sets this header
+/// to "https", the request is treated as secure.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::middleware::HttpsRedirectMiddleware;
+///
+/// let app = App::builder()
+///     .middleware(HttpsRedirectMiddleware::new()
+///         .hsts_max_age_secs(31536000)  // 1 year
+///         .include_subdomains(true)
+///         .preload(true)
+///         .exclude_path("/health")
+///         .exclude_path("/readiness"))
+///     .build();
+/// ```
+///
+/// # Configuration Options
+///
+/// - `redirect_enabled`: Enable/disable redirects (default: true)
+/// - `permanent_redirect`: Use 301 (true) or 307 (false) redirects
+/// - `hsts_max_age_secs`: HSTS max-age value in seconds
+/// - `include_subdomains`: Apply HSTS to all subdomains
+/// - `preload`: Mark site for HSTS preload list
+/// - `exclude_path`: Paths that should remain accessible over HTTP
+#[derive(Debug, Clone)]
+pub struct HttpsRedirectMiddleware {
+    config: HttpsRedirectConfig,
+}
+
+impl Default for HttpsRedirectMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HttpsRedirectMiddleware {
+    /// Create a new HTTPS redirect middleware with default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: HttpsRedirectConfig::default(),
+        }
+    }
+
+    /// Enable or disable HTTP to HTTPS redirects.
+    #[must_use]
+    pub fn redirect_enabled(mut self, enabled: bool) -> Self {
+        self.config.redirect_enabled = enabled;
+        self
+    }
+
+    /// Use permanent (301) redirects instead of temporary (307).
+    ///
+    /// Default is true (permanent redirects).
+    #[must_use]
+    pub fn permanent_redirect(mut self, permanent: bool) -> Self {
+        self.config.permanent_redirect = permanent;
+        self
+    }
+
+    /// Set the HSTS max-age in seconds.
+    ///
+    /// Set to 0 to disable HSTS header.
+    /// Default is 31536000 (1 year).
+    #[must_use]
+    pub fn hsts_max_age_secs(mut self, secs: u64) -> Self {
+        self.config.hsts_max_age_secs = secs;
+        self
+    }
+
+    /// Include subdomains in HSTS policy.
+    #[must_use]
+    pub fn include_subdomains(mut self, include: bool) -> Self {
+        self.config.hsts_include_subdomains = include;
+        self
+    }
+
+    /// Enable HSTS preload.
+    ///
+    /// Only enable this if you're ready to submit your site to the
+    /// HSTS preload list at hstspreload.org.
+    #[must_use]
+    pub fn preload(mut self, preload: bool) -> Self {
+        self.config.hsts_preload = preload;
+        self
+    }
+
+    /// Add a path to exclude from redirects.
+    ///
+    /// Use this for health check endpoints that need to remain
+    /// accessible over HTTP for load balancer probes.
+    #[must_use]
+    pub fn exclude_path(mut self, path: impl Into<String>) -> Self {
+        self.config.exclude_paths.push(path.into());
+        self
+    }
+
+    /// Set multiple excluded paths at once.
+    #[must_use]
+    pub fn exclude_paths(mut self, paths: Vec<String>) -> Self {
+        self.config.exclude_paths = paths;
+        self
+    }
+
+    /// Set the HTTPS port (default 443).
+    #[must_use]
+    pub fn https_port(mut self, port: u16) -> Self {
+        self.config.https_port = port;
+        self
+    }
+
+    /// Check if the request is using HTTPS.
+    ///
+    /// This checks both the scheme and the X-Forwarded-Proto header
+    /// for proxy-aware detection.
+    fn is_secure(&self, req: &Request) -> bool {
+        // Check X-Forwarded-Proto header first (for reverse proxy)
+        if let Some(proto) = req.headers().get("X-Forwarded-Proto") {
+            return proto.eq_ignore_ascii_case(b"https");
+        }
+
+        // Check X-Forwarded-Ssl header (alternative)
+        if let Some(ssl) = req.headers().get("X-Forwarded-Ssl") {
+            return ssl.eq_ignore_ascii_case(b"on");
+        }
+
+        // Check Front-End-Https header (Microsoft IIS)
+        if let Some(https) = req.headers().get("Front-End-Https") {
+            return https.eq_ignore_ascii_case(b"on");
+        }
+
+        // No forwarding headers - assume HTTP for now
+        // In a real server, we'd check the connection's TLS status
+        false
+    }
+
+    /// Check if a path should be excluded from redirects.
+    fn is_excluded(&self, path: &str) -> bool {
+        self.config
+            .exclude_paths
+            .iter()
+            .any(|p| path.starts_with(p))
+    }
+
+    /// Build the HSTS header value.
+    fn build_hsts_header(&self) -> Option<Vec<u8>> {
+        if self.config.hsts_max_age_secs == 0 {
+            return None;
+        }
+
+        let mut value = format!("max-age={}", self.config.hsts_max_age_secs);
+
+        if self.config.hsts_include_subdomains {
+            value.push_str("; includeSubDomains");
+        }
+
+        if self.config.hsts_preload {
+            value.push_str("; preload");
+        }
+
+        Some(value.into_bytes())
+    }
+
+    /// Build the redirect URL.
+    fn build_redirect_url(&self, req: &Request) -> String {
+        let host = req
+            .headers()
+            .get("Host")
+            .map(|h| String::from_utf8_lossy(h).to_string())
+            .unwrap_or_else(|| "localhost".to_string());
+
+        // Remove port from host if present
+        let host_without_port = host.split(':').next().unwrap_or(&host);
+
+        let path = req.path();
+        let query = req.query();
+
+        if self.config.https_port == 443 {
+            match query {
+                Some(q) => format!("https://{}{}?{}", host_without_port, path, q),
+                None => format!("https://{}{}", host_without_port, path),
+            }
+        } else {
+            match query {
+                Some(q) => format!(
+                    "https://{}:{}{}?{}",
+                    host_without_port, self.config.https_port, path, q
+                ),
+                None => format!(
+                    "https://{}:{}{}",
+                    host_without_port, self.config.https_port, path
+                ),
+            }
+        }
+    }
+}
+
+impl Middleware for HttpsRedirectMiddleware {
+    fn before<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> BoxFuture<'a, ControlFlow> {
+        Box::pin(async move {
+            // Skip if redirects are disabled
+            if !self.config.redirect_enabled {
+                return ControlFlow::Continue;
+            }
+
+            // Skip if already HTTPS
+            if self.is_secure(req) {
+                return ControlFlow::Continue;
+            }
+
+            // Skip excluded paths (e.g., health checks)
+            if self.is_excluded(req.path()) {
+                return ControlFlow::Continue;
+            }
+
+            // Build redirect URL
+            let redirect_url = self.build_redirect_url(req);
+
+            // Choose status code
+            let status = if self.config.permanent_redirect {
+                crate::response::StatusCode::MOVED_PERMANENTLY
+            } else {
+                crate::response::StatusCode::TEMPORARY_REDIRECT
+            };
+
+            // Create redirect response
+            let response = Response::with_status(status)
+                .header("Location", redirect_url.into_bytes())
+                .header("Content-Type", b"text/plain".to_vec())
+                .body(crate::response::ResponseBody::Bytes(
+                    b"Redirecting to HTTPS...".to_vec(),
+                ));
+
+            ControlFlow::Break(response)
+        })
+    }
+
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a Request,
+        response: Response,
+    ) -> BoxFuture<'a, Response> {
+        Box::pin(async move {
+            // Only add HSTS to secure responses
+            if !self.is_secure(req) {
+                return response;
+            }
+
+            // Add HSTS header if configured
+            if let Some(hsts_value) = self.build_hsts_header() {
+                response.header("Strict-Transport-Security", hsts_value)
+            } else {
+                response
+            }
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "HttpsRedirect"
+    }
+}
+
+// ===========================================================================
+// End HTTPS Redirect Middleware
+// ===========================================================================
+
 #[cfg(test)]
 mod cache_control_tests {
     use super::*;
@@ -5398,6 +5721,316 @@ mod trace_rejection_tests {
 
 // ===========================================================================
 // End TRACE Rejection Middleware Tests
+// ===========================================================================
+
+// ===========================================================================
+// HTTPS Redirect Middleware Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod https_redirect_tests {
+    use super::*;
+    use crate::request::Method;
+    use crate::response::StatusCode;
+
+    fn test_context() -> RequestContext {
+        RequestContext::new(asupersync::Cx::for_testing(), 1)
+    }
+
+    fn run_before(mw: &HttpsRedirectMiddleware, req: &mut Request) -> ControlFlow {
+        let ctx = test_context();
+        let fut = mw.before(&ctx, req);
+        futures_executor::block_on(fut)
+    }
+
+    fn run_after(mw: &HttpsRedirectMiddleware, req: &Request, resp: Response) -> Response {
+        let ctx = test_context();
+        let fut = mw.after(&ctx, req, resp);
+        futures_executor::block_on(fut)
+    }
+
+    fn find_header<'a>(headers: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
+        headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_slice())
+    }
+
+    #[test]
+    fn http_request_redirected() {
+        let mw = HttpsRedirectMiddleware::new();
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+                let location = find_header(response.headers(), "Location");
+                assert_eq!(location, Some(b"https://example.com/".as_slice()));
+            }
+            ControlFlow::Continue => panic!("HTTP request should be redirected"),
+        }
+    }
+
+    #[test]
+    fn http_request_with_path_and_query() {
+        let mw = HttpsRedirectMiddleware::new();
+        let mut req = Request::new(Method::Get, "/api/users?page=1");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                let location = find_header(response.headers(), "Location");
+                assert_eq!(
+                    location,
+                    Some(b"https://example.com/api/users?page=1".as_slice())
+                );
+            }
+            ControlFlow::Continue => panic!("HTTP request should be redirected"),
+        }
+    }
+
+    #[test]
+    fn https_request_not_redirected() {
+        let mw = HttpsRedirectMiddleware::new();
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+        req.headers_mut().insert("X-Forwarded-Proto", b"https".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("HTTPS request should not be redirected"),
+        }
+    }
+
+    #[test]
+    fn x_forwarded_ssl_recognized() {
+        let mw = HttpsRedirectMiddleware::new();
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+        req.headers_mut().insert("X-Forwarded-Ssl", b"on".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("Request with X-Forwarded-Ssl=on should not redirect"),
+        }
+    }
+
+    #[test]
+    fn excluded_path_not_redirected() {
+        let mw = HttpsRedirectMiddleware::new().exclude_path("/health");
+        let mut req = Request::new(Method::Get, "/health");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("Excluded path should not be redirected"),
+        }
+    }
+
+    #[test]
+    fn excluded_path_prefix_matches() {
+        let mw = HttpsRedirectMiddleware::new().exclude_path("/health");
+        let mut req = Request::new(Method::Get, "/health/live");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("Path with excluded prefix should not be redirected"),
+        }
+    }
+
+    #[test]
+    fn temporary_redirect_option() {
+        let mw = HttpsRedirectMiddleware::new().permanent_redirect(false);
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+            }
+            ControlFlow::Continue => panic!("HTTP request should be redirected"),
+        }
+    }
+
+    #[test]
+    fn redirect_disabled() {
+        let mw = HttpsRedirectMiddleware::new().redirect_enabled(false);
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Continue => {} // Expected
+            ControlFlow::Break(_) => panic!("Redirects are disabled, should continue"),
+        }
+    }
+
+    #[test]
+    fn hsts_header_on_https_response() {
+        let mw = HttpsRedirectMiddleware::new();
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("X-Forwarded-Proto", b"https".to_vec());
+
+        let response = Response::with_status(StatusCode::OK);
+        let result = run_after(&mw, &req, response);
+
+        let hsts = find_header(result.headers(), "Strict-Transport-Security");
+        assert!(hsts.is_some(), "HSTS header should be present on HTTPS response");
+        let hsts_str = String::from_utf8_lossy(hsts.unwrap());
+        assert!(hsts_str.contains("max-age=31536000"));
+    }
+
+    #[test]
+    fn hsts_header_not_on_http_response() {
+        let mw = HttpsRedirectMiddleware::new().redirect_enabled(false);
+        let req = Request::new(Method::Get, "/");
+        // No X-Forwarded-Proto, so this is HTTP
+
+        let response = Response::with_status(StatusCode::OK);
+        let result = run_after(&mw, &req, response);
+
+        let hsts = find_header(result.headers(), "Strict-Transport-Security");
+        assert!(hsts.is_none(), "HSTS header should not be on HTTP response");
+    }
+
+    #[test]
+    fn hsts_with_include_subdomains() {
+        let mw = HttpsRedirectMiddleware::new().include_subdomains(true);
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("X-Forwarded-Proto", b"https".to_vec());
+
+        let response = Response::with_status(StatusCode::OK);
+        let result = run_after(&mw, &req, response);
+
+        let hsts = find_header(result.headers(), "Strict-Transport-Security");
+        let hsts_str = String::from_utf8_lossy(hsts.unwrap());
+        assert!(hsts_str.contains("includeSubDomains"));
+    }
+
+    #[test]
+    fn hsts_with_preload() {
+        let mw = HttpsRedirectMiddleware::new().preload(true);
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("X-Forwarded-Proto", b"https".to_vec());
+
+        let response = Response::with_status(StatusCode::OK);
+        let result = run_after(&mw, &req, response);
+
+        let hsts = find_header(result.headers(), "Strict-Transport-Security");
+        let hsts_str = String::from_utf8_lossy(hsts.unwrap());
+        assert!(hsts_str.contains("preload"));
+    }
+
+    #[test]
+    fn hsts_disabled_with_zero_max_age() {
+        let mw = HttpsRedirectMiddleware::new().hsts_max_age_secs(0);
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("X-Forwarded-Proto", b"https".to_vec());
+
+        let response = Response::with_status(StatusCode::OK);
+        let result = run_after(&mw, &req, response);
+
+        let hsts = find_header(result.headers(), "Strict-Transport-Security");
+        assert!(hsts.is_none(), "HSTS should be disabled with max-age=0");
+    }
+
+    #[test]
+    fn custom_https_port() {
+        let mw = HttpsRedirectMiddleware::new().https_port(8443);
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("Host", b"example.com".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                let location = find_header(response.headers(), "Location");
+                assert_eq!(location, Some(b"https://example.com:8443/".as_slice()));
+            }
+            ControlFlow::Continue => panic!("HTTP request should be redirected"),
+        }
+    }
+
+    #[test]
+    fn host_with_port_stripped() {
+        let mw = HttpsRedirectMiddleware::new();
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut().insert("Host", b"example.com:8080".to_vec());
+
+        let result = run_before(&mw, &mut req);
+
+        match result {
+            ControlFlow::Break(response) => {
+                let location = find_header(response.headers(), "Location");
+                // Port should be stripped from host, using default 443
+                assert_eq!(location, Some(b"https://example.com/".as_slice()));
+            }
+            ControlFlow::Continue => panic!("HTTP request should be redirected"),
+        }
+    }
+
+    #[test]
+    fn middleware_name() {
+        let mw = HttpsRedirectMiddleware::new();
+        assert_eq!(mw.name(), "HttpsRedirect");
+    }
+
+    #[test]
+    fn default_impl() {
+        let mw = HttpsRedirectMiddleware::default();
+        assert!(mw.config.redirect_enabled);
+        assert!(mw.config.permanent_redirect);
+        assert_eq!(mw.config.hsts_max_age_secs, 31_536_000);
+    }
+
+    #[test]
+    fn config_builder() {
+        let mw = HttpsRedirectMiddleware::new()
+            .redirect_enabled(false)
+            .permanent_redirect(false)
+            .hsts_max_age_secs(86400)
+            .include_subdomains(true)
+            .preload(true)
+            .https_port(8443);
+
+        assert!(!mw.config.redirect_enabled);
+        assert!(!mw.config.permanent_redirect);
+        assert_eq!(mw.config.hsts_max_age_secs, 86400);
+        assert!(mw.config.hsts_include_subdomains);
+        assert!(mw.config.hsts_preload);
+        assert_eq!(mw.config.https_port, 8443);
+    }
+
+    #[test]
+    fn exclude_paths_method() {
+        let mw = HttpsRedirectMiddleware::new()
+            .exclude_paths(vec!["/health".to_string(), "/ready".to_string()]);
+
+        assert_eq!(mw.config.exclude_paths.len(), 2);
+        assert!(mw.config.exclude_paths.contains(&"/health".to_string()));
+        assert!(mw.config.exclude_paths.contains(&"/ready".to_string()));
+    }
+}
+
+// ===========================================================================
+// End HTTPS Redirect Middleware Tests
 // ===========================================================================
 
 // ===========================================================================

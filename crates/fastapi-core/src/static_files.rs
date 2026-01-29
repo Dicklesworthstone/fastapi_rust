@@ -10,7 +10,6 @@
 //! - Content-Type detection from file extension
 //! - ETag generation for caching
 //! - Last-Modified headers
-//! - Range request support for large files (partial content)
 //! - Optional directory listing
 //! - Symlink handling (configurable)
 //! - Path traversal prevention
@@ -298,18 +297,31 @@ impl StaticFiles {
     /// Resolve the file path, handling symlinks according to config.
     fn resolve_path(&self, path: &Path) -> Option<PathBuf> {
         if self.config.follow_symlinks {
+            // Follow symlinks - use canonicalize which resolves all symlinks
             path.canonicalize().ok()
         } else {
-            // Check if path contains symlinks
-            if path.exists() {
-                let metadata = std::fs::symlink_metadata(path).ok()?;
-                if metadata.file_type().is_symlink() {
-                    return None; // Reject symlinks
-                }
-                path.canonicalize().ok()
-            } else {
-                None
+            // Don't follow symlinks - check each path component
+            if !path.exists() {
+                return None;
             }
+
+            // Walk from the root directory to the target, checking for symlinks
+            let canonical_dir = self.config.directory.canonicalize().ok()?;
+            let relative_path = path.strip_prefix(&self.config.directory).ok()?;
+
+            let mut current = canonical_dir.clone();
+            for component in relative_path.components() {
+                current.push(component);
+
+                // Check if this component is a symlink
+                let metadata = std::fs::symlink_metadata(&current).ok()?;
+                if metadata.file_type().is_symlink() {
+                    return None; // Reject any symlink in the path
+                }
+            }
+
+            // Return the built path (without following symlinks)
+            Some(current)
         }
     }
 
@@ -462,22 +474,24 @@ impl StaticFiles {
 
 /// Check if a path is safe (no path traversal attempts).
 fn is_safe_path(path: &str) -> bool {
-    // Reject paths with .. components
-    for component in path.split('/') {
-        if component == ".." {
-            return false;
-        }
-    }
-
     // Reject paths with null bytes
     if path.contains('\0') {
         return false;
     }
 
-    // Reject paths that try to escape via encoded characters
+    // Decode percent-encoded characters first to catch encoded traversal
     let decoded = percent_decode(path);
-    if decoded.contains("..") {
+
+    // Reject paths with null bytes in decoded form
+    if decoded.contains('\0') {
         return false;
+    }
+
+    // Reject paths with .. components (check decoded path)
+    for component in decoded.split('/') {
+        if component == ".." {
+            return false;
+        }
     }
 
     true
@@ -731,6 +745,14 @@ mod tests {
     fn safe_path_encoded_traversal_blocked() {
         assert!(!is_safe_path("/%2e%2e/etc/passwd"));
         assert!(!is_safe_path("/static/%2e%2e/%2e%2e/etc/passwd"));
+    }
+
+    #[test]
+    fn safe_path_allows_double_dots_in_filename() {
+        // Legitimate filenames with double dots should be allowed
+        assert!(is_safe_path("/files/test..data.txt"));
+        assert!(is_safe_path("/files/archive..tar.gz"));
+        assert!(is_safe_path("/files/version..1.2.txt"));
     }
 
     #[test]

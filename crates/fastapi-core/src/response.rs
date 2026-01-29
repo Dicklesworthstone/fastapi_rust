@@ -59,6 +59,8 @@ impl StatusCode {
     pub const NOT_FOUND: Self = Self(404);
     /// 405 Method Not Allowed
     pub const METHOD_NOT_ALLOWED: Self = Self(405);
+    /// 406 Not Acceptable
+    pub const NOT_ACCEPTABLE: Self = Self(406);
     /// 413 Payload Too Large
     pub const PAYLOAD_TOO_LARGE: Self = Self(413);
     /// 415 Unsupported Media Type

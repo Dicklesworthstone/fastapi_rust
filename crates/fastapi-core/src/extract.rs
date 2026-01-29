@@ -12087,6 +12087,927 @@ impl<T, N> Deref for HeaderValues<T, N> {
     }
 }
 
+// ============================================================================
+// Content Negotiation
+// ============================================================================
+
+/// A parsed media type (MIME type) with optional parameters.
+///
+/// Represents types like `text/html`, `application/json`, or
+/// `text/html; charset=utf-8`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaType {
+    /// The primary type (e.g., "text", "application", "image").
+    pub typ: String,
+    /// The subtype (e.g., "html", "json", "png").
+    pub subtype: String,
+    /// Optional parameters (e.g., charset, boundary).
+    pub params: Vec<(String, String)>,
+}
+
+impl MediaType {
+    /// Parse a media type string.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mt = MediaType::parse("text/html; charset=utf-8").unwrap();
+    /// assert_eq!(mt.typ, "text");
+    /// assert_eq!(mt.subtype, "html");
+    /// ```
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let (type_part, params_part) = match s.find(';') {
+            Some(pos) => (&s[..pos], Some(&s[pos + 1..])),
+            None => (s, None),
+        };
+
+        let (typ, subtype) = type_part.split_once('/')?;
+        let typ = typ.trim().to_ascii_lowercase();
+        let subtype = subtype.trim().to_ascii_lowercase();
+
+        if typ.is_empty() || subtype.is_empty() {
+            return None;
+        }
+
+        let mut params = Vec::new();
+        if let Some(params_str) = params_part {
+            for param in params_str.split(';') {
+                let param = param.trim();
+                if param.is_empty() {
+                    continue;
+                }
+                if let Some((key, value)) = param.split_once('=') {
+                    let key = key.trim().to_ascii_lowercase();
+                    let value = value.trim().trim_matches('"').to_string();
+                    // Skip the quality parameter, handled separately
+                    if key != "q" {
+                        params.push((key, value));
+                    }
+                }
+            }
+        }
+
+        Some(Self { typ, subtype, params })
+    }
+
+    /// Create a new media type without parameters.
+    #[must_use]
+    pub fn new(typ: impl Into<String>, subtype: impl Into<String>) -> Self {
+        Self {
+            typ: typ.into().to_ascii_lowercase(),
+            subtype: subtype.into().to_ascii_lowercase(),
+            params: Vec::new(),
+        }
+    }
+
+    /// Check if this media type matches another, supporting wildcards.
+    ///
+    /// A wildcard `*` matches any value.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let html = MediaType::new("text", "html");
+    /// let any_text = MediaType::new("text", "*");
+    /// let any = MediaType::new("*", "*");
+    ///
+    /// assert!(html.matches(&any_text));
+    /// assert!(html.matches(&any));
+    /// assert!(!any_text.matches(&html)); // wildcard doesn't match specific
+    /// ```
+    #[must_use]
+    pub fn matches(&self, other: &MediaType) -> bool {
+        let type_matches = other.typ == "*" || self.typ == other.typ;
+        let subtype_matches = other.subtype == "*" || self.subtype == other.subtype;
+        type_matches && subtype_matches
+    }
+
+    /// Returns the media type as a string without parameters.
+    #[must_use]
+    pub fn essence(&self) -> String {
+        format!("{}/{}", self.typ, self.subtype)
+    }
+
+    /// Get a parameter value by name.
+    #[must_use]
+    pub fn param(&self, name: &str) -> Option<&str> {
+        let name_lower = name.to_ascii_lowercase();
+        self.params
+            .iter()
+            .find(|(k, _)| k == &name_lower)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+impl fmt::Display for MediaType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.typ, self.subtype)?;
+        for (key, value) in &self.params {
+            write!(f, "; {}={}", key, value)?;
+        }
+        Ok(())
+    }
+}
+
+/// A single entry from an Accept header with quality value.
+#[derive(Debug, Clone)]
+pub struct AcceptItem {
+    /// The media type.
+    pub media_type: MediaType,
+    /// Quality value (0.0 to 1.0, default 1.0).
+    pub quality: f32,
+}
+
+impl AcceptItem {
+    /// Parse a single Accept header item.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let item = AcceptItem::parse("text/html;q=0.9").unwrap();
+    /// assert_eq!(item.media_type.typ, "text");
+    /// assert_eq!(item.quality, 0.9);
+    /// ```
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let mut quality = 1.0f32;
+
+        // Extract quality parameter
+        let media_str = if let Some(q_pos) = s.to_ascii_lowercase().find(";q=") {
+            let after_q = &s[q_pos + 3..];
+            let q_end = after_q.find(';').unwrap_or(after_q.len());
+            let q_str = &after_q[..q_end];
+            if let Ok(q) = q_str.trim().parse::<f32>() {
+                quality = q.clamp(0.0, 1.0);
+            }
+            // Remove the q parameter from the string for media type parsing
+            let before = &s[..q_pos];
+            let after = if q_end < after_q.len() {
+                &after_q[q_end..]
+            } else {
+                ""
+            };
+            format!("{}{}", before, after)
+        } else {
+            s.to_string()
+        };
+
+        let media_type = MediaType::parse(&media_str)?;
+        Some(Self { media_type, quality })
+    }
+}
+
+impl PartialEq for AcceptItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.media_type == other.media_type
+            && (self.quality - other.quality).abs() < f32::EPSILON
+    }
+}
+
+/// Parsed Accept header with quality-ordered media types.
+///
+/// This extractor parses the Accept header and provides the list of
+/// acceptable media types sorted by quality (highest first).
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::AcceptHeader;
+///
+/// async fn handler(accept: AcceptHeader) -> impl IntoResponse {
+///     if accept.prefers("application/json") {
+///         Json(data).into_response()
+///     } else if accept.prefers("text/html") {
+///         Html(template).into_response()
+///     } else {
+///         // Default to JSON
+///         Json(data).into_response()
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct AcceptHeader {
+    /// Media types sorted by quality (highest first).
+    pub items: Vec<AcceptItem>,
+}
+
+impl AcceptHeader {
+    /// Parse an Accept header value.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let accept = AcceptHeader::parse("text/html, application/json;q=0.9, */*;q=0.1");
+    /// assert_eq!(accept.items.len(), 3);
+    /// assert_eq!(accept.items[0].media_type.subtype, "html"); // q=1.0
+    /// assert_eq!(accept.items[1].media_type.subtype, "json"); // q=0.9
+    /// ```
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        let mut items: Vec<AcceptItem> = s
+            .split(',')
+            .filter_map(AcceptItem::parse)
+            .collect();
+
+        // Sort by quality descending, then by specificity
+        items.sort_by(|a, b| {
+            // Higher quality first
+            let q_cmp = b.quality.partial_cmp(&a.quality).unwrap_or(std::cmp::Ordering::Equal);
+            if q_cmp != std::cmp::Ordering::Equal {
+                return q_cmp;
+            }
+            // More specific types first (fewer wildcards)
+            let a_wildcards = (a.media_type.typ == "*") as u8 + (a.media_type.subtype == "*") as u8;
+            let b_wildcards = (b.media_type.typ == "*") as u8 + (b.media_type.subtype == "*") as u8;
+            a_wildcards.cmp(&b_wildcards)
+        });
+
+        Self { items }
+    }
+
+    /// Create an AcceptHeader that accepts anything.
+    #[must_use]
+    pub fn any() -> Self {
+        Self {
+            items: vec![AcceptItem {
+                media_type: MediaType::new("*", "*"),
+                quality: 1.0,
+            }],
+        }
+    }
+
+    /// Check if a media type is acceptable.
+    #[must_use]
+    pub fn accepts(&self, media_type: &str) -> bool {
+        if self.items.is_empty() {
+            return true; // No Accept header means accept anything
+        }
+
+        let Some(mt) = MediaType::parse(media_type) else {
+            return false;
+        };
+
+        self.items.iter().any(|item| {
+            item.quality > 0.0 && mt.matches(&item.media_type)
+        })
+    }
+
+    /// Check if a media type is the preferred type.
+    ///
+    /// Returns true if the given media type matches the highest-quality
+    /// acceptable type.
+    #[must_use]
+    pub fn prefers(&self, media_type: &str) -> bool {
+        let Some(mt) = MediaType::parse(media_type) else {
+            return false;
+        };
+
+        self.items
+            .first()
+            .map(|item| mt.matches(&item.media_type))
+            .unwrap_or(true)
+    }
+
+    /// Get the quality value for a specific media type.
+    ///
+    /// Returns 0.0 if not acceptable, or the quality value if acceptable.
+    #[must_use]
+    pub fn quality_of(&self, media_type: &str) -> f32 {
+        if self.items.is_empty() {
+            return 1.0; // No Accept header means q=1.0 for everything
+        }
+
+        let Some(mt) = MediaType::parse(media_type) else {
+            return 0.0;
+        };
+
+        self.items
+            .iter()
+            .find(|item| mt.matches(&item.media_type))
+            .map(|item| item.quality)
+            .unwrap_or(0.0)
+    }
+
+    /// Negotiate the best media type from a list of available types.
+    ///
+    /// Returns the first available type that is acceptable, preferring
+    /// higher quality matches.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let accept = AcceptHeader::parse("text/html, application/json;q=0.9");
+    /// let available = ["application/json", "text/html", "text/plain"];
+    /// let best = accept.negotiate(&available);
+    /// assert_eq!(best, Some("text/html"));
+    /// ```
+    #[must_use]
+    pub fn negotiate<'a>(&self, available: &[&'a str]) -> Option<&'a str> {
+        if self.items.is_empty() {
+            return available.first().copied();
+        }
+
+        // Score each available type
+        let mut scored: Vec<(&str, f32, usize)> = available
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &media_type)| {
+                let q = self.quality_of(media_type);
+                if q > 0.0 {
+                    Some((media_type, q, idx))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by quality descending, then by position in available list
+        scored.sort_by(|a, b| {
+            let q_cmp = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
+            if q_cmp != std::cmp::Ordering::Equal {
+                q_cmp
+            } else {
+                a.2.cmp(&b.2)
+            }
+        });
+
+        scored.first().map(|(mt, _, _)| *mt)
+    }
+
+    /// Check if the Accept header is empty (accepts anything).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+impl Default for AcceptHeader {
+    fn default() -> Self {
+        Self::any()
+    }
+}
+
+impl FromRequest for AcceptHeader {
+    type Error = std::convert::Infallible;
+
+    async fn from_request(_ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
+        let header = req
+            .headers()
+            .get("accept")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .map(Self::parse)
+            .unwrap_or_else(Self::any);
+        Ok(header)
+    }
+}
+
+/// A single entry from an Accept-Encoding header.
+#[derive(Debug, Clone)]
+pub struct AcceptEncodingItem {
+    /// The encoding name (e.g., "gzip", "br", "deflate", "identity").
+    pub encoding: String,
+    /// Quality value (0.0 to 1.0, default 1.0).
+    pub quality: f32,
+}
+
+impl AcceptEncodingItem {
+    /// Parse a single Accept-Encoding item.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let mut quality = 1.0f32;
+
+        let (encoding, _) = if let Some(q_pos) = s.to_ascii_lowercase().find(";q=") {
+            let q_str = &s[q_pos + 3..];
+            if let Ok(q) = q_str.trim().parse::<f32>() {
+                quality = q.clamp(0.0, 1.0);
+            }
+            (s[..q_pos].trim().to_ascii_lowercase(), quality)
+        } else {
+            (s.to_ascii_lowercase(), quality)
+        };
+
+        if encoding.is_empty() {
+            return None;
+        }
+
+        Some(Self { encoding, quality })
+    }
+}
+
+/// Parsed Accept-Encoding header.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::AcceptEncodingHeader;
+///
+/// async fn handler(encoding: AcceptEncodingHeader) -> impl IntoResponse {
+///     if encoding.accepts("br") {
+///         // Use Brotli compression
+///     } else if encoding.accepts("gzip") {
+///         // Use gzip compression
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct AcceptEncodingHeader {
+    /// Encodings sorted by quality (highest first).
+    pub items: Vec<AcceptEncodingItem>,
+}
+
+impl AcceptEncodingHeader {
+    /// Parse an Accept-Encoding header value.
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        let mut items: Vec<AcceptEncodingItem> = s
+            .split(',')
+            .filter_map(AcceptEncodingItem::parse)
+            .collect();
+
+        items.sort_by(|a, b| {
+            b.quality.partial_cmp(&a.quality).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Self { items }
+    }
+
+    /// Check if an encoding is acceptable.
+    #[must_use]
+    pub fn accepts(&self, encoding: &str) -> bool {
+        let encoding = encoding.to_ascii_lowercase();
+        self.items.iter().any(|item| {
+            item.quality > 0.0 && (item.encoding == encoding || item.encoding == "*")
+        })
+    }
+
+    /// Get the preferred encoding from a list of available encodings.
+    #[must_use]
+    pub fn negotiate<'a>(&self, available: &[&'a str]) -> Option<&'a str> {
+        if self.items.is_empty() {
+            return available.first().copied();
+        }
+
+        let mut best: Option<(&str, f32)> = None;
+
+        for &encoding in available {
+            let enc_lower = encoding.to_ascii_lowercase();
+            for item in &self.items {
+                if item.quality > 0.0 && (item.encoding == enc_lower || item.encoding == "*") {
+                    match best {
+                        None => best = Some((encoding, item.quality)),
+                        Some((_, q)) if item.quality > q => best = Some((encoding, item.quality)),
+                        _ => {}
+                    }
+                    break;
+                }
+            }
+        }
+
+        best.map(|(e, _)| e)
+    }
+}
+
+impl FromRequest for AcceptEncodingHeader {
+    type Error = std::convert::Infallible;
+
+    async fn from_request(_ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
+        let header = req
+            .headers()
+            .get("accept-encoding")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .map(Self::parse)
+            .unwrap_or_default();
+        Ok(header)
+    }
+}
+
+/// A single entry from an Accept-Language header.
+#[derive(Debug, Clone)]
+pub struct AcceptLanguageItem {
+    /// The language tag (e.g., "en", "en-US", "fr-FR").
+    pub language: String,
+    /// Quality value (0.0 to 1.0, default 1.0).
+    pub quality: f32,
+}
+
+impl AcceptLanguageItem {
+    /// Parse a single Accept-Language item.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let mut quality = 1.0f32;
+
+        let (language, _) = if let Some(q_pos) = s.to_ascii_lowercase().find(";q=") {
+            let q_str = &s[q_pos + 3..];
+            if let Ok(q) = q_str.trim().parse::<f32>() {
+                quality = q.clamp(0.0, 1.0);
+            }
+            (s[..q_pos].trim().to_string(), quality)
+        } else {
+            (s.to_string(), quality)
+        };
+
+        if language.is_empty() {
+            return None;
+        }
+
+        Some(Self { language, quality })
+    }
+}
+
+/// Parsed Accept-Language header.
+///
+/// # Example
+///
+/// ```ignore
+/// use fastapi_core::AcceptLanguageHeader;
+///
+/// async fn handler(lang: AcceptLanguageHeader) -> impl IntoResponse {
+///     let locale = lang.negotiate(&["en", "fr", "de"]).unwrap_or("en");
+///     // Use locale for response
+/// }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct AcceptLanguageHeader {
+    /// Languages sorted by quality (highest first).
+    pub items: Vec<AcceptLanguageItem>,
+}
+
+impl AcceptLanguageHeader {
+    /// Parse an Accept-Language header value.
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        let mut items: Vec<AcceptLanguageItem> = s
+            .split(',')
+            .filter_map(AcceptLanguageItem::parse)
+            .collect();
+
+        items.sort_by(|a, b| {
+            b.quality.partial_cmp(&a.quality).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Self { items }
+    }
+
+    /// Check if a language is acceptable.
+    #[must_use]
+    pub fn accepts(&self, language: &str) -> bool {
+        let lang_lower = language.to_ascii_lowercase();
+        self.items.iter().any(|item| {
+            if item.quality <= 0.0 {
+                return false;
+            }
+            let item_lower = item.language.to_ascii_lowercase();
+            // Exact match or prefix match (e.g., "en" matches "en-US")
+            item_lower == lang_lower
+                || item_lower == "*"
+                || lang_lower.starts_with(&format!("{}-", item_lower))
+                || item_lower.starts_with(&format!("{}-", lang_lower))
+        })
+    }
+
+    /// Get the preferred language from a list of available languages.
+    #[must_use]
+    pub fn negotiate<'a>(&self, available: &[&'a str]) -> Option<&'a str> {
+        if self.items.is_empty() {
+            return available.first().copied();
+        }
+
+        let mut best: Option<(&str, f32, bool)> = None; // (lang, quality, exact_match)
+
+        for &lang in available {
+            let lang_lower = lang.to_ascii_lowercase();
+            for item in &self.items {
+                if item.quality <= 0.0 {
+                    continue;
+                }
+                let item_lower = item.language.to_ascii_lowercase();
+
+                let (matches, exact) = if item_lower == lang_lower {
+                    (true, true)
+                } else if item_lower == "*" {
+                    (true, false)
+                } else if lang_lower.starts_with(&format!("{}-", item_lower)) {
+                    (true, false)
+                } else if item_lower.starts_with(&format!("{}-", lang_lower)) {
+                    (true, false)
+                } else {
+                    (false, false)
+                };
+
+                if matches {
+                    match best {
+                        None => best = Some((lang, item.quality, exact)),
+                        Some((_, q, e)) if item.quality > q || (item.quality == q && exact && !e) => {
+                            best = Some((lang, item.quality, exact));
+                        }
+                        _ => {}
+                    }
+                    break;
+                }
+            }
+        }
+
+        best.map(|(l, _, _)| l)
+    }
+}
+
+impl FromRequest for AcceptLanguageHeader {
+    type Error = std::convert::Infallible;
+
+    async fn from_request(_ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
+        let header = req
+            .headers()
+            .get("accept-language")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .map(Self::parse)
+            .unwrap_or_default();
+        Ok(header)
+    }
+}
+
+/// Error returned when content negotiation fails.
+#[derive(Debug, Clone)]
+pub struct NotAcceptableError {
+    /// The requested media types.
+    pub requested: Vec<String>,
+    /// The available media types.
+    pub available: Vec<String>,
+}
+
+impl NotAcceptableError {
+    /// Create a new NotAcceptableError.
+    #[must_use]
+    pub fn new(requested: Vec<String>, available: Vec<String>) -> Self {
+        Self { requested, available }
+    }
+}
+
+impl fmt::Display for NotAcceptableError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Not Acceptable: requested [{}], available [{}]",
+            self.requested.join(", "),
+            self.available.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for NotAcceptableError {}
+
+impl IntoResponse for NotAcceptableError {
+    fn into_response(self) -> Response {
+        Response::with_status(crate::response::StatusCode::NOT_ACCEPTABLE)
+            .header("content-type", b"application/json".to_vec())
+            .body(ResponseBody::Bytes(
+                serde_json::json!({
+                    "error": "Not Acceptable",
+                    "message": self.to_string(),
+                    "requested": self.requested,
+                    "available": self.available,
+                })
+                .to_string()
+                .into_bytes(),
+            ))
+    }
+}
+
+/// Helper to build Vary header values for content negotiation.
+#[derive(Debug, Clone, Default)]
+pub struct VaryBuilder {
+    headers: Vec<String>,
+}
+
+impl VaryBuilder {
+    /// Create a new Vary builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add Accept to the Vary header.
+    #[must_use]
+    pub fn accept(mut self) -> Self {
+        if !self.headers.contains(&"Accept".to_string()) {
+            self.headers.push("Accept".to_string());
+        }
+        self
+    }
+
+    /// Add Accept-Encoding to the Vary header.
+    #[must_use]
+    pub fn accept_encoding(mut self) -> Self {
+        if !self.headers.contains(&"Accept-Encoding".to_string()) {
+            self.headers.push("Accept-Encoding".to_string());
+        }
+        self
+    }
+
+    /// Add Accept-Language to the Vary header.
+    #[must_use]
+    pub fn accept_language(mut self) -> Self {
+        if !self.headers.contains(&"Accept-Language".to_string()) {
+            self.headers.push("Accept-Language".to_string());
+        }
+        self
+    }
+
+    /// Add a custom header to Vary.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        if !self.headers.contains(&name) {
+            self.headers.push(name);
+        }
+        self
+    }
+
+    /// Build the Vary header value.
+    #[must_use]
+    pub fn build(&self) -> String {
+        self.headers.join(", ")
+    }
+
+    /// Check if any headers have been added.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod content_negotiation_tests {
+    use super::*;
+
+    #[test]
+    fn media_type_parse_simple() {
+        let mt = MediaType::parse("text/html").unwrap();
+        assert_eq!(mt.typ, "text");
+        assert_eq!(mt.subtype, "html");
+        assert!(mt.params.is_empty());
+    }
+
+    #[test]
+    fn media_type_parse_with_params() {
+        let mt = MediaType::parse("text/html; charset=utf-8").unwrap();
+        assert_eq!(mt.typ, "text");
+        assert_eq!(mt.subtype, "html");
+        assert_eq!(mt.param("charset"), Some("utf-8"));
+    }
+
+    #[test]
+    fn media_type_parse_case_insensitive() {
+        let mt = MediaType::parse("TEXT/HTML").unwrap();
+        assert_eq!(mt.typ, "text");
+        assert_eq!(mt.subtype, "html");
+    }
+
+    #[test]
+    fn media_type_matches_wildcard() {
+        let html = MediaType::new("text", "html");
+        let any_text = MediaType::new("text", "*");
+        let any = MediaType::new("*", "*");
+
+        assert!(html.matches(&any_text));
+        assert!(html.matches(&any));
+        assert!(html.matches(&html));
+    }
+
+    #[test]
+    fn accept_item_parse_with_quality() {
+        let item = AcceptItem::parse("text/html;q=0.9").unwrap();
+        assert_eq!(item.media_type.typ, "text");
+        assert_eq!(item.media_type.subtype, "html");
+        assert!((item.quality - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn accept_item_parse_default_quality() {
+        let item = AcceptItem::parse("application/json").unwrap();
+        assert!((item.quality - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn accept_header_parse_multiple() {
+        let accept = AcceptHeader::parse("text/html, application/json;q=0.9, */*;q=0.1");
+        assert_eq!(accept.items.len(), 3);
+        assert_eq!(accept.items[0].media_type.subtype, "html");
+        assert_eq!(accept.items[1].media_type.subtype, "json");
+        assert_eq!(accept.items[2].media_type.subtype, "*");
+    }
+
+    #[test]
+    fn accept_header_prefers() {
+        let accept = AcceptHeader::parse("text/html, application/json;q=0.9");
+        assert!(accept.prefers("text/html"));
+        assert!(!accept.prefers("application/json"));
+    }
+
+    #[test]
+    fn accept_header_accepts() {
+        let accept = AcceptHeader::parse("text/html, application/json;q=0.9");
+        assert!(accept.accepts("text/html"));
+        assert!(accept.accepts("application/json"));
+        assert!(!accept.accepts("image/png"));
+    }
+
+    #[test]
+    fn accept_header_negotiate() {
+        let accept = AcceptHeader::parse("text/html, application/json;q=0.9");
+        let available = ["application/json", "text/html", "text/plain"];
+        assert_eq!(accept.negotiate(&available), Some("text/html"));
+    }
+
+    #[test]
+    fn accept_header_negotiate_returns_best_available() {
+        let accept = AcceptHeader::parse("application/xml, application/json;q=0.9");
+        let available = ["application/json", "text/plain"];
+        assert_eq!(accept.negotiate(&available), Some("application/json"));
+    }
+
+    #[test]
+    fn accept_header_quality_of() {
+        let accept = AcceptHeader::parse("text/html, application/json;q=0.9, */*;q=0.1");
+        assert!((accept.quality_of("text/html") - 1.0).abs() < f32::EPSILON);
+        assert!((accept.quality_of("application/json") - 0.9).abs() < f32::EPSILON);
+        assert!((accept.quality_of("image/png") - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn accept_header_empty_accepts_all() {
+        let accept = AcceptHeader::parse("");
+        assert!(accept.accepts("anything/here"));
+        assert_eq!(accept.quality_of("text/html"), 1.0);
+    }
+
+    #[test]
+    fn accept_encoding_parse() {
+        let enc = AcceptEncodingHeader::parse("gzip, deflate, br;q=0.8");
+        assert_eq!(enc.items.len(), 3);
+        assert!(enc.accepts("gzip"));
+        assert!(enc.accepts("br"));
+    }
+
+    #[test]
+    fn accept_encoding_negotiate() {
+        let enc = AcceptEncodingHeader::parse("gzip;q=0.9, br");
+        let available = ["gzip", "br", "identity"];
+        assert_eq!(enc.negotiate(&available), Some("br"));
+    }
+
+    #[test]
+    fn accept_language_parse() {
+        let lang = AcceptLanguageHeader::parse("en-US, en;q=0.9, fr;q=0.8");
+        assert_eq!(lang.items.len(), 3);
+        assert!(lang.accepts("en-US"));
+        assert!(lang.accepts("en"));
+        assert!(lang.accepts("fr"));
+    }
+
+    #[test]
+    fn accept_language_negotiate() {
+        let lang = AcceptLanguageHeader::parse("fr, en;q=0.9");
+        let available = ["en", "de", "fr"];
+        assert_eq!(lang.negotiate(&available), Some("fr"));
+    }
+
+    #[test]
+    fn accept_language_prefix_match() {
+        let lang = AcceptLanguageHeader::parse("en");
+        assert!(lang.accepts("en-US"));
+        assert!(lang.accepts("en-GB"));
+    }
+
+    #[test]
+    fn vary_builder() {
+        let vary = VaryBuilder::new()
+            .accept()
+            .accept_encoding()
+            .build();
+        assert_eq!(vary, "Accept, Accept-Encoding");
+    }
+
+    #[test]
+    fn vary_builder_no_duplicates() {
+        let vary = VaryBuilder::new()
+            .accept()
+            .accept()
+            .build();
+        assert_eq!(vary, "Accept");
+    }
+
+    #[test]
+    fn not_acceptable_error_response() {
+        let err = NotAcceptableError::new(
+            vec!["image/png".to_string()],
+            vec!["application/json".to_string(), "text/html".to_string()],
+        );
+        let response = err.into_response();
+        assert_eq!(response.status(), crate::response::StatusCode::NOT_ACCEPTABLE);
+    }
+}
+
 #[cfg(test)]
 mod header_tests {
     use super::*;

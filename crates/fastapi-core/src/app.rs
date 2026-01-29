@@ -944,6 +944,8 @@ struct AppConfigFile {
     debug: Option<bool>,
     max_body_size: Option<usize>,
     request_timeout_ms: Option<u64>,
+    root_path: Option<String>,
+    root_path_in_servers: Option<bool>,
 }
 
 impl Default for AppConfig {
@@ -967,6 +969,8 @@ impl AppConfig {
     const ENV_DEBUG: &'static str = "DEBUG";
     const ENV_MAX_BODY_SIZE: &'static str = "MAX_BODY_SIZE";
     const ENV_REQUEST_TIMEOUT_MS: &'static str = "REQUEST_TIMEOUT_MS";
+    const ENV_ROOT_PATH: &'static str = "ROOT_PATH";
+    const ENV_ROOT_PATH_IN_SERVERS: &'static str = "ROOT_PATH_IN_SERVERS";
 
     /// Creates a new configuration with defaults.
     #[must_use]
@@ -1049,6 +1053,8 @@ impl AppConfig {
     /// - `FASTAPI_DEBUG` (true/false/1/0/yes/no/on/off)
     /// - `FASTAPI_MAX_BODY_SIZE` (bytes)
     /// - `FASTAPI_REQUEST_TIMEOUT_MS`
+    /// - `FASTAPI_ROOT_PATH` (path prefix for reverse proxy)
+    /// - `FASTAPI_ROOT_PATH_IN_SERVERS` (true/false/1/0/yes/no/on/off)
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_env_with_prefix(Self::DEFAULT_ENV_PREFIX)
     }
@@ -1085,6 +1091,34 @@ impl AppConfig {
         config.apply_env(Self::DEFAULT_ENV_PREFIX)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Returns the root_path as an OpenAPI server entry if configured.
+    ///
+    /// Returns `Some((url, description))` if:
+    /// - `root_path` is non-empty
+    /// - `root_path_in_servers` is true
+    ///
+    /// Returns `None` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = AppConfig::new().root_path("/api/v1");
+    /// if let Some((url, description)) = config.openapi_server() {
+    ///     builder = builder.server(url, description);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn openapi_server(&self) -> Option<(String, Option<String>)> {
+        if !self.root_path.is_empty() && self.root_path_in_servers {
+            Some((
+                self.root_path.clone(),
+                Some("Application root path".to_string()),
+            ))
+        } else {
+            None
+        }
     }
 
     /// Validate configuration values.
@@ -1128,6 +1162,12 @@ impl AppConfig {
         if let Some(request_timeout_ms) = file.request_timeout_ms {
             self.request_timeout_ms = request_timeout_ms;
         }
+        if let Some(root_path) = file.root_path {
+            self.root_path = root_path;
+        }
+        if let Some(root_path_in_servers) = file.root_path_in_servers {
+            self.root_path_in_servers = root_path_in_servers;
+        }
     }
 
     fn apply_env(&mut self, prefix: &str) -> Result<(), ConfigError> {
@@ -1143,6 +1183,8 @@ impl AppConfig {
         let debug_key = env_key(prefix, Self::ENV_DEBUG);
         let max_body_key = env_key(prefix, Self::ENV_MAX_BODY_SIZE);
         let timeout_key = env_key(prefix, Self::ENV_REQUEST_TIMEOUT_MS);
+        let root_path_key = env_key(prefix, Self::ENV_ROOT_PATH);
+        let root_path_in_servers_key = env_key(prefix, Self::ENV_ROOT_PATH_IN_SERVERS);
 
         if let Some(value) = fetch(&name_key)? {
             self.name = value;
@@ -1158,6 +1200,12 @@ impl AppConfig {
         }
         if let Some(value) = fetch(&timeout_key)? {
             self.request_timeout_ms = parse_u64(&timeout_key, &value)?;
+        }
+        if let Some(value) = fetch(&root_path_key)? {
+            self.root_path = value;
+        }
+        if let Some(value) = fetch(&root_path_in_servers_key)? {
+            self.root_path_in_servers = parse_bool(&root_path_in_servers_key, &value)?;
         }
 
         Ok(())
@@ -2742,6 +2790,143 @@ mod tests {
         assert!(config.debug);
         assert_eq!(config.version, "1.0.0");
         assert_eq!(config.max_body_size, 1024);
+    }
+
+    #[test]
+    fn app_config_default_root_path() {
+        let config = AppConfig::default();
+        assert!(config.root_path.is_empty());
+        assert!(config.root_path_in_servers);
+    }
+
+    #[test]
+    fn app_config_builder_root_path() {
+        let config = AppConfig::new()
+            .root_path("/api/v1")
+            .root_path_in_servers(false);
+
+        assert_eq!(config.root_path, "/api/v1");
+        assert!(!config.root_path_in_servers);
+    }
+
+    #[test]
+    fn app_config_from_env_root_path() {
+        let mut env = HashMap::new();
+        env.insert("FASTAPI_ROOT_PATH".to_string(), "/proxy".to_string());
+        env.insert(
+            "FASTAPI_ROOT_PATH_IN_SERVERS".to_string(),
+            "false".to_string(),
+        );
+
+        let mut config = AppConfig::default();
+        config
+            .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
+                Ok(env.get(key).cloned())
+            })
+            .expect("env config");
+
+        assert_eq!(config.root_path, "/proxy");
+        assert!(!config.root_path_in_servers);
+    }
+
+    #[test]
+    fn app_config_from_env_root_path_in_servers_truthy() {
+        for truthy in &["true", "1", "yes", "on"] {
+            let mut env = HashMap::new();
+            env.insert(
+                "FASTAPI_ROOT_PATH_IN_SERVERS".to_string(),
+                (*truthy).to_string(),
+            );
+
+            let mut config = AppConfig::new().root_path_in_servers(false);
+            config
+                .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
+                    Ok(env.get(key).cloned())
+                })
+                .expect("env config");
+
+            assert!(
+                config.root_path_in_servers,
+                "expected true for value: {}",
+                truthy
+            );
+        }
+    }
+
+    #[test]
+    fn app_config_from_env_root_path_in_servers_falsy() {
+        for falsy in &["false", "0", "no", "off"] {
+            let mut env = HashMap::new();
+            env.insert(
+                "FASTAPI_ROOT_PATH_IN_SERVERS".to_string(),
+                (*falsy).to_string(),
+            );
+
+            let mut config = AppConfig::default();
+            config
+                .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
+                    Ok(env.get(key).cloned())
+                })
+                .expect("env config");
+
+            assert!(
+                !config.root_path_in_servers,
+                "expected false for value: {}",
+                falsy
+            );
+        }
+    }
+
+    #[test]
+    fn app_config_from_file_root_path() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!("fastapi_config_root_{stamp}.json"));
+
+        let json = r#"{
+  "name": "Proxied API",
+  "root_path": "/api/v2",
+  "root_path_in_servers": false
+}"#;
+        std::fs::write(&path, json).expect("write temp config");
+
+        let config = AppConfig::from_file(&path).expect("file config");
+        assert_eq!(config.name, "Proxied API");
+        assert_eq!(config.root_path, "/api/v2");
+        assert!(!config.root_path_in_servers);
+    }
+
+    #[test]
+    fn app_config_openapi_server_returns_some_when_configured() {
+        let config = AppConfig::new()
+            .root_path("/api/v1")
+            .root_path_in_servers(true);
+
+        let server = config.openapi_server();
+        assert!(server.is_some());
+
+        let (url, description) = server.unwrap();
+        assert_eq!(url, "/api/v1");
+        assert!(description.is_some());
+    }
+
+    #[test]
+    fn app_config_openapi_server_returns_none_when_disabled() {
+        let config = AppConfig::new()
+            .root_path("/api/v1")
+            .root_path_in_servers(false);
+
+        assert!(config.openapi_server().is_none());
+    }
+
+    #[test]
+    fn app_config_openapi_server_returns_none_when_empty_root_path() {
+        let config = AppConfig::new().root_path_in_servers(true);
+
+        assert!(config.openapi_server().is_none());
     }
 
     #[test]
