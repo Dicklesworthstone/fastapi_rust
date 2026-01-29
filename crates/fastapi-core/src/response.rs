@@ -685,10 +685,24 @@ impl IntoResponse for Redirect {
 pub struct Html(String);
 
 impl Html {
-    /// Create a new HTML response.
+    /// Create a new HTML response from trusted content.
+    ///
+    /// # Safety Note
+    ///
+    /// This method does NOT escape the content. Only use with trusted HTML.
+    /// For user-provided content, use [`Html::escaped`] instead to prevent XSS.
     #[must_use]
     pub fn new(content: impl Into<String>) -> Self {
         Self(content.into())
+    }
+
+    /// Create an HTML response with the content escaped to prevent XSS.
+    ///
+    /// Use this method when including any user-provided content in HTML.
+    /// Characters `& < > " '` are escaped to their HTML entities.
+    #[must_use]
+    pub fn escaped(content: impl AsRef<str>) -> Self {
+        Self(escape_html(content.as_ref()))
     }
 
     /// Get the HTML content.
@@ -696,6 +710,22 @@ impl Html {
     pub fn content(&self) -> &str {
         &self.0
     }
+}
+
+/// Escape HTML special characters to prevent XSS attacks.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 impl IntoResponse for Html {

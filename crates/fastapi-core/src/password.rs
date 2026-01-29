@@ -59,7 +59,8 @@ impl Default for HashConfig {
     fn default() -> Self {
         Self {
             algorithm: Algorithm::Pbkdf2Sha256,
-            iterations: 100_000,
+            // OWASP 2023 recommendation: minimum 600,000 for PBKDF2-SHA256
+            iterations: 600_000,
             salt_len: 16,
             hash_len: 32,
         }
@@ -503,7 +504,7 @@ mod tests {
         let parts: Vec<&str> = hash.split('$').collect();
         assert_eq!(parts.len(), 5);
         assert_eq!(parts[1], "pbkdf2-sha256");
-        assert_eq!(parts[2], "100000");
+        assert_eq!(parts[2], "600000"); // OWASP 2023 minimum for PBKDF2-SHA256
     }
 
     #[test]

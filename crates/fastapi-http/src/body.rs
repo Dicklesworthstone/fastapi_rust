@@ -377,6 +377,15 @@ impl<'a> ChunkedReader<'a> {
             }
         })?;
 
+        // Reject unreasonably large chunk sizes early to prevent DoS.
+        // Individual chunks over 16MB are almost certainly attacks.
+        const MAX_SINGLE_CHUNK: usize = 16 * 1024 * 1024;
+        if size > MAX_SINGLE_CHUNK {
+            return Err(BodyError::InvalidChunkedEncoding {
+                detail: "chunk size exceeds 16MB limit",
+            });
+        }
+
         // bytes_consumed = size_line + CRLF
         Ok((size, line_end + 2))
     }
@@ -1040,6 +1049,15 @@ where
                                 ))));
                             }
                         };
+
+                        // Reject unreasonably large chunk sizes early
+                        const MAX_SINGLE_CHUNK: usize = 16 * 1024 * 1024;
+                        if chunk_size > MAX_SINGLE_CHUNK {
+                            self.state = AsyncChunkedState::Error;
+                            return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                                "chunk size exceeds 16MB limit".to_string(),
+                            ))));
+                        }
 
                         self.consume(crlf_pos + 2);
 
