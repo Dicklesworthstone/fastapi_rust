@@ -7,7 +7,8 @@ use crate::mode::OutputMode;
 use crate::testing::{OutputEntry, OutputLevel, TestOutput};
 use crate::themes::FastApiTheme;
 use std::cell::RefCell;
-use std::sync::{LazyLock, RwLock};
+use std::sync::LazyLock;
+use parking_lot::RwLock;
 use std::time::Instant;
 
 const ANSI_RESET: &str = "\x1b[0m";
@@ -24,18 +25,16 @@ thread_local! {
 ///
 /// # Panics
 ///
-/// Panics if the global lock is poisoned.
-pub fn get_global() -> std::sync::RwLockReadGuard<'static, RichOutput> {
-    GLOBAL_OUTPUT.read().expect("global output lock poisoned")
+pub fn get_global() -> parking_lot::RwLockReadGuard<'static, RichOutput> {
+    GLOBAL_OUTPUT.read()
 }
 
 /// Replace the global `RichOutput` instance.
 ///
 /// # Panics
 ///
-/// Panics if the global lock is poisoned.
 pub fn set_global(output: RichOutput) {
-    *GLOBAL_OUTPUT.write().expect("global output lock poisoned") = output;
+    *GLOBAL_OUTPUT.write() = output;
 }
 
 /// The main facade for rich console output.
@@ -313,18 +312,13 @@ impl RichOutput {
     ///
     /// # Panics
     ///
-    /// Panics if the global lock is poisoned.
-    pub fn global() -> std::sync::RwLockReadGuard<'static, RichOutput> {
+    pub fn global() -> parking_lot::RwLockReadGuard<'static, RichOutput> {
         get_global()
     }
 
     /// Get mutable access to the global `RichOutput` instance.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the global lock is poisoned.
-    pub fn global_mut() -> std::sync::RwLockWriteGuard<'static, RichOutput> {
-        GLOBAL_OUTPUT.write().expect("global output lock poisoned")
+    pub fn global_mut() -> parking_lot::RwLockWriteGuard<'static, RichOutput> {
+        GLOBAL_OUTPUT.write()
     }
 }
 
