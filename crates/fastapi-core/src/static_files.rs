@@ -276,6 +276,11 @@ impl StaticFiles {
                 ));
         }
 
+        // Check for hidden path components before serving
+        if !self.config.show_hidden && has_hidden_component(&canonical_path) {
+            return self.not_found_response();
+        }
+
         // Check if it's a directory
         if canonical_path.is_dir() {
             return self.serve_directory(&canonical_path, request_path);
@@ -346,13 +351,9 @@ impl StaticFiles {
 
     /// Serve a single file.
     fn serve_file(&self, file_path: &Path) -> Response {
-        // Check for hidden files
-        if !self.config.show_hidden {
-            if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') {
-                    return self.not_found_response();
-                }
-            }
+        // Check for hidden files in any path component (not just the leaf)
+        if !self.config.show_hidden && has_hidden_component(file_path) {
+            return self.not_found_response();
         }
 
         // Read file contents
@@ -472,6 +473,15 @@ impl StaticFiles {
     }
 }
 
+/// Check if any component of a path starts with `.` (hidden file/directory).
+fn has_hidden_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|s| s.starts_with('.') && s != "." && s != "..")
+    })
+}
+
 /// Check if a path is safe (no path traversal attempts).
 fn is_safe_path(path: &str) -> bool {
     // Reject paths with null bytes
@@ -498,27 +508,38 @@ fn is_safe_path(path: &str) -> bool {
 }
 
 /// Simple percent-decoding for path safety checks.
+///
+/// Decodes percent-encoded bytes into a string. Invalid UTF-8 sequences
+/// are replaced with the Unicode replacement character.
 fn percent_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
+    let bytes = s.as_bytes();
+    let mut decoded_bytes = Vec::with_capacity(bytes.len());
+    let mut i = 0;
 
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                    continue;
-                }
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = hex_val(bytes[i + 1]);
+            let lo = hex_val(bytes[i + 2]);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                decoded_bytes.push((h << 4) | l);
+                i += 3;
+                continue;
             }
-            result.push('%');
-            result.push_str(&hex);
-        } else {
-            result.push(c);
         }
+        decoded_bytes.push(bytes[i]);
+        i += 1;
     }
 
-    result
+    String::from_utf8_lossy(&decoded_bytes).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Generate an ETag from file contents using FNV-1a hash.

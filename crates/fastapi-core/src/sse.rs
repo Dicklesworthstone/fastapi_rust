@@ -410,10 +410,10 @@ where
         let sse_stream = SseStream::new(self.stream);
 
         Response::with_status(StatusCode::OK)
-            .header("Content-Type", b"text/event-stream".to_vec())
-            .header("Cache-Control", b"no-cache".to_vec())
-            .header("Connection", b"keep-alive".to_vec())
-            .header("X-Accel-Buffering", b"no".to_vec()) // Disable nginx buffering
+            .header("content-type", b"text/event-stream".to_vec())
+            .header("cache-control", b"no-cache".to_vec())
+            .header("connection", b"keep-alive".to_vec())
+            .header("x-accel-buffering", b"no".to_vec()) // Disable nginx buffering
             .body(ResponseBody::stream(sse_stream))
     }
 }
