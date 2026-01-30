@@ -124,7 +124,7 @@ impl fmt::Display for Method {
 /// HTTP headers collection.
 ///
 /// Header names are normalized to lowercase at insertion time for case-insensitive
-/// matching. Lookups use a stack buffer for common header sizes to avoid allocation.
+/// matching. Lookups avoid allocation when the lookup key is already lowercase.
 #[derive(Debug, Default)]
 pub struct Headers {
     inner: HashMap<String, Vec<u8>>,
@@ -139,8 +139,7 @@ impl Headers {
 
     /// Get a header value by name (case-insensitive).
     ///
-    /// Uses a stack buffer for lowercase conversion when possible,
-    /// avoiding heap allocation for most header names.
+    /// Avoids heap allocation when the lookup key is already lowercase.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&[u8]> {
         self.inner
@@ -202,7 +201,6 @@ impl Headers {
 fn lowercase_header_key(name: &str) -> std::borrow::Cow<'_, str> {
     // Fast path: check if name is already ASCII lowercase.
     // This covers the common case of programmatic access with lowercase literals.
-    // Use memchr for efficient uppercase byte detection.
     let needs_lowercase = name
         .as_bytes()
         .iter()
