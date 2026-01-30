@@ -949,7 +949,18 @@ where
     /// * `initial_buffer` - Any bytes already buffered by the parser
     /// * `reader` - The async reader for remaining bytes
     /// * `config` - Streaming configuration
+    ///
+    /// # Panics
+    ///
+    /// Panics if `initial_buffer` exceeds `config.max_size`. Use `try_new` for
+    /// fallible construction.
     pub fn new(initial_buffer: Vec<u8>, reader: R, config: &StreamingBodyConfig) -> Self {
+        assert!(
+            initial_buffer.len() <= config.max_size,
+            "initial buffer size {} exceeds max size {}",
+            initial_buffer.len(),
+            config.max_size
+        );
         Self {
             reader: Some(reader),
             state: AsyncChunkedState::ChunkSize,
@@ -960,6 +971,35 @@ where
             buffer: initial_buffer,
             position: 0,
         }
+    }
+
+    /// Try to create a new chunked stream, returning error if initial buffer is too large.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if `initial_buffer.len()` exceeds `config.max_size`.
+    pub fn try_new(
+        initial_buffer: Vec<u8>,
+        reader: R,
+        config: &StreamingBodyConfig,
+    ) -> Result<Self, RequestBodyStreamError> {
+        if initial_buffer.len() > config.max_size {
+            return Err(RequestBodyStreamError::Io(format!(
+                "initial buffer size {} exceeds max size {}",
+                initial_buffer.len(),
+                config.max_size
+            )));
+        }
+        Ok(Self {
+            reader: Some(reader),
+            state: AsyncChunkedState::ChunkSize,
+            bytes_decoded: 0,
+            max_size: config.max_size,
+            chunk_size: config.chunk_size,
+            read_buffer: vec![0u8; config.chunk_size],
+            buffer: initial_buffer,
+            position: 0,
+        })
     }
 
     /// Create a chunked stream with default config.

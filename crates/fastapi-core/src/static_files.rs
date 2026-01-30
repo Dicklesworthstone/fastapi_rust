@@ -333,9 +333,19 @@ impl StaticFiles {
     fn serve_directory(&self, dir_path: &Path, request_path: &str) -> Response {
         // Try index files
         for index_file in &self.config.index_files {
+            // Security: validate index file path to prevent traversal
+            if !is_safe_path(index_file) {
+                continue;
+            }
             let index_path = dir_path.join(index_file);
-            if index_path.exists() && index_path.is_file() {
-                return self.serve_file(&index_path);
+            // Verify the resolved path is still within the directory
+            if let Ok(canonical) = index_path.canonicalize() {
+                if !canonical.starts_with(dir_path) {
+                    continue;
+                }
+                if canonical.is_file() {
+                    return self.serve_file(&canonical);
+                }
             }
         }
 
@@ -451,17 +461,27 @@ impl StaticFiles {
     /// Generate a 404 response, optionally using custom page.
     fn not_found_response(&self) -> Response {
         if let Some(ref not_found_path) = self.config.not_found_page {
-            let path = self.config.directory.join(not_found_path);
-            if let Ok(contents) = std::fs::read(&path) {
-                let content_type = path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(mime_type_for_extension)
-                    .unwrap_or("text/html; charset=utf-8");
+            // Security: validate path to prevent traversal
+            if is_safe_path(not_found_path) {
+                let path = self.config.directory.join(not_found_path);
+                // Verify the resolved path is within the configured directory
+                if let Ok(canonical) = path.canonicalize() {
+                    if let Ok(base_canonical) = self.config.directory.canonicalize() {
+                        if canonical.starts_with(&base_canonical) {
+                            if let Ok(contents) = std::fs::read(&canonical) {
+                                let content_type = canonical
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .map(mime_type_for_extension)
+                                    .unwrap_or("text/html; charset=utf-8");
 
-                return Response::with_status(StatusCode::NOT_FOUND)
-                    .header("content-type", content_type.as_bytes().to_vec())
-                    .body(ResponseBody::Bytes(contents));
+                                return Response::with_status(StatusCode::NOT_FOUND)
+                                    .header("content-type", content_type.as_bytes().to_vec())
+                                    .body(ResponseBody::Bytes(contents));
+                            }
+                        }
+                    }
+                }
             }
         }
 
