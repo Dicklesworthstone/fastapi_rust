@@ -878,8 +878,15 @@ impl TcpServer {
             if start.elapsed() >= timeout {
                 return false;
             }
-            // Yield to allow other tasks to make progress
-            // In production, this would use proper async sleep
+            // NOTE: We use blocking sleep here intentionally:
+            // 1. This is only called during graceful shutdown (not a hot path)
+            // 2. The default poll interval is 10ms (minimal CPU impact)
+            // 3. During shutdown, blocking briefly is acceptable
+            // 4. Using async sleep would require threading Time through the API
+            //
+            // If this becomes a bottleneck, consider:
+            // - Using asupersync::runtime::yield_now() in a tighter loop
+            // - Adding a Cx parameter to access async sleep
             std::thread::sleep(poll_interval);
         }
         true
