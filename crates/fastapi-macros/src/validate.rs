@@ -410,18 +410,54 @@ fn generate_field_validation(field: &Field, validators: &FieldValidators) -> Tok
         });
     }
 
-    // Email validation
+    // Email validation (RFC 5321 simplified)
     if validators.email {
         validations.push(quote! {
             {
                 let email = &self.#field_name;
-                // Simple email validation: contains @ and has content before/after
-                let is_valid = email.contains('@')
-                    && email.split('@').count() == 2
-                    && {
-                        let parts: Vec<&str> = email.split('@').collect();
-                        !parts[0].is_empty() && !parts[1].is_empty() && parts[1].contains('.')
-                    };
+
+                // Helper to validate local part characters
+                fn is_valid_local_char(c: char) -> bool {
+                    c.is_ascii_alphanumeric()
+                        || matches!(c, '.' | '+' | '-' | '_' | '!' | '#' | '$' | '%'
+                            | '&' | '\'' | '*' | '/' | '=' | '?' | '^' | '`' | '{' | '|' | '}' | '~')
+                }
+
+                // Helper to validate domain label (between dots)
+                fn is_valid_domain_label(label: &str) -> bool {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                }
+
+                let is_valid = if let Some(at_pos) = email.find('@') {
+                    let (local, domain) = email.split_at(at_pos);
+                    let domain = &domain[1..]; // Skip the @
+
+                    // Local part validation
+                    let local_valid = !local.is_empty()
+                        && local.len() <= 64
+                        && !local.starts_with('.')
+                        && !local.ends_with('.')
+                        && !local.contains("..")
+                        && local.chars().all(is_valid_local_char);
+
+                    // Domain validation
+                    let domain_valid = !domain.is_empty()
+                        && domain.len() <= 253
+                        && domain.contains('.')
+                        && !domain.starts_with('.')
+                        && !domain.ends_with('.')
+                        && !domain.contains("..")
+                        && domain.split('.').all(is_valid_domain_label);
+
+                    local_valid && domain_valid
+                } else {
+                    false
+                };
+
                 if !is_valid {
                     errors.push(
                         fastapi_core::ValidationError::new(
@@ -443,8 +479,34 @@ fn generate_field_validation(field: &Field, validators: &FieldValidators) -> Tok
         validations.push(quote! {
             {
                 let url = &self.#field_name;
-                // Simple URL validation: starts with http:// or https://
-                let is_valid = url.starts_with("http://") || url.starts_with("https://");
+
+                // URL validation: protocol + valid host structure
+                let is_valid = {
+                    let rest = if let Some(r) = url.strip_prefix("https://") {
+                        Some(r)
+                    } else if let Some(r) = url.strip_prefix("http://") {
+                        Some(r)
+                    } else {
+                        None
+                    };
+
+                    match rest {
+                        Some(after_protocol) => {
+                            // Must have content after protocol
+                            !after_protocol.is_empty()
+                            // Host part (before first / or ? or #) must be non-empty
+                            && {
+                                let host_end = after_protocol
+                                    .find(|c| c == '/' || c == '?' || c == '#')
+                                    .unwrap_or(after_protocol.len());
+                                let host = &after_protocol[..host_end];
+                                // Host must not be empty and must not be only whitespace
+                                !host.is_empty() && !host.chars().all(|c| c.is_whitespace())
+                            }
+                        }
+                        None => false,
+                    }
+                };
                 if !is_valid {
                     errors.push(
                         fastapi_core::ValidationError::new(
