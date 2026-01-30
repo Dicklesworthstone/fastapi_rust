@@ -367,6 +367,8 @@ impl<T: DeserializeOwned> FromRequest for Json<T> {
         let _ = ctx.checkpoint();
 
         // Deserialize JSON
+        // NOTE: serde_json 1.0.114+ has a default recursion limit of 128,
+        // protecting against stack overflow from deeply nested JSON.
         let value =
             serde_json::from_slice(&bytes).map_err(|e| JsonExtractError::DeserializeError {
                 message: e.to_string(),
@@ -1769,6 +1771,12 @@ impl FromRequest for File {
     }
 }
 
+/// Maximum boundary length per RFC 2046.
+///
+/// Boundaries can be 1-70 characters. We add a safety margin and reject
+/// anything longer to prevent memory amplification attacks.
+const MAX_MULTIPART_BOUNDARY_LEN: usize = 70;
+
 /// Parse boundary from Content-Type header.
 fn parse_multipart_boundary(content_type: &str) -> Result<String, MultipartExtractError> {
     for part in content_type.split(';') {
@@ -1780,6 +1788,16 @@ fn parse_multipart_boundary(content_type: &str) -> Result<String, MultipartExtra
             let boundary = boundary.trim_matches('"').trim_matches('\'');
             if boundary.is_empty() {
                 return Err(MultipartExtractError::MissingBoundary);
+            }
+            // RFC 2046: boundary must be 1-70 characters
+            if boundary.len() > MAX_MULTIPART_BOUNDARY_LEN {
+                return Err(MultipartExtractError::InvalidFormat {
+                    detail: format!(
+                        "boundary too long: {} chars (max {})",
+                        boundary.len(),
+                        MAX_MULTIPART_BOUNDARY_LEN
+                    ),
+                });
             }
             return Ok(boundary.to_string());
         }
@@ -1998,9 +2016,16 @@ fn parse_content_disposition_header(value: &str) -> (Option<String>, Option<Stri
 }
 
 /// Remove quotes from a parameter value.
+///
+/// Returns the string with surrounding quotes removed, or the original
+/// string if it's not quoted. Handles both single and double quotes.
 fn unquote_param(s: &str) -> String {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+    // Need at least 2 chars for valid quotes (e.g., "")
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('\'') && s.ends_with('\'')))
+    {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
@@ -2040,6 +2065,28 @@ mod multipart_tests {
             result,
             Err(MultipartExtractError::MissingBoundary)
         ));
+    }
+
+    #[test]
+    fn test_parse_boundary_too_long() {
+        // RFC 2046 limits boundary to 70 chars
+        let long_boundary = "x".repeat(100);
+        let ct = format!("multipart/form-data; boundary={long_boundary}");
+        let result = parse_multipart_boundary(&ct);
+        assert!(
+            matches!(result, Err(MultipartExtractError::InvalidFormat { .. })),
+            "Expected InvalidFormat for boundary > 70 chars"
+        );
+    }
+
+    #[test]
+    fn test_parse_boundary_max_length() {
+        // 70 chars should be OK
+        let boundary = "x".repeat(70);
+        let ct = format!("multipart/form-data; boundary={boundary}");
+        let result = parse_multipart_boundary(&ct);
+        assert!(result.is_ok(), "70-char boundary should be accepted");
+        assert_eq!(result.unwrap(), boundary);
     }
 
     #[test]
@@ -2268,6 +2315,50 @@ mod multipart_tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].filename(), "a.txt");
         assert_eq!(files[1].filename(), "b.txt");
+    }
+
+    // =========================================================================
+    // unquote_param edge case tests
+    // =========================================================================
+
+    #[test]
+    fn test_unquote_param_normal_quoted() {
+        assert_eq!(unquote_param("\"hello\""), "hello");
+        assert_eq!(unquote_param("'hello'"), "hello");
+    }
+
+    #[test]
+    fn test_unquote_param_empty_quotes() {
+        // Empty quoted string ""
+        assert_eq!(unquote_param("\"\""), "");
+        assert_eq!(unquote_param("''"), "");
+    }
+
+    #[test]
+    fn test_unquote_param_single_char_no_panic() {
+        // Single quote char should not panic, just return as-is
+        assert_eq!(unquote_param("\""), "\"");
+        assert_eq!(unquote_param("'"), "'");
+    }
+
+    #[test]
+    fn test_unquote_param_unquoted() {
+        assert_eq!(unquote_param("hello"), "hello");
+        assert_eq!(unquote_param(""), "");
+    }
+
+    #[test]
+    fn test_unquote_param_mismatched_quotes() {
+        // Mismatched quotes should not be unquoted
+        assert_eq!(unquote_param("\"hello'"), "\"hello'");
+        assert_eq!(unquote_param("'hello\""), "'hello\"");
+    }
+
+    #[test]
+    fn test_unquote_param_whitespace() {
+        // Whitespace is trimmed before quote check
+        assert_eq!(unquote_param("  \"hello\"  "), "hello");
+        assert_eq!(unquote_param("  'hello'  "), "hello");
     }
 }
 

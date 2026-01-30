@@ -237,23 +237,30 @@ impl Converter {
     }
 }
 
+/// Check if a string is a valid UUID (8-4-4-4-12 format).
+///
+/// This implementation avoids allocations by using byte-based validation.
 fn is_uuid(s: &str) -> bool {
-    // Simple UUID check: 8-4-4-4-12 hex digits
+    // UUID must be exactly 36 chars: 8-4-4-4-12 = 32 hex + 4 dashes
     if s.len() != 36 {
         return false;
     }
-    let parts: Vec<_> = s.split('-').collect();
-    if parts.len() != 5 {
+
+    let bytes = s.as_bytes();
+
+    // Check dashes at positions 8, 13, 18, 23
+    if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
         return false;
     }
-    parts[0].len() == 8
-        && parts[1].len() == 4
-        && parts[2].len() == 4
-        && parts[3].len() == 4
-        && parts[4].len() == 12
-        && parts
-            .iter()
-            .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+
+    // Check all hex digits (skip dash positions)
+    bytes.iter().enumerate().all(|(i, &b)| {
+        if i == 8 || i == 13 || i == 18 || i == 23 {
+            true // Already verified dashes
+        } else {
+            b.is_ascii_hexdigit()
+        }
+    })
 }
 
 /// Path parameter information with optional OpenAPI metadata.

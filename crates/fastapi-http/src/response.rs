@@ -105,10 +105,11 @@ impl ChunkedEncoder {
     }
 
     fn encode_chunk(chunk: &[u8]) -> Vec<u8> {
-        let size = format!("{:x}", chunk.len());
-        let mut out = Vec::with_capacity(size.len() + 2 + chunk.len() + 2);
-        out.extend_from_slice(size.as_bytes());
-        out.extend_from_slice(b"\r\n");
+        // Use std::io::Write to format hex directly into buffer without allocation.
+        // Max hex digits for usize is 16 (64-bit), so we pre-allocate conservatively.
+        use std::io::Write as _;
+        let mut out = Vec::with_capacity(20 + chunk.len() + 4);
+        write!(out, "{:x}\r\n", chunk.len()).expect("write to Vec cannot fail");
         out.extend_from_slice(chunk);
         out.extend_from_slice(b"\r\n");
         out

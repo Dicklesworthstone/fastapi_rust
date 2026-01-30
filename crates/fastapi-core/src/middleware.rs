@@ -12733,7 +12733,7 @@ mod rate_limit_tests {
         let extractor = TrustedProxyIpKeyExtractor::new().trust_loopback();
 
         let mut req = Request::new(Method::Get, "/");
-        req.insert_extension(RemoteAddr(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        req.insert_extension(RemoteAddr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         req.headers_mut()
             .insert("x-forwarded-for", b"8.8.8.8".to_vec());
 

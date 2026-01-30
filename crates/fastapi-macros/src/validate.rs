@@ -607,8 +607,8 @@ fn generate_field_validation(field: &Field, validators: &FieldValidators) -> Tok
                         }
                     }
 
-                    // Must have balanced parens and 7-15 digits
-                    paren_depth == 0 && digit_count >= 7 && digit_count <= 15
+                    // Must have balanced parens and 7-15 digits (E.164 standard)
+                    paren_depth == 0 && (7..=15).contains(&digit_count)
                 }
 
                 if !is_valid_phone(phone) {
