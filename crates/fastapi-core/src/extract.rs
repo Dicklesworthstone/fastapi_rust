@@ -12099,20 +12099,44 @@ impl DigestAuth {
     /// Extract a parameter value from the Digest credentials.
     ///
     /// Looks for `key="value"` or `key=value` in the credentials string.
+    /// The key must appear at a word boundary (start of string or after a comma).
     pub fn param(&self, key: &str) -> Option<&str> {
         let search = format!("{key}=");
-        let start = self.credentials.find(&search)?;
-        let after_eq = &self.credentials[start + search.len()..];
-        if after_eq.starts_with('"') {
-            // Quoted value
-            let inner = &after_eq[1..];
-            let end = inner.find('"')?;
-            Some(&inner[..end])
-        } else {
-            // Unquoted value
-            let end = after_eq.find(',').unwrap_or(after_eq.len());
-            Some(after_eq[..end].trim())
+        let mut search_start = 0;
+
+        // Find the key at a proper word boundary
+        while let Some(pos) = self.credentials[search_start..].find(&search) {
+            let abs_pos = search_start + pos;
+
+            // Check that we're at a word boundary: start of string, or after comma/whitespace
+            let at_boundary = if abs_pos == 0 {
+                true
+            } else {
+                // Look at the character before the match
+                let prev_char = self.credentials[..abs_pos].chars().next_back();
+                matches!(prev_char, Some(',') | Some(' ') | Some('\t'))
+            };
+
+            if at_boundary {
+                // Found a valid match at word boundary
+                let after_eq = &self.credentials[abs_pos + search.len()..];
+                if after_eq.starts_with('"') {
+                    // Quoted value
+                    let inner = &after_eq[1..];
+                    let end = inner.find('"')?;
+                    return Some(&inner[..end]);
+                } else {
+                    // Unquoted value
+                    let end = after_eq.find(',').unwrap_or(after_eq.len());
+                    return Some(after_eq[..end].trim());
+                }
+            }
+
+            // Not at boundary, continue searching after this position
+            search_start = abs_pos + 1;
         }
+
+        None
     }
 }
 
@@ -18896,6 +18920,42 @@ mod body_size_limit_tests {
         assert_eq!(auth.param("realm"), Some("test"));
         assert_eq!(auth.param("nonce"), Some("abc123"));
         assert_eq!(auth.param("nonexistent"), None);
+    }
+
+    #[test]
+    fn digest_auth_param_no_substring_match() {
+        // Regression test: param("name") should NOT match inside "username"
+        let auth = DigestAuth::new("username=\"alice\", realm=\"test\", nonce=\"abc123\"");
+
+        // "name" is a substring of "username" but should not be extracted
+        assert_eq!(auth.param("name"), None);
+
+        // "realm" should still work correctly
+        assert_eq!(auth.param("realm"), Some("test"));
+
+        // Single-char substrings should also not match incorrectly
+        assert_eq!(auth.param("e"), None); // "e" is in "username", "realm"
+        assert_eq!(auth.param("c"), None); // "c" is in "nonce"
+    }
+
+    #[test]
+    fn digest_auth_param_unquoted_values() {
+        // Some Digest parameters like qop, nc can be unquoted
+        let auth = DigestAuth::new("qop=auth, nc=00000001, cnonce=\"xyz\"");
+        assert_eq!(auth.param("qop"), Some("auth"));
+        assert_eq!(auth.param("nc"), Some("00000001"));
+        assert_eq!(auth.param("cnonce"), Some("xyz"));
+
+        // "c" should NOT match "nc=00000001"
+        assert_eq!(auth.param("c"), None);
+    }
+
+    #[test]
+    fn digest_auth_param_at_start() {
+        // Parameter at the start of the credentials string
+        let auth = DigestAuth::new("realm=\"test\", username=\"bob\"");
+        assert_eq!(auth.param("realm"), Some("test"));
+        assert_eq!(auth.param("username"), Some("bob"));
     }
 
     #[test]
