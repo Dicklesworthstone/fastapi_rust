@@ -78,21 +78,24 @@ impl ConnectionInfo {
         };
 
         for token in value_str.split(',') {
-            let token = token.trim().to_ascii_lowercase();
+            let token = token.trim();
             if token.is_empty() {
                 continue;
             }
 
-            match token.as_str() {
-                "close" => info.close = true,
-                "keep-alive" => info.keep_alive = true,
-                "upgrade" => info.upgrade = true,
-                // Any other token is a hop-by-hop header name
-                _ => {
-                    // Don't add standard hop-by-hop headers again
-                    if !STANDARD_HOP_BY_HOP_HEADERS.contains(&token.as_str()) {
-                        info.hop_by_hop_headers.push(token);
-                    }
+            // Case-insensitive match without allocation for known tokens
+            if token.eq_ignore_ascii_case("close") {
+                info.close = true;
+            } else if token.eq_ignore_ascii_case("keep-alive") {
+                info.keep_alive = true;
+            } else if token.eq_ignore_ascii_case("upgrade") {
+                info.upgrade = true;
+            } else {
+                // Only allocate for custom hop-by-hop headers (rare path)
+                let lower = token.to_ascii_lowercase();
+                // Don't add standard hop-by-hop headers again
+                if !STANDARD_HOP_BY_HOP_HEADERS.contains(&lower.as_str()) {
+                    info.hop_by_hop_headers.push(lower);
                 }
             }
         }
@@ -199,8 +202,10 @@ pub fn strip_hop_by_hop_headers(request: &mut Request) {
 /// Note: This doesn't check if it was listed in the Connection header.
 #[must_use]
 pub fn is_standard_hop_by_hop_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    STANDARD_HOP_BY_HOP_HEADERS.contains(&lower.as_str())
+    // Case-insensitive comparison without allocation
+    STANDARD_HOP_BY_HOP_HEADERS
+        .iter()
+        .any(|&h| name.eq_ignore_ascii_case(h))
 }
 
 #[cfg(test)]
