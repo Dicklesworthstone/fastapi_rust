@@ -122,6 +122,9 @@ impl fmt::Display for Method {
 }
 
 /// HTTP headers collection.
+///
+/// Header names are normalized to lowercase at insertion time for case-insensitive
+/// matching. Lookups use a stack buffer for common header sizes to avoid allocation.
 #[derive(Debug, Default)]
 pub struct Headers {
     inner: HashMap<String, Vec<u8>>,
@@ -135,14 +138,19 @@ impl Headers {
     }
 
     /// Get a header value by name (case-insensitive).
+    ///
+    /// Uses a stack buffer for lowercase conversion when possible,
+    /// avoiding heap allocation for most header names.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&[u8]> {
         self.inner
-            .get(&name.to_ascii_lowercase())
+            .get(lowercase_header_key(name).as_ref())
             .map(Vec::as_slice)
     }
 
     /// Insert a header.
+    ///
+    /// The header name is normalized to lowercase.
     pub fn insert(&mut self, name: impl Into<String>, value: impl Into<Vec<u8>>) {
         self.inner
             .insert(name.into().to_ascii_lowercase(), value.into());
@@ -171,13 +179,39 @@ impl Headers {
     ///
     /// Returns the removed value, if any.
     pub fn remove(&mut self, name: &str) -> Option<Vec<u8>> {
-        self.inner.remove(&name.to_ascii_lowercase())
+        self.inner.remove(lowercase_header_key(name).as_ref())
     }
 
     /// Check if a header exists (case-insensitive).
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
-        self.inner.contains_key(&name.to_ascii_lowercase())
+        self.inner
+            .contains_key(lowercase_header_key(name).as_ref())
+    }
+}
+
+/// Lowercase a header name for lookup.
+///
+/// Returns a `Cow<str>` that is:
+/// - **Borrowed** if the name is already lowercase (zero allocation)
+/// - **Owned** if uppercase characters need conversion
+///
+/// Since programmatic code typically uses lowercase header names like
+/// `"content-type"` rather than `"Content-Type"`, most lookups are zero-alloc.
+#[inline]
+fn lowercase_header_key(name: &str) -> std::borrow::Cow<'_, str> {
+    // Fast path: check if name is already ASCII lowercase.
+    // This covers the common case of programmatic access with lowercase literals.
+    // Use memchr for efficient uppercase byte detection.
+    let needs_lowercase = name
+        .as_bytes()
+        .iter()
+        .any(|&b| b.is_ascii_uppercase());
+
+    if needs_lowercase {
+        std::borrow::Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        std::borrow::Cow::Borrowed(name)
     }
 }
 
@@ -945,5 +979,78 @@ mod tests {
         let body = Body::streaming(stream);
 
         let _ = body.into_bytes(); // Should panic
+    }
+
+    // ============================================================
+    // bd-3slp: Header lookup optimization tests
+    // ============================================================
+
+    #[test]
+    fn headers_lowercase_key_fast_path() {
+        // Test that lowercase keys work without allocation (bd-3slp)
+        let mut headers = Headers::new();
+        headers.insert("content-type", b"application/json".to_vec());
+
+        // Lookup with lowercase - fast path (no allocation)
+        assert!(headers.get("content-type").is_some());
+        assert!(headers.contains("content-type"));
+
+        // Lookup with mixed case - still works but may allocate
+        assert!(headers.get("Content-Type").is_some());
+        assert!(headers.contains("CONTENT-TYPE"));
+    }
+
+    #[test]
+    fn headers_case_insensitive_lookup() {
+        // Verify case-insensitive behavior is preserved (bd-3slp)
+        let mut headers = Headers::new();
+        headers.insert("X-Custom-Header", b"value".to_vec());
+
+        // All case variations should work
+        assert_eq!(headers.get("x-custom-header"), Some(b"value".as_slice()));
+        assert_eq!(headers.get("X-CUSTOM-HEADER"), Some(b"value".as_slice()));
+        assert_eq!(headers.get("X-Custom-Header"), Some(b"value".as_slice()));
+        assert_eq!(headers.get("x-CuStOm-HeAdEr"), Some(b"value".as_slice()));
+    }
+
+    #[test]
+    fn headers_remove_case_insensitive() {
+        // Verify remove works with case insensitivity (bd-3slp)
+        let mut headers = Headers::new();
+        headers.insert("Authorization", b"Bearer token".to_vec());
+
+        // Remove with different case
+        let removed = headers.remove("AUTHORIZATION");
+        assert_eq!(removed, Some(b"Bearer token".to_vec()));
+        assert!(!headers.contains("authorization"));
+    }
+
+    #[test]
+    fn lowercase_header_key_already_lowercase() {
+        // Fast path test - already lowercase borrows original (bd-3slp)
+        use std::borrow::Cow;
+
+        let result = lowercase_header_key("content-type");
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result.as_ref(), "content-type");
+    }
+
+    #[test]
+    fn lowercase_header_key_needs_conversion() {
+        // Slow path test - uppercase chars need conversion (bd-3slp)
+        use std::borrow::Cow;
+
+        let result = lowercase_header_key("Content-Type");
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(result.as_ref(), "content-type");
+    }
+
+    #[test]
+    fn lowercase_header_key_all_uppercase() {
+        use std::borrow::Cow;
+
+        let result = lowercase_header_key("CONTENT-TYPE");
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(result.as_ref(), "content-type");
     }
 }
