@@ -6,9 +6,9 @@
 use crate::mode::OutputMode;
 use crate::testing::{OutputEntry, OutputLevel, TestOutput};
 use crate::themes::FastApiTheme;
+use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::sync::LazyLock;
-use parking_lot::RwLock;
 use std::time::Instant;
 
 const ANSI_RESET: &str = "\x1b[0m";

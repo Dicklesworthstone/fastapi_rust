@@ -46,11 +46,11 @@
 //! cargo llvm-cov --fail-under-lines 80
 //! ```
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 use crate::request::Method;
 

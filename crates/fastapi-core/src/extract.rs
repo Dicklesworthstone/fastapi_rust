@@ -2023,8 +2023,7 @@ fn unquote_param(s: &str) -> String {
     let s = s.trim();
     // Need at least 2 chars for valid quotes (e.g., "")
     if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\'')))
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
     {
         s[1..s.len() - 1].to_string()
     } else {
@@ -13177,8 +13176,10 @@ impl AcceptHeader {
                 return q_cmp;
             }
             // More specific types first (fewer wildcards)
-            let a_wildcards = u8::from(a.media_type.typ == "*") + u8::from(a.media_type.subtype == "*");
-            let b_wildcards = u8::from(b.media_type.typ == "*") + u8::from(b.media_type.subtype == "*");
+            let a_wildcards =
+                u8::from(a.media_type.typ == "*") + u8::from(a.media_type.subtype == "*");
+            let b_wildcards =
+                u8::from(b.media_type.typ == "*") + u8::from(b.media_type.subtype == "*");
             a_wildcards.cmp(&b_wildcards)
         });
 
@@ -13554,7 +13555,8 @@ impl AcceptLanguageHeader {
                     match best {
                         None => best = Some((lang, item.quality, exact)),
                         Some((_, q, e))
-                            if item.quality > q || ((item.quality - q).abs() < f32::EPSILON && exact && !e) =>
+                            if item.quality > q
+                                || ((item.quality - q).abs() < f32::EPSILON && exact && !e) =>
                         {
                             best = Some((lang, item.quality, exact));
                         }
@@ -18969,7 +18971,8 @@ mod body_size_limit_tests {
     fn digest_auth_wrong_scheme() {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/protected");
-        req.headers_mut().insert("authorization", b"Bearer token123".to_vec());
+        req.headers_mut()
+            .insert("authorization", b"Bearer token123".to_vec());
         let result = futures_executor::block_on(DigestAuth::from_request(&ctx, &mut req));
         assert!(matches!(result, Err(DigestAuthError::InvalidScheme)));
     }
@@ -18989,7 +18992,8 @@ mod body_size_limit_tests {
     fn digest_auth_case_insensitive() {
         let ctx = test_context();
         let mut req = Request::new(Method::Get, "/protected");
-        req.headers_mut().insert("authorization", b"digest username=\"bob\"".to_vec());
+        req.headers_mut()
+            .insert("authorization", b"digest username=\"bob\"".to_vec());
         let result = futures_executor::block_on(DigestAuth::from_request(&ctx, &mut req));
         assert!(result.is_ok());
     }

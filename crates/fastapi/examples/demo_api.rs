@@ -135,7 +135,11 @@ fn list_users(page: u64, per_page: u64) -> PaginatedResponse<User> {
     #[allow(clippy::cast_possible_truncation)]
     let start = ((page - 1) * per_page) as usize;
     #[allow(clippy::cast_possible_truncation)]
-    let items: Vec<User> = all_users.into_iter().skip(start).take(per_page as usize).collect();
+    let items: Vec<User> = all_users
+        .into_iter()
+        .skip(start)
+        .take(per_page as usize)
+        .collect();
 
     PaginatedResponse {
         items,
@@ -220,7 +224,10 @@ fn print_demo_info() {
     println!("  Name:           {}", config.name);
     println!("  Version:        {}", config.version);
     println!("  Debug:          {}", config.debug);
-    println!("  Max body size:  {} MB", config.max_body_size / (1024 * 1024));
+    println!(
+        "  Max body size:  {} MB",
+        config.max_body_size / (1024 * 1024)
+    );
     println!("  Timeout:        {}ms", config.request_timeout_ms);
     println!();
     println!("CORS: allow_any_origin=true, allow_credentials=true");

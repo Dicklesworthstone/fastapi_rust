@@ -184,8 +184,7 @@ impl Headers {
     /// Check if a header exists (case-insensitive).
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
-        self.inner
-            .contains_key(lowercase_header_key(name).as_ref())
+        self.inner.contains_key(lowercase_header_key(name).as_ref())
     }
 }
 
@@ -201,10 +200,7 @@ impl Headers {
 fn lowercase_header_key(name: &str) -> std::borrow::Cow<'_, str> {
     // Fast path: check if name is already ASCII lowercase.
     // This covers the common case of programmatic access with lowercase literals.
-    let needs_lowercase = name
-        .as_bytes()
-        .iter()
-        .any(|&b| b.is_ascii_uppercase());
+    let needs_lowercase = name.as_bytes().iter().any(|&b| b.is_ascii_uppercase());
 
     if needs_lowercase {
         std::borrow::Cow::Owned(name.to_ascii_lowercase())

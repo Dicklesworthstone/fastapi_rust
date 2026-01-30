@@ -1726,13 +1726,7 @@ impl LinkHeader {
     /// Generates `first`, `last`, `next`, `prev`, and `self` links
     /// using the given base URL and query parameters.
     #[must_use]
-    pub fn paginate(
-        self,
-        base_url: &str,
-        page: u64,
-        per_page: u64,
-        total: u64,
-    ) -> Self {
+    pub fn paginate(self, base_url: &str, page: u64, per_page: u64, total: u64) -> Self {
         let last_page = if total == 0 {
             1
         } else {

@@ -38,6 +38,7 @@ use crate::extract::FromRequest;
 use crate::request::Request;
 use crate::response::{IntoResponse, Response, ResponseBody, StatusCode};
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
@@ -45,7 +46,6 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Dependency resolution scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

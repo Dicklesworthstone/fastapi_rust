@@ -56,11 +56,11 @@ pub mod app;
 pub mod bench;
 mod context;
 pub mod coverage;
-pub mod fault;
 mod dependency;
 pub mod docs;
 pub mod error;
 mod extract;
+pub mod fault;
 pub mod fixtures;
 pub mod health;
 pub mod loadtest;
@@ -95,25 +95,25 @@ pub use error::{
 pub use extract::{
     Accept, AcceptEncodingHeader, AcceptEncodingItem, AcceptHeader, AcceptItem,
     AcceptLanguageHeader, AcceptLanguageItem, ApiKeyCookie, ApiKeyCookieConfig, ApiKeyCookieError,
-    DigestAuth, DigestAuthError,
     ApiKeyHeader, ApiKeyHeaderConfig, ApiKeyHeaderError, ApiKeyQuery, ApiKeyQueryConfig,
     ApiKeyQueryError, AppState, Authorization, BackgroundTasks, BackgroundTasksInner, BasicAuth,
     BasicAuthError, BearerToken, BearerTokenError, Bytes, ContentType, Cookie, CookieExtractError,
     CookieName, CookiePrefix, CookiePrefixError, CsrfTokenCookie, DEFAULT_API_KEY_COOKIE,
     DEFAULT_API_KEY_HEADER, DEFAULT_API_KEY_QUERY_PARAM, DEFAULT_FORM_LIMIT, DEFAULT_JSON_LIMIT,
     DEFAULT_MULTIPART_FILE_SIZE, DEFAULT_MULTIPART_MAX_FIELDS, DEFAULT_MULTIPART_TOTAL_SIZE,
-    DEFAULT_PAGE, DEFAULT_PER_PAGE, DEFAULT_RAW_BODY_LIMIT, File, FileConfig, Form, FormConfig,
-    FormExtractError, FromHeaderValue, FromRequest, Header, HeaderExtractError, HeaderName,
-    HeaderValues, Host, Json, JsonConfig, JsonExtractError, MAX_PER_PAGE, MediaType, Multipart,
-    MultipartConfig, MultipartExtractError, MultipartPart, NamedHeader, NotAcceptableError,
-    OAuth2AuthorizationCodeBearer, OAuth2AuthorizationCodeBearerConfig, OAuth2BearerError,
-    OAuth2BearerErrorKind, OAuth2PasswordBearer, OAuth2PasswordBearerConfig,
-    OAuth2PasswordFormError, OAuth2PasswordRequestForm, OAuth2PasswordRequestFormStrict, Page,
-    Pagination, PaginationConfig, Path, PathExtractError, PathParams, Query, QueryExtractError,
-    QueryParams, RawBodyConfig, RawBodyError, RequestCookie, RequestCookies, RequestRef,
-    ResponseMut, ResponseMutations, SameSite, SecureCompare, SecurityScopes, SecurityScopesError,
-    SessionIdCookie, State, StateExtractError, StringBody, UploadedFile, UserAgent, VaryBuilder,
-    XRequestId, constant_time_eq, constant_time_str_eq, snake_to_header_case,
+    DEFAULT_PAGE, DEFAULT_PER_PAGE, DEFAULT_RAW_BODY_LIMIT, DigestAuth, DigestAuthError, File,
+    FileConfig, Form, FormConfig, FormExtractError, FromHeaderValue, FromRequest, Header,
+    HeaderExtractError, HeaderName, HeaderValues, Host, Json, JsonConfig, JsonExtractError,
+    MAX_PER_PAGE, MediaType, Multipart, MultipartConfig, MultipartExtractError, MultipartPart,
+    NamedHeader, NotAcceptableError, OAuth2AuthorizationCodeBearer,
+    OAuth2AuthorizationCodeBearerConfig, OAuth2BearerError, OAuth2BearerErrorKind,
+    OAuth2PasswordBearer, OAuth2PasswordBearerConfig, OAuth2PasswordFormError,
+    OAuth2PasswordRequestForm, OAuth2PasswordRequestFormStrict, Page, Pagination, PaginationConfig,
+    Path, PathExtractError, PathParams, Query, QueryExtractError, QueryParams, RawBodyConfig,
+    RawBodyError, RequestCookie, RequestCookies, RequestRef, ResponseMut, ResponseMutations,
+    SameSite, SecureCompare, SecurityScopes, SecurityScopesError, SessionIdCookie, State,
+    StateExtractError, StringBody, UploadedFile, UserAgent, VaryBuilder, XRequestId,
+    constant_time_eq, constant_time_str_eq, snake_to_header_case,
 };
 pub use middleware::{
     AddResponseHeader, BoxFuture, CompositeKeyExtractor, ConditionalInterceptor, ControlFlow, Cors,
@@ -140,8 +140,8 @@ pub use request::{
     Body, Headers, HttpVersion, Method, Request, RequestBodyStream, RequestBodyStreamError,
 };
 pub use response::{
-    Binary, BinaryWithType, BodyStream, FileResponse, Html, IntoResponse, Link, LinkHeader, LinkRel,
-    NoContent, Redirect, Response, ResponseBody, ResponseModel, ResponseModelConfig,
+    Binary, BinaryWithType, BodyStream, FileResponse, Html, IntoResponse, Link, LinkHeader,
+    LinkRel, NoContent, Redirect, Response, ResponseBody, ResponseModel, ResponseModelConfig,
     ResponseProduces, StatusCode, Text, ValidatedResponse, apply_conditional, check_if_match,
     check_if_none_match, exclude_fields, include_fields, mime_type_for_extension,
 };

@@ -788,7 +788,10 @@ impl TcpServer {
             active_connections: self.connection_counter.load(Ordering::Relaxed),
             total_accepted: self.metrics_counters.total_accepted.load(Ordering::Relaxed),
             total_rejected: self.metrics_counters.total_rejected.load(Ordering::Relaxed),
-            total_timed_out: self.metrics_counters.total_timed_out.load(Ordering::Relaxed),
+            total_timed_out: self
+                .metrics_counters
+                .total_timed_out
+                .load(Ordering::Relaxed),
             total_requests: self.request_counter.load(Ordering::Relaxed),
             bytes_in: self.metrics_counters.bytes_in.load(Ordering::Relaxed),
             bytes_out: self.metrics_counters.bytes_out.load(Ordering::Relaxed),
@@ -797,12 +800,16 @@ impl TcpServer {
 
     /// Records bytes read from a client.
     fn record_bytes_in(&self, n: u64) {
-        self.metrics_counters.bytes_in.fetch_add(n, Ordering::Relaxed);
+        self.metrics_counters
+            .bytes_in
+            .fetch_add(n, Ordering::Relaxed);
     }
 
     /// Records bytes written to a client.
     fn record_bytes_out(&self, n: u64) {
-        self.metrics_counters.bytes_out.fetch_add(n, Ordering::Relaxed);
+        self.metrics_counters
+            .bytes_out
+            .fetch_add(n, Ordering::Relaxed);
     }
 
     /// Attempts to acquire a connection slot.
@@ -814,7 +821,9 @@ impl TcpServer {
         if max == 0 {
             // Unlimited connections
             self.connection_counter.fetch_add(1, Ordering::Relaxed);
-            self.metrics_counters.total_accepted.fetch_add(1, Ordering::Relaxed);
+            self.metrics_counters
+                .total_accepted
+                .fetch_add(1, Ordering::Relaxed);
             return true;
         }
 
@@ -822,7 +831,9 @@ impl TcpServer {
         let mut current = self.connection_counter.load(Ordering::Relaxed);
         loop {
             if current >= max as u64 {
-                self.metrics_counters.total_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics_counters
+                    .total_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 return false;
             }
             match self.connection_counter.compare_exchange_weak(
@@ -832,7 +843,9 @@ impl TcpServer {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.metrics_counters.total_accepted.fetch_add(1, Ordering::Relaxed);
+                    self.metrics_counters
+                        .total_accepted
+                        .fetch_add(1, Ordering::Relaxed);
                     return true;
                 }
                 Err(actual) => current = actual,
@@ -1520,7 +1533,9 @@ impl TcpServer {
                             Ok(0) => return Ok(()),
                             Ok(n) => n,
                             Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                                self.metrics_counters.total_timed_out.fetch_add(1, Ordering::Relaxed);
+                                self.metrics_counters
+                                    .total_timed_out
+                                    .fetch_add(1, Ordering::Relaxed);
                                 return Err(ServerError::KeepAliveTimeout);
                             }
                             Err(e) => return Err(ServerError::Io(e)),

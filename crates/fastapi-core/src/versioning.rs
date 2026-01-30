@@ -58,7 +58,9 @@ impl ApiVersion {
             let part = part.trim();
             // Find v<N> in the media type
             for segment in part.split('.') {
-                if let Some(num_str) = segment.strip_prefix('v').or_else(|| segment.strip_prefix('V'))
+                if let Some(num_str) = segment
+                    .strip_prefix('v')
+                    .or_else(|| segment.strip_prefix('V'))
                 {
                     // Take only digits before any '+' suffix
                     let digits: String = num_str.chars().take_while(char::is_ascii_digit).collect();
@@ -247,10 +249,7 @@ mod tests {
             ApiVersion::from_accept_header("application/vnd.api.v3+json; charset=utf-8"),
             Some(ApiVersion(3))
         );
-        assert_eq!(
-            ApiVersion::from_accept_header("application/json"),
-            None
-        );
+        assert_eq!(ApiVersion::from_accept_header("application/json"), None);
     }
 
     #[test]

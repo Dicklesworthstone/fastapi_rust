@@ -130,7 +130,11 @@ impl LoadTestReport {
         if self.latencies.is_empty() {
             return None;
         }
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let idx = ((p * self.latencies.len() as f64) as usize).min(self.latencies.len() - 1);
         Some(self.latencies[idx])
     }
@@ -162,8 +166,18 @@ impl fmt::Display for LoadTestReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Load Test Report")?;
         writeln!(f, "  Total:    {}", self.total)?;
-        writeln!(f, "  Success:  {} ({:.1}%)", self.successes, self.success_rate() * 100.0)?;
-        writeln!(f, "  Failures: {} ({:.1}%)", self.failures, self.error_rate() * 100.0)?;
+        writeln!(
+            f,
+            "  Success:  {} ({:.1}%)",
+            self.successes,
+            self.success_rate() * 100.0
+        )?;
+        writeln!(
+            f,
+            "  Failures: {} ({:.1}%)",
+            self.failures,
+            self.error_rate() * 100.0
+        )?;
         writeln!(f, "  Elapsed:  {:.2?}", self.elapsed)?;
         writeln!(f, "  RPS:      {:.1}", self.rps())?;
         if let Some(p50) = self.percentile(0.50) {

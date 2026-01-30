@@ -2080,7 +2080,6 @@ impl CsrfToken {
         }
         s
     }
-
 }
 
 impl std::fmt::Display for CsrfToken {
@@ -2748,8 +2747,8 @@ impl Middleware for CompressionMiddleware {
 // Rate Limiting Middleware
 // ---------------------------------------------------------------------------
 
-use std::collections::HashMap as StdHashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap as StdHashMap;
 use std::time::Duration;
 
 /// Rate limiting algorithm.
@@ -2838,8 +2837,7 @@ pub struct ConnectedIpKeyExtractor;
 
 impl KeyExtractor for ConnectedIpKeyExtractor {
     fn extract_key(&self, req: &Request) -> Option<String> {
-        req.get_extension::<RemoteAddr>()
-            .map(ToString::to_string)
+        req.get_extension::<RemoteAddr>().map(ToString::to_string)
     }
 }
 
@@ -2958,10 +2956,8 @@ impl TrustedProxyIpKeyExtractor {
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 0)),
             8,
         ));
-        self.trusted_cidrs.push((
-            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-            128,
-        ));
+        self.trusted_cidrs
+            .push((std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 128));
         self
     }
 
@@ -3172,9 +3168,7 @@ impl InMemoryRateLimitStore {
         refill_rate: f64,
         window: Duration,
     ) -> RateLimitResult {
-        let mut buckets = self
-            .token_buckets
-            .lock();
+        let mut buckets = self.token_buckets.lock();
         let now = Instant::now();
 
         let state = buckets
@@ -3219,9 +3213,7 @@ impl InMemoryRateLimitStore {
         max_requests: u64,
         window: Duration,
     ) -> RateLimitResult {
-        let mut windows = self
-            .fixed_windows
-            .lock();
+        let mut windows = self.fixed_windows.lock();
         let now = Instant::now();
 
         let state = windows
@@ -3267,9 +3259,7 @@ impl InMemoryRateLimitStore {
         max_requests: u64,
         window: Duration,
     ) -> RateLimitResult {
-        let mut windows = self
-            .sliding_windows
-            .lock();
+        let mut windows = self.sliding_windows.lock();
         let now = Instant::now();
 
         let state = windows
@@ -7044,7 +7034,9 @@ impl TimingHistogram {
             0.0
         } else {
             #[allow(clippy::cast_precision_loss)]
-            { self.sum / self.count as f64 }
+            {
+                self.sum / self.count as f64
+            }
         }
     }
 

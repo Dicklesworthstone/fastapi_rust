@@ -42,10 +42,10 @@
 //! // Same seed = same execution order for concurrent operations
 //! ```
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 use asupersync::Cx;
 
@@ -3363,11 +3363,7 @@ impl MockServer {
                             }
                         }
                     }
-                    matched.unwrap_or_else(|| {
-                        default_response
-                            .lock()
-                            .clone()
-                    })
+                    matched.unwrap_or_else(|| default_response.lock().clone())
                 }
             }
         };
@@ -3499,9 +3495,7 @@ impl MockServer {
 
     /// Sets the default response for unmatched paths.
     pub fn set_default_response(&self, response: MockResponse) {
-        let mut default = self
-            .default_response
-            .lock();
+        let mut default = self.default_response.lock();
         *default = response;
     }
 
@@ -4145,24 +4139,18 @@ impl TestServer {
     /// Returns a snapshot of all log entries recorded so far.
     #[must_use]
     pub fn log_entries(&self) -> Vec<TestServerLogEntry> {
-        self.log_entries
-            .lock()
-                        .clone()
+        self.log_entries.lock().clone()
     }
 
     /// Returns the number of requests processed.
     #[must_use]
     pub fn request_count(&self) -> usize {
-        self.log_entries
-            .lock()
-                        .len()
+        self.log_entries.lock().len()
     }
 
     /// Clears all recorded log entries.
     pub fn clear_logs(&self) {
-        self.log_entries
-            .lock()
-                        .clear();
+        self.log_entries.lock().clear();
     }
 
     /// Sends a 503 Service Unavailable response during shutdown.
@@ -5075,10 +5063,7 @@ impl TestLogger {
     /// Checks if any log contains the given message substring.
     #[must_use]
     pub fn contains_message(&self, text: &str) -> bool {
-        self.logs
-            .lock()
-                        .iter()
-            .any(|log| log.contains(text))
+        self.logs.lock().iter().any(|log| log.contains(text))
     }
 
     /// Counts logs by level.
@@ -5086,7 +5071,7 @@ impl TestLogger {
     pub fn count_by_level(&self, level: LogLevel) -> usize {
         self.logs
             .lock()
-                        .iter()
+            .iter()
             .filter(|log| log.level == level)
             .count()
     }
@@ -5096,7 +5081,7 @@ impl TestLogger {
     pub fn logs_at_level(&self, level: LogLevel) -> Vec<CapturedLog> {
         self.logs
             .lock()
-                        .iter()
+            .iter()
             .filter(|log| log.level == level)
             .cloned()
             .collect()
@@ -5128,30 +5113,22 @@ impl TestLogger {
 
     /// Starts timing a phase.
     pub fn start_phase(&self) {
-        self.timings
-            .lock()
-                        .start_phase();
+        self.timings.lock().start_phase();
     }
 
     /// Marks end of setup phase.
     pub fn end_setup(&self) {
-        self.timings
-            .lock()
-                        .end_setup();
+        self.timings.lock().end_setup();
     }
 
     /// Marks end of execute phase.
     pub fn end_execute(&self) {
-        self.timings
-            .lock()
-                        .end_execute();
+        self.timings.lock().end_execute();
     }
 
     /// Marks end of teardown phase.
     pub fn end_teardown(&self) {
-        self.timings
-            .lock()
-                        .end_teardown();
+        self.timings.lock().end_teardown();
     }
 
     /// Runs a closure with log capture, returning a LogCapture result.
@@ -5587,8 +5564,7 @@ impl ResponseSnapshot {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 

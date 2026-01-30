@@ -690,10 +690,10 @@ impl OpenApiDisplay {
 
             let path = truncate_str(&endpoint.path, path_width);
 
-            let summary_text = endpoint.summary.as_ref().map_or_else(
-                || "-".to_string(),
-                |s| truncate_str(s, summary_width),
-            );
+            let summary_text = endpoint
+                .summary
+                .as_ref()
+                .map_or_else(|| "-".to_string(), |s| truncate_str(s, summary_width));
 
             // Build indicators
             let mut indicators = Vec::new();
