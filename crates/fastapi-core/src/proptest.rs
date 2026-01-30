@@ -3,6 +3,10 @@
 //! This module provides proptest strategies and helpers for generating arbitrary
 //! HTTP requests, enabling comprehensive fuzz testing of handlers.
 //!
+// Allow explicit `as` casts for boundary value testing - these are intentionally
+// demonstrating type boundary conversions rather than normal code.
+#![allow(clippy::cast_lossless)]
+//!
 //! # Features
 //!
 //! - **Arbitrary HTTP requests**: Generate random valid and invalid requests
@@ -338,7 +342,7 @@ pub fn valid_json() -> impl Strategy<Value = Vec<u8>> {
         proptest::collection::vec(-100i64..100, 0..10).prop_map(|nums| format!(
             "[{}]",
             nums.iter()
-                .map(|n| n.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         )
