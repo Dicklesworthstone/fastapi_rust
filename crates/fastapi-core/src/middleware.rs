@@ -2045,18 +2045,23 @@ impl CsrfToken {
 
     /// Generates a new unique CSRF token using cryptographic randomness.
     ///
-    /// Uses `/dev/urandom` for secure random bytes. Falls back to mixing
-    /// timestamp, counter, thread-id, and PID through SHA-256 if
-    /// `/dev/urandom` is unavailable.
+    /// Uses `/dev/urandom` for secure random bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `/dev/urandom` is unavailable. CSRF tokens MUST be
+    /// cryptographically unpredictable - there is no safe fallback.
     #[must_use]
     pub fn generate() -> Self {
-        // Try cryptographic randomness first
-        if let Ok(bytes) = Self::read_urandom(32) {
-            return Self(Self::bytes_to_hex(&bytes));
-        }
-
-        // Fallback: mix multiple entropy sources through a hash
-        Self::generate_fallback()
+        // CSRF tokens must be cryptographically secure - no weak fallback
+        let bytes = Self::read_urandom(32).unwrap_or_else(|_| {
+            panic!(
+                "FATAL: Cryptographically secure random source (/dev/urandom) is unavailable. \
+                 CSRF token generation requires a CSPRNG. Cannot safely generate CSRF tokens \
+                 without cryptographic entropy."
+            );
+        });
+        Self(Self::bytes_to_hex(&bytes))
     }
 
     fn read_urandom(len: usize) -> std::io::Result<Vec<u8>> {
@@ -2076,52 +2081,6 @@ impl CsrfToken {
         s
     }
 
-    fn generate_fallback() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let thread_id = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            std::thread::current().id().hash(&mut hasher);
-            hasher.finish()
-        };
-
-        // Mix all entropy through multiple rounds to avoid predictability
-        let mut data = Vec::with_capacity(40);
-        data.extend_from_slice(&timestamp.to_le_bytes());
-        data.extend_from_slice(&counter.to_le_bytes());
-        data.extend_from_slice(&pid.to_le_bytes());
-        data.extend_from_slice(&thread_id.to_le_bytes());
-        // Use the password module's SHA-256 via a simple FNV mix + format
-        // to avoid exposing raw predictable values
-        let mixed = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for &b in &data {
-                h ^= u64::from(b);
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h
-        };
-        let mixed2 = {
-            let mut h: u64 = 0x517cc1b727220a95;
-            for &b in &data {
-                h ^= u64::from(b);
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h
-        };
-
-        Self(format!("{mixed:016x}{mixed2:016x}{timestamp:016x}{counter:08x}"))
-    }
 }
 
 impl std::fmt::Display for CsrfToken {
