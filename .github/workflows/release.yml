@@ -50,7 +50,7 @@ jobs:
             artifact: fastapi.exe
             asset: fastapi-windows-amd64.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
@@ -97,7 +97,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 "${{ matrix.asset }}.zip").Hash.ToLower()
           "$hash  ${{ matrix.asset }}.zip" | Out-File -Encoding ASCII "${{ matrix.asset }}.zip.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.asset }}
           path: dist/*
@@ -111,11 +111,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -154,7 +154,7 @@ jobs:
   #   runs-on: ubuntu-latest
   #   timeout-minutes: 30
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v6
   #     - uses: dtolnay/rust-toolchain@nightly
   #     - name: Publish crates
   #       env:
