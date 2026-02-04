@@ -10,7 +10,7 @@
 
 *A Rust port inspired by [tiangolo/fastapi](https://github.com/tiangolo/fastapi) (Python), extended with [asupersync](https://github.com/Dicklesworthstone/asupersync) for structured concurrency, zero-copy parsing, and deterministic testing.*
 
-[![License: MIT](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-early%20development-yellow.svg)]()
 
@@ -197,8 +197,8 @@ Response Sent (only after region quiescent)
 
 ```toml
 [dependencies]
-fastapi = { git = "https://github.com/Dicklesworthstone/fastapi_rust.git" }
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync.git" }
+fastapi = "0.1.0"
+asupersync = "0.1.0"
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -730,12 +730,7 @@ Please don't take this the wrong way, but I do not accept outside contributions 
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+MIT license. See [LICENSE](LICENSE).
 
 ---
 

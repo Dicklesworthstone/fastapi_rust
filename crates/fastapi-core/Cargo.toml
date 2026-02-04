@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/fastapi-core"
+readme = "../../README.md"
+keywords = ["fastapi", "web", "framework", "http", "core"]
+categories = ["web-programming", "web-programming::http-server", "asynchronous"]
 
 [dependencies]
 asupersync = { workspace = true }
@@ -35,7 +41,7 @@ compression = ["dep:flate2"]
 proptest = ["dep:proptest"]
 
 [dev-dependencies]
-fastapi-macros = { path = "../fastapi-macros" }
+fastapi-macros = { workspace = true }
 regex = "1"
 serial_test = "2"
 

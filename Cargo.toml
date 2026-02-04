@@ -13,25 +13,27 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 rust-version = "1.85"
+repository = "https://github.com/Dicklesworthstone/fastapi_rust"
+homepage = "https://github.com/Dicklesworthstone/fastapi_rust"
 
 [workspace.dependencies]
-# Runtime (our own) - uses git for CI; override with path in .cargo/config.toml for local dev
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync.git" }
+# Runtime (our own) - override with path in .cargo/config.toml for local dev
+asupersync = "0.1.0"
 
 # Serialization (only these)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Internal crates
-fastapi = { path = "crates/fastapi" }
-fastapi-core = { path = "crates/fastapi-core" }
-fastapi-http = { path = "crates/fastapi-http" }
-fastapi-router = { path = "crates/fastapi-router" }
-fastapi-macros = { path = "crates/fastapi-macros" }
-fastapi-openapi = { path = "crates/fastapi-openapi" }
-fastapi-output = { path = "crates/fastapi-output" }
+fastapi = { path = "crates/fastapi", version = "0.1.0" }
+fastapi-core = { path = "crates/fastapi-core", version = "0.1.0" }
+fastapi-http = { path = "crates/fastapi-http", version = "0.1.0" }
+fastapi-router = { path = "crates/fastapi-router", version = "0.1.0" }
+fastapi-macros = { path = "crates/fastapi-macros", version = "0.1.0" }
+fastapi-openapi = { path = "crates/fastapi-openapi", version = "0.1.0" }
+fastapi-output = { path = "crates/fastapi-output", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/fastapi"
+readme = "../../README.md"
+keywords = ["fastapi", "web", "framework", "http", "async"]
+categories = ["web-programming", "web-programming::http-server", "asynchronous"]
 
 [dependencies]
 fastapi-core = { workspace = true }

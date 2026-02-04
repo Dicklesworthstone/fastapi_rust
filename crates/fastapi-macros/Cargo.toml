@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/fastapi-macros"
+readme = "../../README.md"
+keywords = ["fastapi", "proc-macro", "routing", "openapi", "validation"]
+categories = ["development-tools::procedural-macro-helpers", "web-programming"]
 
 [lib]
 proc-macro = true

@@ -13,6 +13,13 @@
 //! - Query string parsing with percent-decoding
 //! - Streaming response support
 //!
+//! # Role In The System
+//!
+//! `fastapi-http` is the protocol boundary. It parses HTTP/1.1 bytes into the
+//! `fastapi-core` request/response model, manages body streaming, and provides
+//! the TCP server scaffolding used by `App::serve`. Higher-level crates build on
+//! this layer without needing to care about socket I/O details.
+//!
 //! # Example
 //!
 //! ```ignore

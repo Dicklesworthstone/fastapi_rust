@@ -8,6 +8,13 @@
 //! - **First-class async** — Built on asupersync for structured concurrency
 //! - **Minimal dependencies** — Only asupersync + serde
 //!
+//! # Role In The System
+//!
+//! `fastapi` is the user-facing facade crate. It re-exports the framework's
+//! core types, macros, and utilities from the sub-crates so applications only
+//! need a single dependency. All real behavior lives in the sub-crates listed
+//! below; this crate exists to provide a cohesive, ergonomic API surface.
+//!
 //! # Quick Start
 //!
 //! ```ignore

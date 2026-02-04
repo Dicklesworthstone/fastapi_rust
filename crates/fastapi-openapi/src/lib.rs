@@ -6,6 +6,13 @@
 //! - JSON Schema types
 //! - `JsonSchema` trait for compile-time schema generation
 //!
+//! # Role In The System
+//!
+//! `fastapi-openapi` owns the OpenAPI 3.1 and JSON Schema data model. It is
+//! fed by metadata emitted from `fastapi-macros` and by runtime route info from
+//! `fastapi-core`/`fastapi-router`. The resulting spec is then exposed through
+//! the `fastapi` facade so applications can serve or export documentation.
+//!
 //! # Example
 //!
 //! ```ignore

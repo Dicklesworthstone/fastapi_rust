@@ -4,6 +4,14 @@
 //! detects whether it's running in an AI agent environment and switches
 //! to plain text mode accordingly.
 //!
+//! # Role In The System
+//!
+//! `fastapi-output` is an optional, presentation-only layer. It formats
+//! diagnostics, route tables, middleware stacks, and test reports in a way
+//! that's readable for humans and stable for automated agents. The main
+//! framework can run without it; the `fastapi` crate enables it by default
+//! behind a feature flag so production users can opt out.
+//!
 //! # Features
 //!
 //! - Automatic agent detection (Claude Code, Codex, Cursor, etc.)

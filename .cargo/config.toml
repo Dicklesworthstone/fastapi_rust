@@ -1,6 +1,7 @@
 # Local development overrides
-# This file overrides git dependencies with local paths for faster iteration
-# CI uses the git dependencies from Cargo.toml
+# This file overrides registry dependencies with local paths for faster iteration.
+# CI and publishing use the crates.io versions from Cargo.toml.
 
-[patch."https://github.com/Dicklesworthstone/asupersync.git"]
+[patch.crates-io]
 asupersync = { path = "../asupersync" }
+rich_rust = { path = "../rich_rust" }

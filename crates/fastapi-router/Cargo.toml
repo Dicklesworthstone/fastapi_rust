@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/fastapi-router"
+readme = "../../README.md"
+keywords = ["router", "radix", "trie", "fastapi", "http"]
+categories = ["web-programming::http-server", "data-structures"]
 
 [dependencies]
 fastapi-core = { workspace = true }

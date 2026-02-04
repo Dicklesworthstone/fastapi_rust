@@ -13,9 +13,24 @@
 //! - All types support `Send + Sync`
 //! - Cancel-correct via asupersync integration
 //!
+//! # Role In The System
+//!
+//! `fastapi-core` is the heart of the framework. It defines the request/response
+//! model, extractors, dependency injection, middleware, and application builder.
+//! Other crates layer on top of these types:
+//!
+//! - `fastapi` re-exports this crate as the public facade.
+//! - `fastapi-http` uses core types when parsing and serving HTTP.
+//! - `fastapi-router` plugs into core routing and parameter extraction.
+//! - `fastapi-openapi` builds schemas and specs from core metadata.
+//!
+//! This crate intentionally contains no network I/O. That separation keeps
+//! business logic and protocol parsing decoupled, and makes deterministic tests
+//! straightforward.
+//!
 //! # Asupersync Integration
 //!
-//! This crate uses [asupersync](https://github.com/user/asupersync) as its async
+//! This crate uses [asupersync](https://github.com/Dicklesworthstone/asupersync) as its async
 //! runtime foundation, providing:
 //!
 //! - **Structured concurrency**: Request handlers run in regions

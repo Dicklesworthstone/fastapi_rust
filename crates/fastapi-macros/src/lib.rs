@@ -6,6 +6,14 @@
 //! - `#[derive(Validate)]` for compile-time validation
 //! - `#[derive(JsonSchema)]` for OpenAPI schema generation
 //!
+//! # Role In The System
+//!
+//! `fastapi-macros` is the compile-time glue that keeps the runtime minimal.
+//! It analyzes handler signatures, generates route registration metadata, and
+//! enforces validation/schema rules without any runtime reflection. The emitted
+//! code targets types from `fastapi-core` and `fastapi-openapi`, and is re-exported
+//! by the `fastapi` facade crate for user ergonomics.
+//!
 //! # Example
 //!
 //! ```ignore
