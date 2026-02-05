@@ -184,7 +184,7 @@ Response Sent (only after region quiescent)
 
 ### When to Consider Alternatives
 
-- You need production-proven stability today (fastapi_rust is v0.1.1)
+- You need production-proven stability today (fastapi_rust is v0.1.2)
 - You require WebSocket support (coming in Phase 2)
 - You have existing Tokio-based infrastructure
 - You need the massive ecosystem of Tower middleware
@@ -197,7 +197,7 @@ Response Sent (only after region quiescent)
 
 ```toml
 [dependencies]
-fastapi_rust = { package = "fastapi-rust", version = "0.1.1" }
+fastapi_rust = { package = "fastapi-rust", version = "0.1.2" }
 asupersync = "0.1.0"
 serde = { version = "1", features = ["derive"] }
 ```
@@ -688,7 +688,7 @@ Tokio's spawn model makes cancel-correctness difficult - tasks can outlive their
 
 ### Can I use this in production?
 
-Not yet. This is v0.1.1 in active development. The HTTP server implementation is pending asupersync's I/O support.
+Not yet. This is v0.1.2 in active development. The HTTP server implementation is pending asupersync's I/O support.
 
 ### How fast is it?
 
