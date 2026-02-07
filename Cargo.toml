@@ -20,8 +20,8 @@ repository = "https://github.com/Dicklesworthstone/fastapi_rust"
 homepage = "https://github.com/Dicklesworthstone/fastapi_rust"
 
 [workspace.dependencies]
-# Runtime (our own) - override with path in .cargo/config.toml for local dev
-asupersync = "0.1.0"
+# Runtime (our own) - use local path for dev
+asupersync = { path = "../asupersync" }
 
 # Serialization (only these)
 serde = { version = "1", features = ["derive"] }
