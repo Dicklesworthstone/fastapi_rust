@@ -7,12 +7,92 @@ use crate::context::RequestContext;
 use crate::error::{HttpError, ValidationError, ValidationErrors};
 use crate::request::{Body, Request};
 use crate::response::{IntoResponse, Response, ResponseBody};
+use crate::validation::Validate;
 use serde::de::{
     self, DeserializeOwned, Deserializer, IntoDeserializer, MapAccess, SeqAccess, Visitor,
 };
 use std::fmt;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
+
+// ============================================================================
+// Validated Extractor Wrapper
+// ============================================================================
+
+/// Wrap an extractor and validate its extracted value using [`crate::validation::Validate`].
+///
+/// This mirrors FastAPI's "parse then validate" pattern, but keeps validation
+/// explicit and type-driven.
+///
+/// `Valid<T>` expects `T` to implement [`FromRequest`] and to deref to a value
+/// that implements [`crate::validation::Validate`] (e.g. `Json<MyType>` where
+/// `MyType: Validate`, or a newtype extractor that derefs to a validated type).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Valid<T>(pub T);
+
+impl<T> Valid<T> {
+    /// Unwrap the inner extractor value.
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Deref for Valid<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Error returned by [`Valid<T>`] extraction.
+#[derive(Debug)]
+pub enum ValidExtractError<E> {
+    /// The underlying extractor failed.
+    Extract(E),
+    /// Extraction succeeded, but validation failed.
+    Validation(Box<ValidationErrors>),
+}
+
+impl<E: fmt::Display> fmt::Display for ValidExtractError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Extract(e) => write!(f, "Extraction failed: {e}"),
+            Self::Validation(e) => write!(f, "validation error: {e}"),
+        }
+    }
+}
+
+impl<E: fmt::Debug + fmt::Display> std::error::Error for ValidExtractError<E> {}
+
+impl<E: IntoResponse> IntoResponse for ValidExtractError<E> {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Extract(e) => e.into_response(),
+            Self::Validation(e) => (*e).into_response(),
+        }
+    }
+}
+
+impl<T> FromRequest for Valid<T>
+where
+    T: FromRequest + Deref,
+    <T as Deref>::Target: crate::validation::Validate,
+    <T as FromRequest>::Error: fmt::Display + fmt::Debug,
+{
+    type Error = ValidExtractError<<T as FromRequest>::Error>;
+
+    async fn from_request(ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
+        let extracted = T::from_request(ctx, req)
+            .await
+            .map_err(ValidExtractError::Extract)?;
+        extracted
+            .deref()
+            .validate()
+            .map_err(ValidExtractError::Validation)?;
+        Ok(Self(extracted))
+    }
+}
 
 /// Trait for types that can be extracted from a request.
 ///
@@ -19020,21 +19100,21 @@ mod valid_tests {
 
     // Implement Validate for String (for testing purposes)
     impl Validate for String {
-        fn validate(&self) -> Result<(), ValidationErrors> {
+        fn validate(&self) -> Result<(), Box<ValidationErrors>> {
             if self.is_empty() {
                 let mut errors = ValidationErrors::new();
                 errors.push(crate::error::ValidationError::new(
                     crate::error::error_types::STRING_TOO_SHORT,
                     crate::error::loc::body(),
                 ));
-                Err(errors)
+                Err(Box::new(errors))
             } else if self.len() > 100 {
                 let mut errors = ValidationErrors::new();
                 errors.push(crate::error::ValidationError::new(
                     crate::error::error_types::STRING_TOO_LONG,
                     crate::error::loc::body(),
                 ));
-                Err(errors)
+                Err(Box::new(errors))
             } else {
                 Ok(())
             }
@@ -19123,7 +19203,7 @@ mod valid_tests {
         assert!(display.contains("Extraction failed"));
 
         let validation_err: ValidExtractError<HttpError> =
-            ValidExtractError::Validation(ValidationErrors::new());
+            ValidExtractError::Validation(Box::new(ValidationErrors::new()));
         let display = format!("{}", validation_err);
         assert!(display.contains("validation error"));
     }

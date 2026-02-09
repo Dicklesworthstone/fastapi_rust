@@ -16,18 +16,10 @@ categories = ["network-programming", "web-programming::http-server", "asynchrono
 fastapi-core = { workspace = true }
 asupersync = { workspace = true }
 
-# Optional: tokio for concurrent connection spawning
-# When asupersync has accessible spawn API, this can be removed
-tokio = { version = "1", features = ["rt", "sync"], optional = true }
-
 [features]
 default = []
-# Enable concurrent connection handling via tokio::spawn
-# This is a transitional feature until asupersync spawn is accessible from Cx
-concurrent = ["tokio"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

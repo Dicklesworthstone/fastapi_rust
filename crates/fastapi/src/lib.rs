@@ -499,30 +499,5 @@ impl OpenApiExt for App {
     }
 }
 
-/// Convert a Method to its string representation.
-fn method_to_str(method: Method) -> &'static str {
-    match method {
-        Method::Get => "GET",
-        Method::Post => "POST",
-        Method::Put => "PUT",
-        Method::Delete => "DELETE",
-        Method::Patch => "PATCH",
-        Method::Head => "HEAD",
-        Method::Options => "OPTIONS",
-        Method::Trace => "TRACE",
-    }
-}
-
-/// Generate an operation ID from method and path.
-fn generate_operation_id(method: Method, path: &str) -> String {
-    let method_lower = method_to_str(method).to_lowercase();
-    let path_part = path
-        .trim_start_matches('/')
-        .replace('/', "_")
-        .replace(['{', '}'], "");
-    if path_part.is_empty() {
-        method_lower
-    } else {
-        format!("{method_lower}_{path_part}")
-    }
-}
+// Note: operation_id generation lives in `fastapi-router::Route` and in the
+// OpenAPI builder layer; keep the facade crate lean.

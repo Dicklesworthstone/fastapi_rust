@@ -90,6 +90,7 @@ pub mod shutdown;
 pub mod sse;
 pub mod static_files;
 pub mod testing;
+pub mod validation;
 pub mod versioning;
 
 #[cfg(feature = "proptest")]
@@ -127,8 +128,8 @@ pub use extract::{
     Path, PathExtractError, PathParams, Query, QueryExtractError, QueryParams, RawBodyConfig,
     RawBodyError, RequestCookie, RequestCookies, RequestRef, ResponseMut, ResponseMutations,
     SameSite, SecureCompare, SecurityScopes, SecurityScopesError, SessionIdCookie, State,
-    StateExtractError, StringBody, UploadedFile, UserAgent, VaryBuilder, XRequestId,
-    constant_time_eq, constant_time_str_eq, snake_to_header_case,
+    StateExtractError, StringBody, UploadedFile, UserAgent, Valid, ValidExtractError, VaryBuilder,
+    XRequestId, constant_time_eq, constant_time_str_eq, snake_to_header_case,
 };
 pub use middleware::{
     AddResponseHeader, BoxFuture, CompositeKeyExtractor, ConditionalInterceptor, ControlFlow, Cors,

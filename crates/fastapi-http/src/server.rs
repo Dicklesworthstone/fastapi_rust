@@ -1677,86 +1677,32 @@ impl TcpServer {
                 }
             ));
 
-            // Spawn connection handling concurrently when the feature is enabled.
-            // When asupersync has an accessible spawn API from Cx, we can use that
-            // for proper structured concurrency. For now, use tokio::spawn.
-            #[cfg(feature = "concurrent")]
-            {
-                self.spawn_connection_handler(cx.clone(), stream, peer_addr, Arc::clone(&handler));
-            }
+            // Handle inline (single-threaded accept loop).
+            //
+            // For concurrent connection handling with structured concurrency, use
+            // `TcpServer::serve_concurrent()` which spawns tasks via asupersync `Scope`.
+            let request_id = self.next_request_id();
+            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
 
-            // Without the concurrent feature, handle inline (blocking accept loop).
-            // This is simpler but means only one connection is handled at a time.
-            #[cfg(not(feature = "concurrent"))]
-            {
-                let request_id = self.next_request_id();
-                let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            // Create a RequestContext for this request with the configured timeout budget.
+            //
+            // Note: today this uses a testing context budget helper; the intent is to
+            // construct request contexts as children of a per-connection region.
+            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let ctx = RequestContext::new(request_cx, request_id);
 
-                // Create a RequestContext for this request with the configured timeout budget.
-                // In the full implementation, the Cx would be derived from the connection region.
-                // For now, we use for_testing_with_budget to apply the timeout.
-                let request_cx = Cx::for_testing_with_budget(request_budget);
-                let ctx = RequestContext::new(request_cx, request_id);
-
-                // Handle the connection and release the slot when done.
-                let result = self
-                    .handle_connection(&ctx, stream, peer_addr, &*handler)
-                    .await;
-
-                // Release connection slot (always, regardless of success/failure)
-                self.release_connection();
-
-                if let Err(e) = result {
-                    cx.trace(&format!("Connection error from {peer_addr}: {e}"));
-                }
-            }
-        }
-    }
-
-    /// Spawns a connection handler as a separate task.
-    ///
-    /// This is used when the `concurrent` feature is enabled to handle
-    /// connections concurrently without blocking the accept loop.
-    ///
-    /// When asupersync has an accessible spawn API from Cx, this should be
-    /// migrated to use that for proper structured concurrency.
-    #[cfg(feature = "concurrent")]
-    fn spawn_connection_handler<H, Fut>(
-        &self,
-        server_cx: Cx,
-        stream: TcpStream,
-        peer_addr: SocketAddr,
-        handler: Arc<H>,
-    ) where
-        H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
-    {
-        // Clone values needed for the spawned task
-        let config = self.config.clone();
-        let request_counter = Arc::clone(&self.request_counter);
-        let connection_counter = Arc::clone(&self.connection_counter);
-
-        // Spawn the connection handler
-        // Note: Using tokio::spawn as a transitional solution.
-        // When asupersync's Scope::spawn is accessible from Cx, migrate to that.
-        tokio::spawn(async move {
-            let result = process_connection(
-                &server_cx,
-                &request_counter,
-                stream,
-                peer_addr,
-                &config,
-                |ctx, req| handler(ctx, req),
-            )
-            .await;
+            // Handle the connection and release the slot when done.
+            let result = self
+                .handle_connection(&ctx, stream, peer_addr, &*handler)
+                .await;
 
             // Release connection slot (always, regardless of success/failure)
-            connection_counter.fetch_sub(1, Ordering::Relaxed);
+            self.release_connection();
 
             if let Err(e) = result {
-                server_cx.trace(&format!("Connection error from {peer_addr}: {e}"));
+                cx.trace(&format!("Connection error from {peer_addr}: {e}"));
             }
-        });
+        }
     }
 
     /// Handles a single connection.
@@ -2011,6 +1957,14 @@ impl Default for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+
+    fn block_on<F: Future>(f: F) -> F::Output {
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime must build");
+        rt.block_on(f)
+    }
 
     #[test]
     fn server_config_builder() {
@@ -2480,56 +2434,64 @@ mod tests {
         assert!(server.is_draining());
     }
 
-    #[tokio::test]
-    async fn wait_for_drain_returns_true_when_no_connections() {
-        let server = TcpServer::default();
-        assert_eq!(server.current_connections(), 0);
-        let result = server
-            .wait_for_drain(Duration::from_millis(100), Some(Duration::from_millis(1)))
-            .await;
-        assert!(result);
+    #[test]
+    fn wait_for_drain_returns_true_when_no_connections() {
+        block_on(async {
+            let server = TcpServer::default();
+            assert_eq!(server.current_connections(), 0);
+            let result = server
+                .wait_for_drain(Duration::from_millis(100), Some(Duration::from_millis(1)))
+                .await;
+            assert!(result);
+        });
     }
 
-    #[tokio::test]
-    async fn wait_for_drain_timeout_with_connections() {
-        let server = TcpServer::default();
-        // Simulate active connections
-        server.try_acquire_connection();
-        server.try_acquire_connection();
-        assert_eq!(server.current_connections(), 2);
+    #[test]
+    fn wait_for_drain_timeout_with_connections() {
+        block_on(async {
+            let server = TcpServer::default();
+            // Simulate active connections
+            server.try_acquire_connection();
+            server.try_acquire_connection();
+            assert_eq!(server.current_connections(), 2);
 
-        // Wait should timeout since connections won't drain on their own
-        let result = server
-            .wait_for_drain(Duration::from_millis(50), Some(Duration::from_millis(5)))
-            .await;
-        assert!(!result);
-        assert_eq!(server.current_connections(), 2);
+            // Wait should timeout since connections won't drain on their own
+            let result = server
+                .wait_for_drain(Duration::from_millis(50), Some(Duration::from_millis(5)))
+                .await;
+            assert!(!result);
+            assert_eq!(server.current_connections(), 2);
+        });
     }
 
-    #[tokio::test]
-    async fn drain_returns_zero_when_no_connections() {
-        let server = TcpServer::new(
-            ServerConfig::new("127.0.0.1:8080").with_drain_timeout(Duration::from_millis(100)),
-        );
-        assert_eq!(server.current_connections(), 0);
-        let remaining = server.drain().await;
-        assert_eq!(remaining, 0);
-        assert!(server.is_draining());
+    #[test]
+    fn drain_returns_zero_when_no_connections() {
+        block_on(async {
+            let server = TcpServer::new(
+                ServerConfig::new("127.0.0.1:8080").with_drain_timeout(Duration::from_millis(100)),
+            );
+            assert_eq!(server.current_connections(), 0);
+            let remaining = server.drain().await;
+            assert_eq!(remaining, 0);
+            assert!(server.is_draining());
+        });
     }
 
-    #[tokio::test]
-    async fn drain_returns_count_when_connections_remain() {
-        let server = TcpServer::new(
-            ServerConfig::new("127.0.0.1:8080").with_drain_timeout(Duration::from_millis(50)),
-        );
-        // Simulate active connections that won't drain
-        server.try_acquire_connection();
-        server.try_acquire_connection();
-        server.try_acquire_connection();
+    #[test]
+    fn drain_returns_count_when_connections_remain() {
+        block_on(async {
+            let server = TcpServer::new(
+                ServerConfig::new("127.0.0.1:8080").with_drain_timeout(Duration::from_millis(50)),
+            );
+            // Simulate active connections that won't drain
+            server.try_acquire_connection();
+            server.try_acquire_connection();
+            server.try_acquire_connection();
 
-        let remaining = server.drain().await;
-        assert_eq!(remaining, 3);
-        assert!(server.is_draining());
+            let remaining = server.drain().await;
+            assert_eq!(remaining, 3);
+            assert!(server.is_draining());
+        });
     }
 
     #[test]
@@ -2767,13 +2729,17 @@ pub trait AppServeExt {
     /// use fastapi::prelude::*;
     /// use fastapi_http::AppServeExt;
     ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     let app = App::builder()
     ///         .get("/health", |_, _| async { Response::ok() })
     ///         .build();
     ///
-    ///     app.serve("0.0.0.0:8080").await?;
+    ///     let rt = asupersync::runtime::RuntimeBuilder::current_thread().build()?;
+    ///     rt.block_on(async {
+    ///         app.serve("0.0.0.0:8080").await?;
+    ///         Ok::<(), fastapi_http::ServeError>(())
+    ///     })?;
+    ///
     ///     Ok(())
     /// }
     /// ```

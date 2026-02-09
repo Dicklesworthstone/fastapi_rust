@@ -12,14 +12,9 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::{
-    FnArg, GenericArgument, ItemFn, LitStr, Pat, PatIdent, PatType, PathArguments, ReturnType,
-    Token, Type, parse::Parse, parse::ParseStream, parse_macro_input, punctuated::Punctuated,
+    FnArg, GenericArgument, ItemFn, LitStr, PathArguments, ReturnType, Token, Type, parse::Parse,
+    parse::ParseStream, parse_macro_input, punctuated::Punctuated,
 };
-
-struct ParamInfo {
-    name: syn::Ident,
-    ty: Type,
-}
 
 /// A declared response type for OpenAPI documentation.
 struct ResponseDecl {
@@ -382,24 +377,6 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
     let fn_output = &input_fn.sig.output;
     let fn_asyncness = &input_fn.sig.asyncness;
     let fn_attrs = &input_fn.attrs;
-
-    // Parse all parameters
-    let params: Vec<ParamInfo> = fn_inputs
-        .iter()
-        .filter_map(|arg| match arg {
-            FnArg::Typed(PatType { pat, ty, .. }) => {
-                if let Pat::Ident(PatIdent { ident, .. }) = pat.as_ref() {
-                    Some(ParamInfo {
-                        name: ident.clone(),
-                        ty: ty.as_ref().clone(),
-                    })
-                } else {
-                    None
-                }
-            }
-            FnArg::Receiver(_) => None,
-        })
-        .collect();
 
     let route_fn_name = syn::Ident::new(&format!("__route_{fn_name}"), fn_name.span());
     let reg_name = syn::Ident::new(&format!("__FASTAPI_ROUTE_REG_{fn_name}"), fn_name.span());

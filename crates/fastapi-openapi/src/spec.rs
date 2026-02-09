@@ -138,6 +138,7 @@ pub struct Operation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body: Option<RequestBody>,
     /// Responses.
+    #[serde(default = "default_responses")]
     pub responses: HashMap<String, Response>,
     /// Deprecated flag.
     #[serde(default, skip_serializing_if = "is_false")]

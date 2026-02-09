@@ -738,8 +738,9 @@ fn generate_field_validation(field: &Field, validators: &FieldValidators) -> Tok
     if validators.nested {
         validations.push(quote! {
             if let Err(nested_errors) = self.#field_name.validate() {
+                let nested_errors = *nested_errors;
                 // Add the field name prefix to all nested errors
-                for mut err in nested_errors {
+                for mut err in nested_errors.errors {
                     let mut new_loc = vec![
                         fastapi_core::error::LocItem::field("body"),
                         fastapi_core::error::LocItem::field(#field_name_str),
@@ -820,6 +821,20 @@ pub fn derive_validate_impl(input: TokenStream) -> TokenStream {
     }
 
     let expanded = quote! {
+        impl #impl_generics fastapi_core::validation::Validate for #name #ty_generics #where_clause {
+            fn validate(&self) -> Result<(), Box<fastapi_core::ValidationErrors>> {
+                let mut errors = Vec::<fastapi_core::ValidationError>::new();
+
+                #(#field_validations)*
+
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(Box::new(fastapi_core::ValidationErrors::from_errors(errors)))
+                }
+            }
+        }
+
         impl #impl_generics #name #ty_generics #where_clause {
             /// Validate this value according to the `#[validate(...)]` attributes.
             ///
@@ -831,21 +846,13 @@ pub fn derive_validate_impl(input: TokenStream) -> TokenStream {
             ///
             /// ```ignore
             /// let user = CreateUser { name: "".into(), email: "invalid".into(), age: -1 };
-            /// match user.validate() {
+            /// match fastapi_core::validation::Validate::validate(&user) {
             ///     Ok(()) => println!("Valid!"),
             ///     Err(errors) => println!("Errors: {}", errors.len()),
             /// }
             /// ```
-            pub fn validate(&self) -> Result<(), fastapi_core::ValidationErrors> {
-                let mut errors = Vec::<fastapi_core::ValidationError>::new();
-
-                #(#field_validations)*
-
-                if errors.is_empty() {
-                    Ok(())
-                } else {
-                    Err(fastapi_core::ValidationErrors::from_errors(errors))
-                }
+            pub fn validate(&self) -> Result<(), Box<fastapi_core::ValidationErrors>> {
+                <Self as fastapi_core::validation::Validate>::validate(self)
             }
         }
     };

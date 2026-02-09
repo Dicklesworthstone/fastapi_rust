@@ -1028,6 +1028,72 @@ where
     fn consume(&mut self, n: usize) {
         self.position += n;
     }
+
+    fn compact_buffer_if_needed(&mut self) {
+        if self.position == 0 {
+            return;
+        }
+        if self.position >= self.buffer.len() {
+            self.buffer.clear();
+            self.position = 0;
+            return;
+        }
+
+        // Avoid unbounded growth: once we've consumed enough, shift the unread tail down.
+        let should_compact = self.position > 8 * 1024 || self.position > (self.buffer.len() / 2);
+        if should_compact {
+            self.buffer.drain(..self.position);
+            self.position = 0;
+        }
+    }
+
+    fn poll_read_more(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<usize, RequestBodyStreamError>> {
+        self.compact_buffer_if_needed();
+
+        let mut reader = match self.reader.take() {
+            Some(r) => r,
+            None => {
+                self.state = AsyncChunkedState::Error;
+                return Poll::Ready(Err(RequestBodyStreamError::ConnectionClosed));
+            }
+        };
+
+        // Read into the scratch buffer, then append.
+        let read_result = {
+            let mut read_buf = asupersync::io::ReadBuf::new(&mut self.read_buffer);
+            match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().to_vec())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        };
+
+        match read_result {
+            Poll::Ready(Ok(bytes)) => {
+                let n = bytes.len();
+                if n == 0 {
+                    self.state = AsyncChunkedState::Error;
+                    self.reader = Some(reader);
+                    return Poll::Ready(Err(RequestBodyStreamError::ConnectionClosed));
+                }
+                self.buffer.extend_from_slice(&bytes);
+                self.reader = Some(reader);
+                Poll::Ready(Ok(n))
+            }
+            Poll::Ready(Err(e)) => {
+                self.state = AsyncChunkedState::Error;
+                self.reader = Some(reader);
+                Poll::Ready(Err(RequestBodyStreamError::Io(e.to_string())))
+            }
+            Poll::Pending => {
+                self.reader = Some(reader);
+                Poll::Pending
+            }
+        }
+    }
 }
 
 impl<R> Stream for AsyncChunkedStream<R>
@@ -1036,7 +1102,7 @@ where
 {
     type Item = Result<Vec<u8>, RequestBodyStreamError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Check if complete or error
         if self.state == AsyncChunkedState::Complete || self.state == AsyncChunkedState::Error {
             return Poll::Ready(None);
@@ -1113,11 +1179,22 @@ where
                         continue;
                     }
 
-                    // Need more data - for now just error (full impl would read from socket)
-                    self.state = AsyncChunkedState::Error;
-                    return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
-                        "incomplete chunk size line".to_string(),
-                    ))));
+                    // Need more data from the reader (socket).
+                    //
+                    // Defensive cap: reject absurdly long chunk size lines without CRLF.
+                    const MAX_CHUNK_SIZE_LINE: usize = 1024;
+                    if remaining.len() > MAX_CHUNK_SIZE_LINE {
+                        self.state = AsyncChunkedState::Error;
+                        return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                            "chunk size line too long".to_string(),
+                        ))));
+                    }
+
+                    match self.poll_read_more(cx) {
+                        Poll::Ready(Ok(_n)) => {}
+                        Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                        Poll::Pending => return Poll::Pending,
+                    }
                 }
                 AsyncChunkedState::ChunkData { remaining } => {
                     // Read chunk data from buffer
@@ -1141,11 +1218,12 @@ where
                         return Poll::Ready(Some(Ok(chunk)));
                     }
 
-                    // Need more data from socket
-                    self.state = AsyncChunkedState::Error;
-                    return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
-                        "incomplete chunk data".to_string(),
-                    ))));
+                    // Need more data from the reader (socket).
+                    match self.poll_read_more(cx) {
+                        Poll::Ready(Ok(_n)) => {}
+                        Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                        Poll::Pending => return Poll::Pending,
+                    }
                 }
                 AsyncChunkedState::ChunkDataEnd => {
                     // Expect CRLF
@@ -1162,11 +1240,12 @@ where
                         ))));
                     }
 
-                    // Need more data
-                    self.state = AsyncChunkedState::Error;
-                    return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
-                        "incomplete CRLF after chunk".to_string(),
-                    ))));
+                    // Need more data from the reader (socket).
+                    match self.poll_read_more(cx) {
+                        Poll::Ready(Ok(_n)) => {}
+                        Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                        Poll::Pending => return Poll::Pending,
+                    }
                 }
                 AsyncChunkedState::Complete | AsyncChunkedState::Error => {
                     return Poll::Ready(None);

@@ -43,7 +43,7 @@ pub trait Validate {
     /// # Errors
     ///
     /// Returns `ValidationErrors` if any constraints are violated.
-    fn validate(&self) -> Result<(), ValidationErrors>;
+    fn validate(&self) -> Result<(), Box<ValidationErrors>>;
 }
 
 /// Check if a string is a valid email address.

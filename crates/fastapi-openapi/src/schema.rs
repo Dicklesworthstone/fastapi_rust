@@ -259,14 +259,6 @@ pub struct StringEnumSchema {
     pub enum_values: Vec<String>,
 }
 
-/// OneOf schema (union type).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OneOfSchema {
-    /// List of possible schemas.
-    #[serde(rename = "oneOf")]
-    pub one_of: Vec<Schema>,
-}
-
 /// Primitive type schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrimitiveSchema {
