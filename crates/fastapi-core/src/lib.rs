@@ -60,6 +60,7 @@ mod extract;
 pub mod logging;
 pub mod middleware;
 pub mod multipart;
+pub mod websocket;
 mod password;
 mod request;
 mod response;
@@ -96,6 +97,10 @@ pub use middleware::{
 pub use multipart::{
     DEFAULT_MAX_FIELDS, DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_TOTAL_SIZE, MultipartConfig,
     MultipartError, MultipartForm, MultipartParser, Part, UploadFile, parse_boundary,
+};
+pub use websocket::{
+    websocket_accept_from_key, Frame as WebSocketFrame, OpCode as WebSocketOpCode, WebSocket,
+    WebSocketError, WebSocketHandshakeError, WS_GUID,
 };
 pub use request::{
     BackgroundTasks, BackgroundTasksInner, Body, Headers, HttpVersion, Method, Request,
