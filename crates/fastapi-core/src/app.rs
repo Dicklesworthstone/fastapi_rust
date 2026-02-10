@@ -34,84 +34,16 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::env;
 use std::future::Future;
-use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::{fs, io};
 
 use crate::context::RequestContext;
-use crate::dependency::{DependencyOverrides, FromDependency};
-use crate::extract::PathParams;
 use crate::middleware::{BoxFuture, Handler, Middleware, MiddlewareStack};
 use crate::request::{Method, Request};
 use crate::response::{Response, StatusCode};
-use crate::routing::{RouteLookup, RouteTable, format_allow_header, method_order};
 use crate::shutdown::ShutdownController;
-use serde::Deserialize;
-
-// ============================================================================
-// Type-Safe State Registry (Compile-Time State Tracking)
-// ============================================================================
-
-/// Marker trait for the type-level state registry.
-///
-/// The state registry is a type-level set represented as nested tuples:
-/// - `()` represents the empty set
-/// - `(T, S)` represents the set containing T plus all types in S
-///
-/// This enables compile-time verification that state types are registered
-/// before they are used by handlers.
-pub trait StateRegistry: Send + Sync + 'static {}
-
-impl StateRegistry for () {}
-impl<T: Send + Sync + 'static, S: StateRegistry> StateRegistry for (T, S) {}
-
-/// Marker trait indicating that type T is present in state registry S.
-///
-/// This trait is automatically implemented for any type T that appears
-/// in the nested tuple structure of S.
-///
-/// # Example
-///
-/// ```ignore
-/// // (DbPool, (Config, ())) contains both DbPool and Config
-/// fn requires_db<S: HasState<DbPool>>() {}
-/// fn requires_config<S: HasState<Config>>() {}
-///
-/// // Both work with (DbPool, (Config, ()))
-/// type MyState = (DbPool, (Config, ()));
-/// requires_db::<MyState>();   // compiles
-/// requires_config::<MyState>(); // compiles
-/// ```
-pub trait HasState<T>: StateRegistry {}
-
-// T is in (T, S) - direct match (at head of tuple)
-impl<T: Send + Sync + 'static, S: StateRegistry> HasState<T> for (T, S) {}
-
-// Note: A recursive impl like "T is in (U, S) if T is in S" would conflict
-// with the direct impl when T == U. Without negative bounds or specialization,
-// we can only support checking for types at specific positions in the tuple.
-// For multiple state types, users can define impls manually for their specific
-// tuple structure, or use a different state organization.
-
-/// Trait for types that require specific state to be registered.
-///
-/// This is implemented by extractors like `State<T>` to declare their
-/// state dependencies at the type level.
-///
-/// # Example
-///
-/// ```ignore
-/// // State<DbPool> requires DbPool to be in the registry
-/// impl<S: HasState<DbPool>> RequiresState<S> for State<DbPool> {}
-/// ```
-pub trait RequiresState<S: StateRegistry> {}
-
-// All types that don't need state trivially satisfy RequiresState
-impl<S: StateRegistry> RequiresState<S> for () {}
+use fastapi_router::{Route, RouteLookup, Router};
 
 // ============================================================================
 // Lifecycle Hook Types
@@ -251,198 +183,16 @@ impl StartupOutcome {
     }
 }
 
-// ============================================================================
-// Lifespan Context Manager
-// ============================================================================
-
-/// Error during lifespan startup.
-///
-/// This error is returned when the lifespan function fails during the startup phase.
-/// It will abort the application startup, preventing the server from accepting connections.
-#[derive(Debug)]
-pub struct LifespanError {
-    /// Description of what went wrong.
-    pub message: String,
-    /// Optional underlying error source.
-    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
-}
-
-impl LifespanError {
-    /// Creates a new lifespan error with a message.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            source: None,
-        }
-    }
-
-    /// Creates a lifespan error wrapping another error.
-    pub fn with_source<E: std::error::Error + Send + Sync + 'static>(
-        message: impl Into<String>,
-        source: E,
-    ) -> Self {
-        Self {
-            message: message.into(),
-            source: Some(Box::new(source)),
-        }
-    }
-}
-
-impl std::fmt::Display for LifespanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "lifespan error: {}", self.message)?;
-        if let Some(ref source) = self.source {
-            write!(f, " (caused by: {})", source)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for LifespanError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_ref()
-            .map(|e| e.as_ref() as &(dyn std::error::Error + 'static))
-    }
-}
-
-impl From<LifespanError> for StartupHookError {
-    fn from(err: LifespanError) -> Self {
-        StartupHookError::new(err.to_string())
-    }
-}
-
-/// Scope returned by a lifespan function containing state and cleanup logic.
-///
-/// The lifespan pattern allows sharing state between startup and shutdown phases,
-/// which is particularly useful for resources like database connections that need
-/// coordinated initialization and cleanup.
-///
-/// # Example
-///
-/// ```ignore
-/// use fastapi_core::app::{App, LifespanScope, LifespanError};
-///
-/// struct DatabasePool { /* ... */ }
-///
-/// impl DatabasePool {
-///     async fn connect(url: &str) -> Result<Self, Error> { /* ... */ }
-///     async fn close(&self) { /* ... */ }
-/// }
-///
-/// let app = App::builder()
-///     .lifespan(|| async {
-///         // Startup: connect to database
-///         let pool = DatabasePool::connect("postgres://localhost/mydb")
-///             .await
-///             .map_err(|e| LifespanError::with_source("failed to connect to database", e))?;
-///
-///         // Clone for the cleanup closure
-///         let pool_for_cleanup = pool.clone();
-///
-///         // Return state + cleanup
-///         Ok(LifespanScope::new(pool)
-///             .on_shutdown(async move {
-///                 pool_for_cleanup.close().await;
-///             }))
-///     })
-///     .build();
-/// ```
-pub struct LifespanScope<T: Send + Sync + 'static> {
-    /// State produced by the lifespan function.
-    ///
-    /// This state is automatically added to the application's state container
-    /// and can be accessed by handlers via the `State<T>` extractor.
-    pub state: T,
-
-    /// Optional cleanup future to run during shutdown.
-    cleanup: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-}
-
-impl<T: Send + Sync + 'static> LifespanScope<T> {
-    /// Creates a new lifespan scope with the given state.
-    ///
-    /// The state will be added to the application's state container after
-    /// successful startup, accessible via the `State<T>` extractor.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let scope = LifespanScope::new(MyState { value: 42 });
-    /// ```
-    pub fn new(state: T) -> Self {
-        Self {
-            state,
-            cleanup: None,
-        }
-    }
-
-    /// Sets the cleanup future to run during application shutdown.
-    ///
-    /// The cleanup runs in reverse order relative to other lifespan/shutdown hooks,
-    /// after all in-flight requests have completed or been cancelled.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let scope = LifespanScope::new(pool.clone())
-    ///     .on_shutdown(async move {
-    ///         pool.close().await;
-    ///         println!("Database pool closed");
-    ///     });
-    /// ```
-    #[must_use]
-    pub fn on_shutdown<F>(mut self, cleanup: F) -> Self
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        self.cleanup = Some(Box::pin(cleanup));
-        self
-    }
-
-    /// Takes the cleanup future, leaving `None` in its place.
-    ///
-    /// This is used internally to transfer the cleanup to the shutdown system.
-    pub fn take_cleanup(&mut self) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
-        self.cleanup.take()
-    }
-}
-
-impl<T: Send + Sync + std::fmt::Debug + 'static> std::fmt::Debug for LifespanScope<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LifespanScope")
-            .field("state", &self.state)
-            .field("has_cleanup", &self.cleanup.is_some())
-            .finish()
-    }
-}
-
-/// Boxed lifespan function type.
-///
-/// The lifespan function runs during startup and returns state (as Any) along with
-/// an optional cleanup future for shutdown. The state is then inserted into the container.
-pub type BoxLifespanFn = Box<
-    dyn FnOnce() -> Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            (
-                                Box<dyn std::any::Any + Send + Sync>,
-                                Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-                            ),
-                            LifespanError,
-                        >,
-                    > + Send,
-            >,
-        > + Send,
->;
-
 /// A boxed handler function.
 ///
-/// The handler may return a future that borrows from the context/request for
-/// the duration of the call.
+/// Note: The lifetime parameter allows the future to borrow from the context/request.
 pub type BoxHandler = Box<
-    dyn for<'a> Fn(&'a RequestContext, &'a mut Request) -> BoxFuture<'a, Response> + Send + Sync,
+    dyn Fn(
+            &RequestContext,
+            &mut Request,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>>
+        + Send
+        + Sync,
 >;
 
 /// A registered route with its handler.
@@ -459,16 +209,18 @@ pub struct RouteEntry {
 impl RouteEntry {
     /// Creates a new route entry.
     ///
-    /// Note: The handler's future must not outlive the borrow of the
-    /// context/request passed to it.
-    pub fn new<H>(method: Method, path: impl Into<String>, handler: H) -> Self
+    /// Note: The handler's returned future must be `'static`, meaning it should not
+    /// hold references to the context or request beyond the call. If you need to
+    /// borrow from them, clone the data you need first.
+    pub fn new<H, Fut>(method: Method, path: impl Into<String>, handler: H) -> Self
     where
-        H: for<'a> Fn(&'a RequestContext, &'a mut Request) -> BoxFuture<'a, Response>
-            + Send
-            + Sync
-            + 'static,
+        H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
     {
-        let handler: BoxHandler = Box::new(move |ctx, req| handler(ctx, req));
+        let handler: BoxHandler = Box::new(move |ctx, req| {
+            let fut = handler(ctx, req);
+            Box::pin(fut)
+        });
         Self {
             method,
             path: path.into(),
@@ -516,15 +268,6 @@ impl StateContainer {
         self.state.insert(TypeId::of::<T>(), Arc::new(value));
     }
 
-    /// Inserts a boxed Any value into the state container.
-    ///
-    /// This is used by the lifespan system to insert type-erased state.
-    /// The TypeId is obtained from the actual type inside the box.
-    pub fn insert_any(&mut self, value: Box<dyn Any + Send + Sync>) {
-        let type_id = (*value).type_id();
-        self.state.insert(type_id, Arc::from(value));
-    }
-
     /// Gets a reference to a value in the state container.
     pub fn get<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
         self.state
@@ -567,13 +310,6 @@ pub type BoxExceptionHandler = Box<
     dyn Fn(&RequestContext, Box<dyn std::error::Error + Send + Sync>) -> Response + Send + Sync,
 >;
 
-/// A boxed panic handler function.
-///
-/// The handler receives the RequestContext (if available) and panic info string,
-/// and returns a Response. This is called by the HTTP server layer when a panic
-/// is caught via `catch_unwind`.
-pub type BoxPanicHandler = Box<dyn Fn(Option<&RequestContext>, &str) -> Response + Send + Sync>;
-
 /// Registry for custom exception handlers.
 ///
 /// This allows applications to register handlers for specific error types,
@@ -584,14 +320,6 @@ pub type BoxPanicHandler = Box<dyn Fn(Option<&RequestContext>, &str) -> Response
 /// The registry comes with default handlers for common error types:
 /// - [`HttpError`](crate::HttpError) → JSON response with status/detail
 /// - [`ValidationErrors`](crate::ValidationErrors) → 422 with error list
-/// - [`CancelledError`](crate::CancelledError) → 499 Client Closed Request
-///
-/// # Panic Handler
-///
-/// The registry also supports a panic handler that is invoked when a panic
-/// is caught during request handling. This is typically used by the HTTP
-/// server layer via `catch_unwind`. The default panic handler returns a
-/// 500 Internal Server Error.
 ///
 /// # Example
 ///
@@ -616,15 +344,9 @@ pub type BoxPanicHandler = Box<dyn Fn(Option<&RequestContext>, &str) -> Response
 ///             .body_json(&serde_json::json!({"error": err.0}))
 ///     });
 /// ```
+#[derive(Default)]
 pub struct ExceptionHandlers {
     handlers: HashMap<TypeId, BoxExceptionHandler>,
-    panic_handler: Option<BoxPanicHandler>,
-}
-
-impl Default for ExceptionHandlers {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ExceptionHandlers {
@@ -633,7 +355,6 @@ impl ExceptionHandlers {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
-            panic_handler: None,
         }
     }
 
@@ -652,11 +373,6 @@ impl ExceptionHandlers {
         handlers.register::<crate::ValidationErrors>(|_ctx, err| {
             use crate::IntoResponse;
             err.into_response()
-        });
-
-        // Default handler for CancelledError -> 499 Client Closed Request
-        handlers.register::<crate::CancelledError>(|_ctx, _err| {
-            Response::with_status(StatusCode::CLIENT_CLOSED_REQUEST)
         });
 
         handlers
@@ -741,98 +457,6 @@ impl ExceptionHandlers {
     /// Handlers from `other` will override handlers in `self` for the same error types.
     pub fn merge(&mut self, other: ExceptionHandlers) {
         self.handlers.extend(other.handlers);
-        // Prefer other's panic handler if set
-        if other.panic_handler.is_some() {
-            self.panic_handler = other.panic_handler;
-        }
-    }
-
-    // =========================================================================
-    // Panic Handler
-    // =========================================================================
-
-    /// Sets a custom panic handler.
-    ///
-    /// The panic handler is called by the HTTP server layer when a panic is caught
-    /// during request handling via `catch_unwind`. The handler receives the
-    /// `RequestContext` (if available) and a panic message string.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let handlers = ExceptionHandlers::with_defaults()
-    ///     .panic_handler(|ctx, panic_msg| {
-    ///         // Log the panic
-    ///         eprintln!("Request panicked: {}", panic_msg);
-    ///
-    ///         // Return a custom error response
-    ///         Response::with_status(StatusCode::INTERNAL_SERVER_ERROR)
-    ///             .body_json(&serde_json::json!({
-    ///                 "error": "internal_server_error",
-    ///                 "message": "An unexpected error occurred"
-    ///             }))
-    ///     });
-    /// ```
-    #[must_use]
-    pub fn panic_handler<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(Option<&RequestContext>, &str) -> Response + Send + Sync + 'static,
-    {
-        self.panic_handler = Some(Box::new(handler));
-        self
-    }
-
-    /// Sets a custom panic handler (mutable reference version).
-    pub fn set_panic_handler<F>(&mut self, handler: F)
-    where
-        F: Fn(Option<&RequestContext>, &str) -> Response + Send + Sync + 'static,
-    {
-        self.panic_handler = Some(Box::new(handler));
-    }
-
-    /// Handles a panic by invoking the configured panic handler.
-    ///
-    /// If no panic handler is configured, returns a default 500 Internal Server Error.
-    ///
-    /// This method is intended to be called by the HTTP server layer after catching
-    /// a panic via `catch_unwind`.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - The request context, if available when the panic occurred
-    /// * `panic_info` - A string describing the panic (extracted from the panic payload)
-    pub fn handle_panic(&self, ctx: Option<&RequestContext>, panic_info: &str) -> Response {
-        if let Some(handler) = &self.panic_handler {
-            handler(ctx, panic_info)
-        } else {
-            Self::default_panic_response()
-        }
-    }
-
-    /// Returns the default response for panics: 500 Internal Server Error.
-    #[must_use]
-    pub fn default_panic_response() -> Response {
-        Response::with_status(StatusCode::INTERNAL_SERVER_ERROR)
-    }
-
-    /// Returns true if a custom panic handler is registered.
-    #[must_use]
-    pub fn has_panic_handler(&self) -> bool {
-        self.panic_handler.is_some()
-    }
-
-    /// Extracts a message string from a panic payload.
-    ///
-    /// This is a helper for use with `catch_unwind` results.
-    #[must_use]
-    pub fn extract_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-        if let Some(s) = payload.downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = payload.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_string()
-        }
     }
 }
 
@@ -840,39 +464,11 @@ impl std::fmt::Debug for ExceptionHandlers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExceptionHandlers")
             .field("count", &self.handlers.len())
-            .field("has_panic_handler", &self.panic_handler.is_some())
             .finish()
     }
 }
 
-/// Application configuration for the FastAPI Rust framework.
-///
-/// Controls application-level settings including naming, debug mode,
-/// body size limits, timeouts, and routing behavior.
-///
-/// # Defaults
-///
-/// | Setting | Default |
-/// |---------|---------|
-/// | `name` | `"FastAPI"` |
-/// | `version` | `"0.1.0"` |
-/// | `debug` | `false` |
-/// | `max_body_size` | 1 MB (1,048,576 bytes) |
-/// | `request_timeout_ms` | 30,000 ms |
-/// | `root_path` | `""` |
-/// | `trailing_slash_mode` | `Strict` |
-///
-/// # Example
-///
-/// ```ignore
-/// use fastapi_core::AppConfig;
-///
-/// let config = AppConfig::default()
-///     .with_name("my-api")
-///     .with_version("2.0.0")
-///     .with_debug(true)
-///     .with_max_body_size(10 * 1024 * 1024); // 10 MB
-/// ```
+/// Application configuration.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     /// Application name (used in logging and OpenAPI).
@@ -885,109 +481,6 @@ pub struct AppConfig {
     pub max_body_size: usize,
     /// Default request timeout in milliseconds.
     pub request_timeout_ms: u64,
-    /// Root path prefix for apps behind a reverse proxy.
-    ///
-    /// When the application is served behind a reverse proxy at a sub-path,
-    /// this should be set to that sub-path. For example, if the app is
-    /// proxied at `/api/v1`, set `root_path = "/api/v1"`.
-    ///
-    /// This affects:
-    /// - URL generation via `url_for()`
-    /// - OpenAPI servers list (if `root_path_in_servers` is true)
-    pub root_path: String,
-    /// Whether to include the root_path in OpenAPI servers list.
-    ///
-    /// When true and `root_path` is set, a server entry with the root_path
-    /// will be added to the OpenAPI specification's servers array.
-    pub root_path_in_servers: bool,
-    /// Trailing slash handling mode.
-    ///
-    /// Controls how the router handles trailing slashes in URLs:
-    /// - `Strict` (default): `/users` and `/users/` are different routes
-    /// - `Redirect`: 308 redirect `/users/` to `/users`
-    /// - `RedirectWithSlash`: 308 redirect `/users` to `/users/`
-    /// - `MatchBoth`: accept both forms without redirect
-    pub trailing_slash_mode: crate::routing::TrailingSlashMode,
-    /// Debug mode configuration.
-    ///
-    /// Controls whether error responses include additional diagnostic
-    /// information such as source location, handler name, and route pattern.
-    /// When a debug header and token are configured, debug info is only
-    /// included for requests that present the correct token.
-    pub debug_config: crate::error::DebugConfig,
-}
-
-/// Configuration loading errors.
-#[derive(Debug)]
-pub enum ConfigError {
-    /// Failed to read configuration file.
-    Io(io::Error),
-    /// Failed to parse JSON configuration.
-    Json(serde_json::Error),
-    /// Unsupported configuration format.
-    UnsupportedFormat { path: PathBuf },
-    /// Invalid environment variable value.
-    InvalidEnvVar {
-        /// Environment variable name.
-        key: String,
-        /// Raw value.
-        value: String,
-        /// Expected format.
-        expected: String,
-    },
-    /// Validation failure.
-    Validation(String),
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "config I/O error: {err}"),
-            Self::Json(err) => write!(f, "config JSON error: {err}"),
-            Self::UnsupportedFormat { path } => {
-                write!(f, "unsupported config format: {}", path.display())
-            }
-            Self::InvalidEnvVar {
-                key,
-                value,
-                expected,
-            } => write!(f, "invalid env var {key}='{value}' (expected {expected})"),
-            Self::Validation(message) => write!(f, "invalid config: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err),
-            Self::Json(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<io::Error> for ConfigError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
-    }
-}
-
-impl From<serde_json::Error> for ConfigError {
-    fn from(err: serde_json::Error) -> Self {
-        Self::Json(err)
-    }
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct AppConfigFile {
-    name: Option<String>,
-    version: Option<String>,
-    debug: Option<bool>,
-    max_body_size: Option<usize>,
-    request_timeout_ms: Option<u64>,
-    root_path: Option<String>,
-    root_path_in_servers: Option<bool>,
 }
 
 impl Default for AppConfig {
@@ -998,24 +491,11 @@ impl Default for AppConfig {
             debug: false,
             max_body_size: 1024 * 1024, // 1MB
             request_timeout_ms: 30_000, // 30 seconds
-            root_path: String::new(),
-            root_path_in_servers: true,
-            trailing_slash_mode: crate::routing::TrailingSlashMode::Strict,
-            debug_config: crate::error::DebugConfig::default(),
         }
     }
 }
 
 impl AppConfig {
-    const DEFAULT_ENV_PREFIX: &'static str = "FASTAPI_";
-    const ENV_NAME: &'static str = "NAME";
-    const ENV_VERSION: &'static str = "VERSION";
-    const ENV_DEBUG: &'static str = "DEBUG";
-    const ENV_MAX_BODY_SIZE: &'static str = "MAX_BODY_SIZE";
-    const ENV_REQUEST_TIMEOUT_MS: &'static str = "REQUEST_TIMEOUT_MS";
-    const ENV_ROOT_PATH: &'static str = "ROOT_PATH";
-    const ENV_ROOT_PATH_IN_SERVERS: &'static str = "ROOT_PATH_IN_SERVERS";
-
     /// Creates a new configuration with defaults.
     #[must_use]
     pub fn new() -> Self {
@@ -1056,296 +536,6 @@ impl AppConfig {
         self.request_timeout_ms = timeout;
         self
     }
-
-    /// Sets the root path for apps behind a reverse proxy.
-    ///
-    /// When the application is served behind a reverse proxy at a sub-path,
-    /// set this to that sub-path. For example, if the app is proxied at
-    /// `/api/v1`, set `root_path("/api/v1")`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let config = AppConfig::new().root_path("/api/v1");
-    /// ```
-    #[must_use]
-    pub fn root_path(mut self, path: impl Into<String>) -> Self {
-        let mut path = path.into();
-        // Normalize: remove trailing slashes
-        while path.ends_with('/') && path.len() > 1 {
-            path.pop();
-        }
-        self.root_path = path;
-        self
-    }
-
-    /// Sets whether to include root_path in OpenAPI servers list.
-    ///
-    /// When true and `root_path` is set, a server entry with the root_path
-    /// will be added to the OpenAPI specification's servers array.
-    #[must_use]
-    pub fn root_path_in_servers(mut self, include: bool) -> Self {
-        self.root_path_in_servers = include;
-        self
-    }
-
-    /// Sets the trailing slash handling mode.
-    ///
-    /// Controls how the router handles trailing slashes in URLs.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fastapi_core::TrailingSlashMode;
-    ///
-    /// let config = AppConfig::new()
-    ///     .trailing_slash_mode(TrailingSlashMode::Redirect);
-    /// ```
-    #[must_use]
-    pub fn trailing_slash_mode(mut self, mode: crate::routing::TrailingSlashMode) -> Self {
-        self.trailing_slash_mode = mode;
-        self
-    }
-
-    /// Sets the debug mode configuration.
-    ///
-    /// Controls whether error responses include additional diagnostic
-    /// information. Use with `DebugConfig::new().enable().with_debug_header(...)`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fastapi_core::{DebugConfig};
-    ///
-    /// let config = AppConfig::new()
-    ///     .debug_config(DebugConfig::new()
-    ///         .enable()
-    ///         .with_debug_header("X-Debug-Token", "my-secret"));
-    /// ```
-    #[must_use]
-    pub fn debug_config(mut self, config: crate::error::DebugConfig) -> Self {
-        self.debug_config = config;
-        self
-    }
-
-    /// Load configuration from environment variables.
-    ///
-    /// Variables (prefix `FASTAPI_` by default):
-    /// - `FASTAPI_NAME`
-    /// - `FASTAPI_VERSION`
-    /// - `FASTAPI_DEBUG` (true/false/1/0/yes/no/on/off)
-    /// - `FASTAPI_MAX_BODY_SIZE` (bytes)
-    /// - `FASTAPI_REQUEST_TIMEOUT_MS`
-    /// - `FASTAPI_ROOT_PATH` (path prefix for reverse proxy)
-    /// - `FASTAPI_ROOT_PATH_IN_SERVERS` (true/false/1/0/yes/no/on/off)
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_env_with_prefix(Self::DEFAULT_ENV_PREFIX)
-    }
-
-    /// Load configuration from environment variables using a custom prefix.
-    pub fn from_env_with_prefix(prefix: &str) -> Result<Self, ConfigError> {
-        let mut config = Self::default();
-        config.apply_env(prefix)?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Load configuration from a JSON file.
-    ///
-    /// Only JSON is supported for now to keep dependencies minimal.
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let path = path.as_ref();
-        if !matches!(path.extension().and_then(|ext| ext.to_str()), Some("json")) {
-            return Err(ConfigError::UnsupportedFormat {
-                path: path.to_path_buf(),
-            });
-        }
-        let contents = fs::read_to_string(path)?;
-        let parsed: AppConfigFile = serde_json::from_str(&contents)?;
-        let mut config = Self::default();
-        config.apply_file(parsed);
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Load configuration from a JSON file then override with environment variables.
-    pub fn from_env_and_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let mut config = Self::from_file(path)?;
-        config.apply_env(Self::DEFAULT_ENV_PREFIX)?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Returns the root_path as an OpenAPI server entry if configured.
-    ///
-    /// Returns `Some((url, description))` if:
-    /// - `root_path` is non-empty
-    /// - `root_path_in_servers` is true
-    ///
-    /// Returns `None` otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let config = AppConfig::new().root_path("/api/v1");
-    /// if let Some((url, description)) = config.openapi_server() {
-    ///     builder = builder.server(url, description);
-    /// }
-    /// ```
-    #[must_use]
-    pub fn openapi_server(&self) -> Option<(String, Option<String>)> {
-        if !self.root_path.is_empty() && self.root_path_in_servers {
-            Some((
-                self.root_path.clone(),
-                Some("Application root path".to_string()),
-            ))
-        } else {
-            None
-        }
-    }
-
-    /// Validate configuration values.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.name.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "name must not be empty".to_string(),
-            ));
-        }
-        if self.version.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "version must not be empty".to_string(),
-            ));
-        }
-        if self.max_body_size == 0 {
-            return Err(ConfigError::Validation(
-                "max_body_size must be greater than 0".to_string(),
-            ));
-        }
-        if self.request_timeout_ms == 0 {
-            return Err(ConfigError::Validation(
-                "request_timeout_ms must be greater than 0".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn apply_file(&mut self, file: AppConfigFile) {
-        if let Some(name) = file.name {
-            self.name = name;
-        }
-        if let Some(version) = file.version {
-            self.version = version;
-        }
-        if let Some(debug) = file.debug {
-            self.debug = debug;
-        }
-        if let Some(max_body_size) = file.max_body_size {
-            self.max_body_size = max_body_size;
-        }
-        if let Some(request_timeout_ms) = file.request_timeout_ms {
-            self.request_timeout_ms = request_timeout_ms;
-        }
-        if let Some(root_path) = file.root_path {
-            self.root_path = root_path;
-        }
-        if let Some(root_path_in_servers) = file.root_path_in_servers {
-            self.root_path_in_servers = root_path_in_servers;
-        }
-    }
-
-    fn apply_env(&mut self, prefix: &str) -> Result<(), ConfigError> {
-        self.apply_env_with(prefix, fetch_env)
-    }
-
-    fn apply_env_with<F>(&mut self, prefix: &str, mut fetch: F) -> Result<(), ConfigError>
-    where
-        F: FnMut(&str) -> Result<Option<String>, ConfigError>,
-    {
-        let name_key = env_key(prefix, Self::ENV_NAME);
-        let version_key = env_key(prefix, Self::ENV_VERSION);
-        let debug_key = env_key(prefix, Self::ENV_DEBUG);
-        let max_body_key = env_key(prefix, Self::ENV_MAX_BODY_SIZE);
-        let timeout_key = env_key(prefix, Self::ENV_REQUEST_TIMEOUT_MS);
-        let root_path_key = env_key(prefix, Self::ENV_ROOT_PATH);
-        let root_path_in_servers_key = env_key(prefix, Self::ENV_ROOT_PATH_IN_SERVERS);
-
-        if let Some(value) = fetch(&name_key)? {
-            self.name = value;
-        }
-        if let Some(value) = fetch(&version_key)? {
-            self.version = value;
-        }
-        if let Some(value) = fetch(&debug_key)? {
-            self.debug = parse_bool(&debug_key, &value)?;
-        }
-        if let Some(value) = fetch(&max_body_key)? {
-            self.max_body_size = parse_usize(&max_body_key, &value)?;
-        }
-        if let Some(value) = fetch(&timeout_key)? {
-            self.request_timeout_ms = parse_u64(&timeout_key, &value)?;
-        }
-        if let Some(value) = fetch(&root_path_key)? {
-            self.root_path = value;
-        }
-        if let Some(value) = fetch(&root_path_in_servers_key)? {
-            self.root_path_in_servers = parse_bool(&root_path_in_servers_key, &value)?;
-        }
-
-        Ok(())
-    }
-}
-
-fn env_key(prefix: &str, key: &str) -> String {
-    if prefix.ends_with('_') {
-        format!("{prefix}{key}")
-    } else {
-        format!("{prefix}_{key}")
-    }
-}
-
-fn fetch_env(key: &str) -> Result<Option<String>, ConfigError> {
-    match env::var(key) {
-        Ok(value) => Ok(Some(value)),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidEnvVar {
-            key: key.to_string(),
-            value: "<non-utf8>".to_string(),
-            expected: "valid UTF-8 string".to_string(),
-        }),
-    }
-}
-
-fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
-    let normalized = value.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
-        _ => Err(ConfigError::InvalidEnvVar {
-            key: key.to_string(),
-            value: value.to_string(),
-            expected: "boolean (true/false/1/0/yes/no/on/off)".to_string(),
-        }),
-    }
-}
-
-fn parse_usize(key: &str, value: &str) -> Result<usize, ConfigError> {
-    value
-        .parse::<usize>()
-        .map_err(|_| ConfigError::InvalidEnvVar {
-            key: key.to_string(),
-            value: value.to_string(),
-            expected: "usize".to_string(),
-        })
-}
-
-fn parse_u64(key: &str, value: &str) -> Result<u64, ConfigError> {
-    value
-        .parse::<u64>()
-        .map_err(|_| ConfigError::InvalidEnvVar {
-            key: key.to_string(),
-            value: value.to_string(),
-            expected: "u64".to_string(),
-        })
 }
 
 // ============================================================================
@@ -1483,74 +673,41 @@ impl OpenApiConfig {
 ///     .route("/items/{id}", Method::Get, get_item)
 ///     .build();
 /// ```
-///
-/// # Type-Safe State
-///
-/// The `AppBuilder` uses a type-state pattern to track registered state types
-/// at compile time. The generic parameter `S` represents the type-level set of
-/// registered state types.
-///
-/// When you call `.with_state::<T>(value)`, the builder's type changes from
-/// `AppBuilder<S>` to `AppBuilder<(T, S)>`, recording that `T` is now available.
-///
-/// Handlers that use `State<T>` extractors can optionally be constrained to
-/// require `S: HasState<T>`, ensuring the state is registered at compile time.
-///
-/// ```ignore
-/// // Type changes: AppBuilder<()> -> AppBuilder<(DbPool, ())> -> AppBuilder<(Config, (DbPool, ()))>
-/// let app = App::builder()
-///     .with_state(DbPool::new())  // Now has DbPool
-///     .with_state(Config::default())  // Now has DbPool + Config
-///     .build();
-/// ```
-pub struct AppBuilder<S: StateRegistry = ()> {
+pub struct AppBuilder {
     config: AppConfig,
     routes: Vec<RouteEntry>,
     middleware: Vec<Arc<dyn Middleware>>,
     state: StateContainer,
-    dependency_overrides: Arc<DependencyOverrides>,
     exception_handlers: ExceptionHandlers,
     startup_hooks: Vec<StartupHook>,
     shutdown_hooks: Vec<Box<dyn FnOnce() + Send>>,
     async_shutdown_hooks: Vec<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
-    /// Optional lifespan function for async startup/shutdown context management.
-    lifespan: Option<BoxLifespanFn>,
-    /// Mounted sub-applications at specific path prefixes.
-    mounted_apps: Vec<MountedApp>,
-    /// Optional OpenAPI configuration.
     openapi_config: Option<OpenApiConfig>,
-    _state_marker: PhantomData<S>,
 }
 
-impl Default for AppBuilder<()> {
+impl Default for AppBuilder {
     fn default() -> Self {
         Self {
             config: AppConfig::default(),
             routes: Vec::new(),
             middleware: Vec::new(),
             state: StateContainer::default(),
-            dependency_overrides: Arc::new(DependencyOverrides::new()),
             exception_handlers: ExceptionHandlers::default(),
             startup_hooks: Vec::new(),
             shutdown_hooks: Vec::new(),
             async_shutdown_hooks: Vec::new(),
-            lifespan: None,
-            mounted_apps: Vec::new(),
             openapi_config: None,
-            _state_marker: PhantomData,
         }
     }
 }
 
-impl AppBuilder<()> {
-    /// Creates a new application builder with no registered state.
+impl AppBuilder {
+    /// Creates a new application builder.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-impl<S: StateRegistry> AppBuilder<S> {
     /// Sets the application configuration.
     #[must_use]
     pub fn config(mut self, config: AppConfig) -> Self {
@@ -1588,10 +745,7 @@ impl<S: StateRegistry> AppBuilder<S> {
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        self.routes
-            .push(RouteEntry::new(method, path, move |ctx, req| {
-                Box::pin(handler(ctx, req))
-            }));
+        self.routes.push(RouteEntry::new(method, path, handler));
         self
     }
 
@@ -1656,223 +810,12 @@ impl<S: StateRegistry> AppBuilder<S> {
         self
     }
 
-    /// Includes routes from an [`APIRouter`](crate::api_router::APIRouter).
-    ///
-    /// This adds all routes from the router to the application, applying
-    /// the router's prefix, tags, and dependencies.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fastapi_core::api_router::APIRouter;
-    ///
-    /// let users_router = APIRouter::new()
-    ///     .prefix("/users")
-    ///     .get("", list_users)
-    ///     .get("/{id}", get_user);
-    ///
-    /// let app = App::builder()
-    ///     .include_router(users_router)
-    ///     .build();
-    /// ```
-    #[must_use]
-    pub fn include_router(mut self, router: crate::api_router::APIRouter) -> Self {
-        for entry in router.into_route_entries() {
-            self.routes.push(entry);
-        }
-        self
-    }
-
-    /// Includes routes from an [`APIRouter`](crate::api_router::APIRouter) with configuration.
-    ///
-    /// This allows applying additional configuration when including a router,
-    /// such as prepending a prefix, adding tags, or injecting dependencies.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fastapi_core::api_router::{APIRouter, IncludeConfig};
-    ///
-    /// let users_router = APIRouter::new()
-    ///     .prefix("/users")
-    ///     .get("", list_users);
-    ///
-    /// let config = IncludeConfig::new()
-    ///     .prefix("/api/v1")
-    ///     .tags(vec!["api"]);
-    ///
-    /// let app = App::builder()
-    ///     .include_router_with_config(users_router, config)
-    ///     .build();
-    /// ```
-    #[must_use]
-    pub fn include_router_with_config(
-        mut self,
-        router: crate::api_router::APIRouter,
-        config: crate::api_router::IncludeConfig,
-    ) -> Self {
-        // Apply config to a temporary router, then include
-        let merged_router =
-            crate::api_router::APIRouter::new().include_router_with_config(router, config);
-        for entry in merged_router.into_route_entries() {
-            self.routes.push(entry);
-        }
-        self
-    }
-
-    /// Mounts a sub-application at a path prefix.
-    ///
-    /// Mounted applications are completely independent from the parent:
-    /// - They have their own middleware stack (parent middleware does NOT apply)
-    /// - They have their own state and configuration
-    /// - Their OpenAPI schemas are NOT merged with the parent
-    /// - Request paths have the prefix stripped before being passed to the sub-app
-    ///
-    /// This differs from [`include_router`](Self::include_router), which merges
-    /// routes into the parent app and applies parent middleware.
-    ///
-    /// # Use Cases
-    ///
-    /// - Mount admin panels at `/admin`
-    /// - Mount Swagger UI at `/docs`
-    /// - Mount static file servers
-    /// - Integrate legacy or third-party apps
-    ///
-    /// # Path Stripping Behavior
-    ///
-    /// When a request arrives at `/admin/users`, and an app is mounted at `/admin`,
-    /// the sub-app receives the request with path `/users`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fastapi_core::app::App;
-    ///
-    /// // Create an admin sub-application
-    /// let admin_app = App::builder()
-    ///     .get("/users", admin_list_users)
-    ///     .get("/settings", admin_settings)
-    ///     .middleware(AdminAuthMiddleware::new())
-    ///     .build();
-    ///
-    /// // Mount it at /admin
-    /// let main_app = App::builder()
-    ///     .get("/", home_page)
-    ///     .mount("/admin", admin_app)
-    ///     .build();
-    ///
-    /// // Now:
-    /// // - GET /           -> home_page
-    /// // - GET /admin/users -> admin_list_users (with AdminAuthMiddleware)
-    /// // - GET /admin/settings -> admin_settings (with AdminAuthMiddleware)
-    /// ```
-    #[must_use]
-    pub fn mount(mut self, prefix: impl Into<String>, app: App) -> Self {
-        self.mounted_apps.push(MountedApp::new(prefix, app));
-        self
-    }
-
-    /// Returns the number of mounted sub-applications.
-    #[must_use]
-    pub fn mounted_app_count(&self) -> usize {
-        self.mounted_apps.len()
-    }
-
-    /// Adds shared state to the application (legacy method).
+    /// Adds shared state to the application.
     ///
     /// State can be accessed by handlers through the `State<T>` extractor.
-    ///
-    /// **Note:** This method is deprecated in favor of [`with_state`](Self::with_state),
-    /// which provides compile-time verification that state types are registered.
     #[must_use]
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use `with_state` for compile-time state type verification"
-    )]
-    pub fn state<T: Send + Sync + 'static>(mut self, value: T) -> Self {
-        self.state.insert(value);
-        self
-    }
-
-    /// Adds typed state to the application with compile-time registration.
-    ///
-    /// This method registers state using a type-state pattern, which enables
-    /// compile-time verification that state types are properly registered before
-    /// they are used by handlers.
-    ///
-    /// The return type changes from `AppBuilder<S>` to `AppBuilder<(T, S)>`,
-    /// recording that type `T` is now available in the state registry.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fastapi_core::app::App;
-    ///
-    /// struct DbPool { /* ... */ }
-    /// struct Config { api_key: String }
-    ///
-    /// // Type evolves: () -> (DbPool, ()) -> (Config, (DbPool, ()))
-    /// let app = App::builder()
-    ///     .with_state(DbPool::new())    // Now has DbPool
-    ///     .with_state(Config::default()) // Now has DbPool + Config
-    ///     .build();
-    /// ```
-    ///
-    /// # Compile-Time Safety
-    ///
-    /// When used with the `RequiresState` trait, handlers can declare their
-    /// state dependencies and the compiler will verify they are met:
-    ///
-    /// ```ignore
-    /// // This handler requires DbPool to be registered
-    /// fn handler_requiring_db<S: HasState<DbPool>>(app: AppBuilder<S>) { /* ... */ }
-    /// ```
-    #[must_use]
-    pub fn with_state<T: Send + Sync + 'static>(mut self, value: T) -> AppBuilder<(T, S)> {
-        self.state.insert(value);
-        AppBuilder {
-            config: self.config,
-            routes: self.routes,
-            middleware: self.middleware,
-            state: self.state,
-            dependency_overrides: self.dependency_overrides,
-            exception_handlers: self.exception_handlers,
-            startup_hooks: self.startup_hooks,
-            shutdown_hooks: self.shutdown_hooks,
-            async_shutdown_hooks: self.async_shutdown_hooks,
-            lifespan: self.lifespan,
-            mounted_apps: self.mounted_apps,
-            openapi_config: self.openapi_config,
-            _state_marker: PhantomData,
-        }
-    }
-
-    /// Registers a dependency override for this application (useful in tests).
-    #[must_use]
-    pub fn override_dependency<T, F, Fut>(self, f: F) -> Self
-    where
-        T: FromDependency,
-        F: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<T, T::Error>> + Send + 'static,
-    {
-        self.dependency_overrides.insert::<T, F, Fut>(f);
-        self
-    }
-
-    /// Registers a fixed dependency override value.
-    #[must_use]
-    pub fn override_dependency_value<T>(self, value: T) -> Self
-    where
-        T: FromDependency,
-    {
-        self.dependency_overrides.insert_value(value);
-        self
-    }
-
-    /// Clears all registered dependency overrides.
-    #[must_use]
-    pub fn clear_dependency_overrides(self) -> Self {
-        self.dependency_overrides.clear();
+    pub fn state<T: Send + Sync + 'static>(mut self, state: T) -> Self {
+        self.state.insert(state);
         self
     }
 
@@ -2041,120 +984,6 @@ impl<S: StateRegistry> AppBuilder<S> {
         self
     }
 
-    /// Registers a lifespan context manager for async startup/shutdown.
-    ///
-    /// The lifespan pattern is preferred over separate `on_startup`/`on_shutdown` hooks
-    /// because it allows sharing state between the startup and shutdown phases. This is
-    /// especially useful for resources like database connections, HTTP clients, or
-    /// background task managers.
-    ///
-    /// The lifespan function runs during application startup. It should:
-    /// 1. Initialize resources (connect to database, start background tasks, etc.)
-    /// 2. Return a `LifespanScope` containing:
-    ///    - State to be added to the application (accessible via `State<T>` extractor)
-    ///    - An optional cleanup closure to run during shutdown
-    ///
-    /// If the lifespan function returns an error, application startup is aborted.
-    ///
-    /// **Note:** When a lifespan is provided, it runs *before* any `on_startup` hooks.
-    /// The lifespan cleanup runs *after* all `on_shutdown` hooks during shutdown.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fastapi_core::app::{App, LifespanScope, LifespanError};
-    ///
-    /// #[derive(Clone)]
-    /// struct DatabasePool { /* ... */ }
-    ///
-    /// impl DatabasePool {
-    ///     async fn connect(url: &str) -> Result<Self, Error> { /* ... */ }
-    ///     async fn close(&self) { /* ... */ }
-    /// }
-    ///
-    /// let app = App::builder()
-    ///     .lifespan(|| async {
-    ///         // Startup: connect to database
-    ///         println!("Connecting to database...");
-    ///         let pool = DatabasePool::connect("postgres://localhost/mydb")
-    ///             .await
-    ///             .map_err(|e| LifespanError::with_source("database connection failed", e))?;
-    ///
-    ///         // Clone for use in cleanup
-    ///         let pool_for_cleanup = pool.clone();
-    ///
-    ///         // Return state and cleanup
-    ///         Ok(LifespanScope::new(pool)
-    ///             .on_shutdown(async move {
-    ///                 println!("Closing database connections...");
-    ///                 pool_for_cleanup.close().await;
-    ///             }))
-    ///     })
-    ///     .get("/users", get_users)  // Handler can use State<DatabasePool>
-    ///     .build();
-    /// ```
-    ///
-    /// # Multiple State Types
-    ///
-    /// To provide multiple state types from a single lifespan, use a tuple or
-    /// define a struct containing all your state:
-    ///
-    /// ```ignore
-    /// #[derive(Clone)]
-    /// struct AppState {
-    ///     db: DatabasePool,
-    ///     cache: RedisClient,
-    ///     config: AppConfig,
-    /// }
-    ///
-    /// let app = App::builder()
-    ///     .lifespan(|| async {
-    ///         let db = DatabasePool::connect("...").await?;
-    ///         let cache = RedisClient::connect("...").await?;
-    ///         let config = load_config().await?;
-    ///
-    ///         let state = AppState { db, cache, config };
-    ///         let state_for_cleanup = state.clone();
-    ///
-    ///         Ok(LifespanScope::new(state)
-    ///             .on_shutdown(async move {
-    ///                 state_for_cleanup.db.close().await;
-    ///                 state_for_cleanup.cache.close().await;
-    ///             }))
-    ///     })
-    ///     .build();
-    /// ```
-    #[must_use]
-    pub fn lifespan<F, Fut, T>(mut self, lifespan_fn: F) -> Self
-    where
-        F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = Result<LifespanScope<T>, LifespanError>> + Send + 'static,
-        T: Send + Sync + 'static,
-    {
-        self.lifespan = Some(Box::new(move || {
-            Box::pin(async move {
-                // Run the lifespan function
-                let mut scope = lifespan_fn().await?;
-
-                // Extract cleanup first (before moving state)
-                let cleanup = scope.take_cleanup();
-
-                // Extract the state as a boxed Any
-                let state: Box<dyn std::any::Any + Send + Sync> = Box::new(scope.state);
-
-                // Return both the state and the cleanup future
-                Ok((state, cleanup))
-            })
-        }));
-        self
-    }
-
-    /// Returns true if a lifespan function has been registered.
-    #[must_use]
-    pub fn has_lifespan(&self) -> bool {
-        self.lifespan.is_some()
-    }
-
     /// Returns the number of registered startup hooks.
     #[must_use]
     pub fn startup_hook_count(&self) -> usize {
@@ -2179,7 +1008,7 @@ impl<S: StateRegistry> AppBuilder<S> {
         // Generate OpenAPI spec if configured
         let (openapi_spec, openapi_path) = if let Some(ref openapi_config) = self.openapi_config {
             if openapi_config.enabled {
-                let spec = self.generate_openapi_stub(openapi_config);
+                let spec = self.generate_openapi_spec(openapi_config);
                 let spec_json =
                     serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
                 (
@@ -2195,19 +1024,19 @@ impl<S: StateRegistry> AppBuilder<S> {
 
         // Add OpenAPI endpoint if spec was generated
         if let (Some(spec), Some(path)) = (&openapi_spec, &openapi_path) {
-            let spec_clone: Arc<String> = Arc::clone(spec);
+            let spec_clone = Arc::clone(spec);
             self.routes.push(RouteEntry::new(
                 Method::Get,
                 path.clone(),
                 move |_ctx: &RequestContext, _req: &mut Request| {
                     let spec = Arc::clone(&spec_clone);
-                    Box::pin(async move {
+                    async move {
                         Response::ok()
                             .header("content-type", b"application/json".to_vec())
                             .body(crate::response::ResponseBody::Bytes(
                                 spec.as_bytes().to_vec(),
                             ))
-                    })
+                    }
                 },
             ));
         }
@@ -2217,141 +1046,100 @@ impl<S: StateRegistry> AppBuilder<S> {
             middleware_stack.push_arc(mw);
         }
 
-        // Build the route table from route entries
-        // Each route stores its index into the routes vec
-        let mut route_table = RouteTable::new();
-        for (idx, route) in self.routes.iter().enumerate() {
-            route_table.add(route.method, &route.path, idx);
+        // Build the trie-based router from registered routes
+        let mut router = Router::new();
+        for entry in &self.routes {
+            let route = Route::new(entry.method, &entry.path);
+            router
+                .add(route)
+                .expect("route conflict during App::build()");
         }
 
         App {
             config: self.config,
             routes: self.routes,
-            route_table,
+            router,
             middleware: middleware_stack,
-            state: Arc::new(parking_lot::RwLock::new(self.state)),
-            dependency_overrides: Arc::clone(&self.dependency_overrides),
+            state: Arc::new(self.state),
             exception_handlers: Arc::new(self.exception_handlers),
             startup_hooks: parking_lot::Mutex::new(self.startup_hooks),
             shutdown_hooks: parking_lot::Mutex::new(self.shutdown_hooks),
             async_shutdown_hooks: parking_lot::Mutex::new(self.async_shutdown_hooks),
-            lifespan: parking_lot::Mutex::new(self.lifespan),
-            lifespan_cleanup: parking_lot::Mutex::new(None),
-            mounted_apps: self.mounted_apps,
+            openapi_spec,
         }
     }
 
-    /// Generate a minimal OpenAPI-like spec stub from registered routes.
-    fn generate_openapi_stub(&self, config: &OpenApiConfig) -> serde_json::Value {
-        let mut paths = serde_json::Map::new();
-        for entry in &self.routes {
-            let method = entry.method.as_str().to_lowercase();
-            let op = serde_json::json!({
-                "responses": { "200": { "description": "Successful response" } }
-            });
-            paths
-                .entry(entry.path.clone())
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
-                .as_object_mut()
-                .unwrap()
-                .insert(method, op);
-        }
-        let mut spec = serde_json::json!({
-            "openapi": "3.0.3",
-            "info": { "title": config.title, "version": config.version },
-            "paths": paths,
-        });
+    /// Generate an OpenAPI spec from registered routes.
+    fn generate_openapi_spec(&self, config: &OpenApiConfig) -> fastapi_openapi::OpenApi {
+        use fastapi_openapi::{OpenApiBuilder, Operation, Response as OAResponse};
+        use std::collections::HashMap;
+
+        let mut builder = OpenApiBuilder::new(&config.title, &config.version);
+
+        // Add description if provided
         if let Some(ref desc) = config.description {
-            spec["info"]["description"] = serde_json::Value::String(desc.clone());
+            builder = builder.description(desc);
         }
-        spec
+
+        // Add servers
+        for (url, desc) in &config.servers {
+            builder = builder.server(url, desc.clone());
+        }
+
+        // Add tags
+        for (name, desc) in &config.tags {
+            builder = builder.tag(name, desc.clone());
+        }
+
+        // Add operations for each registered route
+        for entry in &self.routes {
+            // Create a basic operation with default response
+            let mut responses = HashMap::new();
+            responses.insert(
+                "200".to_string(),
+                OAResponse {
+                    description: "Successful response".to_string(),
+                    content: HashMap::new(),
+                },
+            );
+
+            let operation = Operation {
+                operation_id: Some(format!(
+                    "{}_{}",
+                    entry.method.as_str().to_lowercase(),
+                    entry
+                        .path
+                        .replace('/', "_")
+                        .replace(['{', '}'], "")
+                        .trim_matches('_')
+                )),
+                summary: None,
+                description: None,
+                tags: Vec::new(),
+                parameters: Vec::new(),
+                request_body: None,
+                responses,
+                deprecated: false,
+            };
+
+            builder = builder.operation(entry.method.as_str(), &entry.path, operation);
+        }
+
+        builder.build()
     }
 }
 
-impl<S: StateRegistry> std::fmt::Debug for AppBuilder<S> {
+impl std::fmt::Debug for AppBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppBuilder")
             .field("config", &self.config)
             .field("routes", &self.routes.len())
             .field("middleware", &self.middleware.len())
             .field("state", &self.state)
-            .field("dependency_overrides", &self.dependency_overrides)
             .field("exception_handlers", &self.exception_handlers)
             .field("startup_hooks", &self.startup_hooks.len())
             .field("shutdown_hooks", &self.shutdown_hook_count())
-            .field("mounted_apps", &self.mounted_apps.len())
             .finish()
-    }
-}
-
-/// A mounted sub-application with its path prefix.
-///
-/// Mounted applications are completely independent from the parent app:
-/// - They have their own middleware stack
-/// - They have their own state and configuration
-/// - Their OpenAPI schemas are NOT merged with the parent
-/// - Request paths have the prefix stripped before being passed to the sub-app
-///
-/// This differs from `include_router`, which merges routes into the parent app.
-#[derive(Debug)]
-pub struct MountedApp {
-    /// Path prefix at which this app is mounted (e.g., "/admin", "/docs").
-    prefix: String,
-    /// The mounted sub-application.
-    app: Arc<App>,
-}
-
-impl MountedApp {
-    /// Create a new mounted app at the given prefix.
-    ///
-    /// The prefix should start with '/' and not end with '/'.
-    #[must_use]
-    pub fn new(prefix: impl Into<String>, app: App) -> Self {
-        let mut prefix = prefix.into();
-        // Normalize prefix: ensure starts with '/', doesn't end with '/'
-        if !prefix.starts_with('/') {
-            prefix = format!("/{}", prefix);
-        }
-        while prefix.ends_with('/') && prefix.len() > 1 {
-            prefix.pop();
-        }
-        Self {
-            prefix,
-            app: Arc::new(app),
-        }
-    }
-
-    /// Returns the mount prefix.
-    #[must_use]
-    pub fn prefix(&self) -> &str {
-        &self.prefix
-    }
-
-    /// Returns a reference to the mounted app.
-    #[must_use]
-    pub fn app(&self) -> &App {
-        &self.app
-    }
-
-    /// Check if a request path matches this mount prefix.
-    ///
-    /// Returns the remaining path after the prefix is stripped, or None if no match.
-    #[must_use]
-    pub fn match_prefix<'a>(&self, path: &'a str) -> Option<&'a str> {
-        if path == self.prefix {
-            // Exact match - sub-app should receive "/"
-            Some("/")
-        } else if path.starts_with(&self.prefix) {
-            let remaining = &path[self.prefix.len()..];
-            // Must be followed by '/' or end of string
-            if remaining.starts_with('/') {
-                Some(remaining)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
     }
 }
 
@@ -2362,30 +1150,23 @@ impl MountedApp {
 pub struct App {
     config: AppConfig,
     routes: Vec<RouteEntry>,
-    /// Route table for path matching with parameter extraction.
-    route_table: RouteTable<usize>,
+    router: Router,
     middleware: MiddlewareStack,
-    /// State container with interior mutability to support lifespan-injected state.
-    state: Arc<parking_lot::RwLock<StateContainer>>,
-    dependency_overrides: Arc<DependencyOverrides>,
+    state: Arc<StateContainer>,
     exception_handlers: Arc<ExceptionHandlers>,
     startup_hooks: parking_lot::Mutex<Vec<StartupHook>>,
     shutdown_hooks: parking_lot::Mutex<Vec<Box<dyn FnOnce() + Send>>>,
     async_shutdown_hooks: parking_lot::Mutex<
         Vec<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
     >,
-    /// Pending lifespan function to run during startup.
-    lifespan: parking_lot::Mutex<Option<BoxLifespanFn>>,
-    /// Cleanup future from lifespan function (runs during shutdown).
-    lifespan_cleanup: parking_lot::Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>,
-    /// Mounted sub-applications.
-    mounted_apps: Vec<MountedApp>,
+    /// The generated OpenAPI specification (if enabled).
+    openapi_spec: Option<Arc<String>>,
 }
 
 impl App {
     /// Creates a new application builder.
     #[must_use]
-    pub fn builder() -> AppBuilder<()> {
+    pub fn builder() -> AppBuilder {
         AppBuilder::new()
     }
 
@@ -2401,44 +1182,40 @@ impl App {
         self.routes.len()
     }
 
-    /// Returns the shared state container (protected by RwLock for lifespan mutation).
+    /// Returns an iterator over route metadata (method, path).
+    ///
+    /// This is useful for generating OpenAPI specifications or debugging.
+    pub fn routes(&self) -> impl Iterator<Item = (Method, &str)> {
+        self.routes.iter().map(|r| (r.method, r.path.as_str()))
+    }
+
+    /// Returns the generated OpenAPI specification JSON, if OpenAPI is enabled.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let app = App::builder()
+    ///     .openapi(OpenApiConfig::new().title("My API"))
+    ///     .build();
+    ///
+    /// if let Some(spec) = app.openapi_spec() {
+    ///     println!("OpenAPI spec: {}", spec);
+    /// }
+    /// ```
     #[must_use]
-    pub fn state(&self) -> &Arc<parking_lot::RwLock<StateContainer>> {
+    pub fn openapi_spec(&self) -> Option<&str> {
+        self.openapi_spec.as_ref().map(|s| s.as_str())
+    }
+
+    /// Returns the shared state container.
+    #[must_use]
+    pub fn state(&self) -> &Arc<StateContainer> {
         &self.state
     }
 
     /// Gets a reference to shared state of type T.
     pub fn get_state<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        self.state.read().get::<T>()
-    }
-
-    /// Returns the dependency overrides registry.
-    #[must_use]
-    pub fn dependency_overrides(&self) -> &Arc<DependencyOverrides> {
-        &self.dependency_overrides
-    }
-
-    /// Registers a dependency override for this application (useful in tests).
-    pub fn override_dependency<T, F, Fut>(&self, f: F)
-    where
-        T: FromDependency,
-        F: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<T, T::Error>> + Send + 'static,
-    {
-        self.dependency_overrides.insert::<T, F, Fut>(f);
-    }
-
-    /// Registers a fixed dependency override value.
-    pub fn override_dependency_value<T>(&self, value: T)
-    where
-        T: FromDependency,
-    {
-        self.dependency_overrides.insert_value(value);
-    }
-
-    /// Clears all registered dependency overrides.
-    pub fn clear_dependency_overrides(&self) {
-        self.dependency_overrides.clear();
+        self.state.get::<T>()
     }
 
     /// Returns the exception handlers registry.
@@ -2466,132 +1243,47 @@ impl App {
         self.exception_handlers.handle_or_default(ctx, err)
     }
 
-    /// Returns the mounted sub-applications.
-    #[must_use]
-    pub fn mounted_apps(&self) -> &[MountedApp] {
-        &self.mounted_apps
-    }
-
     /// Handles an incoming request.
     ///
-    /// This first checks mounted sub-applications (in registration order),
-    /// then matches against registered routes, runs middleware, and returns
-    /// the response. Path parameters are extracted and stored in request
-    /// extensions for use by the `Path` extractor.
-    ///
-    /// # Mounted App Handling
-    ///
-    /// When a request path matches a mounted app's prefix, the request is
-    /// forwarded to that app with the prefix stripped from the path. The
-    /// mounted app's middleware runs instead of the parent's middleware.
-    ///
-    /// # Special Parameter Injection
-    ///
-    /// - **ResponseMutations**: Headers and cookies set by handlers are automatically
-    ///   applied to the final response.
-    /// - **BackgroundTasks**: Tasks are stored in request extensions via
-    ///   `BackgroundTasksInner`. The HTTP server should retrieve and execute these
-    ///   after sending the response using `take_background_tasks()`.
+    /// This matches the request against registered routes, runs middleware,
+    /// and returns the response.
     pub async fn handle(&self, ctx: &RequestContext, req: &mut Request) -> Response {
-        // First, check mounted sub-applications
-        for mounted in &self.mounted_apps {
-            if let Some(stripped_path) = mounted.match_prefix(req.path()) {
-                // Clone the request with the stripped path for the sub-app
-                let original_path = req.path().to_string();
-                req.set_path(stripped_path.to_string());
+        // Use the trie-based router for efficient matching with path parameter extraction
+        match self.router.lookup(req.path(), req.method()) {
+            RouteLookup::Match(route_match) => {
+                // Find the handler by matching the route path
+                let entry = self.routes.iter().find(|e| {
+                    e.method == route_match.route.method && e.path == route_match.route.path
+                });
 
-                // Forward to the mounted app (uses its own middleware stack)
-                // Use Box::pin for the recursive call to avoid infinite future size
-                let response = Box::pin(mounted.app.handle(ctx, req)).await;
-
-                // Restore original path (in case of error handling or logging)
-                req.set_path(original_path);
-
-                return response;
-            }
-        }
-
-        // Use the route table for path matching with converter validation
-        match self.route_table.lookup(req.path(), req.method()) {
-            RouteLookup::Match { route: idx, params } => {
-                // Store path parameters in request extensions for the Path extractor
-                req.insert_extension(PathParams::from_pairs(params));
-
-                // Initialize response mutations container for handlers to use
-                req.insert_extension(crate::extract::ResponseMutations::new());
-
-                // Initialize background tasks container for handlers to use
-                req.insert_extension(crate::extract::BackgroundTasksInner::new());
-
-                // Get the route entry by index
-                let entry = &self.routes[*idx];
-                let handler = RouteHandler { entry };
-                let response = self.middleware.execute(&handler, ctx, req).await;
-
-                // Run cleanup functions in LIFO order (even on error)
-                ctx.cleanup_stack().run_cleanups().await;
-
-                // Apply any response mutations set by the handler
-                let response = if let Some(mutations) =
-                    req.get_extension::<crate::extract::ResponseMutations>()
-                {
-                    mutations.clone().apply(response)
-                } else {
-                    response
+                let Some(entry) = entry else {
+                    // This should never happen if router and routes are in sync
+                    return Response::with_status(StatusCode::INTERNAL_SERVER_ERROR);
                 };
 
-                // Handle HEAD requests: strip body but preserve Content-Length
-                // HEAD should return same headers as GET but with no body
-                if req.method() == Method::Head {
-                    strip_body_for_head(response)
-                } else {
-                    response
+                // Store extracted path parameters in the request
+                if !route_match.params.is_empty() {
+                    let path_params = crate::extract::PathParams::from_pairs(
+                        route_match
+                            .params
+                            .iter()
+                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                            .collect(),
+                    );
+                    req.insert_extension(path_params);
                 }
+
+                // Create a handler that wraps the route
+                let handler = RouteHandler { entry };
+                self.middleware.execute(&handler, ctx, req).await
             }
-            RouteLookup::MethodNotAllowed { mut allowed } => {
-                // Auto-handle OPTIONS requests: return 204 No Content with Allow header
-                // listing all methods available for this path (including OPTIONS)
-                if req.method() == Method::Options {
-                    // Add OPTIONS to allowed methods if not already present
-                    if !allowed.contains(&Method::Options) {
-                        allowed.push(Method::Options);
-                        // Re-sort to maintain consistent ordering
-                        allowed.sort_by_key(|m| method_order(*m));
-                    }
-                    return Response::with_status(StatusCode::NO_CONTENT)
-                        .header("Allow", format_allow_header(&allowed).into_bytes());
-                }
+            RouteLookup::MethodNotAllowed { allowed } => {
+                // Return 405 with Allow header listing permitted methods
                 Response::with_status(StatusCode::METHOD_NOT_ALLOWED)
-                    .header("Allow", format_allow_header(&allowed).into_bytes())
+                    .header("allow", allowed.header_value().as_bytes().to_vec())
             }
             RouteLookup::NotFound => Response::with_status(StatusCode::NOT_FOUND),
-            RouteLookup::Redirect { target } => {
-                // 308 Permanent Redirect preserves the request method
-                Response::with_status(StatusCode::PERMANENT_REDIRECT)
-                    .header("Location", target.into_bytes())
-            }
         }
-    }
-
-    /// Take background tasks from a request after handling.
-    ///
-    /// This should be called by the HTTP server after `handle()` returns
-    /// and the response has been sent to the client. The returned tasks
-    /// should be executed asynchronously.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let response = app.handle(&ctx, &mut request).await;
-    /// // Send response to client...
-    /// if let Some(tasks) = App::take_background_tasks(&mut request) {
-    ///     tasks.execute_all().await;
-    /// }
-    /// ```
-    #[must_use]
-    pub fn take_background_tasks(req: &mut Request) -> Option<crate::extract::BackgroundTasks> {
-        req.get_extension::<crate::extract::BackgroundTasksInner>()
-            .map(|inner| crate::extract::BackgroundTasks::from_inner(inner.clone()))
     }
 
     // =========================================================================
@@ -2611,30 +1303,8 @@ impl App {
     /// - `StartupOutcome::PartialSuccess` if some hooks had non-fatal errors
     /// - `StartupOutcome::Aborted` if a fatal hook error occurred
     pub async fn run_startup_hooks(&self) -> StartupOutcome {
-        let mut warnings = 0;
-
-        // Run lifespan function first (if registered)
-        let lifespan_fn = self.lifespan.lock().take();
-        if let Some(lifespan) = lifespan_fn {
-            // Run the lifespan function (returns state + cleanup)
-            let result = lifespan().await;
-
-            match result {
-                Ok((state, cleanup)) => {
-                    // Insert the state into the container
-                    self.state.write().insert_any(state);
-                    // Store cleanup future for shutdown
-                    *self.lifespan_cleanup.lock() = cleanup;
-                }
-                Err(e) => {
-                    // Convert LifespanError to StartupHookError and abort
-                    return StartupOutcome::Aborted(e.into());
-                }
-            }
-        }
-
-        // Run regular startup hooks
         let hooks: Vec<StartupHook> = std::mem::take(&mut *self.startup_hooks.lock());
+        let mut warnings = 0;
 
         for hook in hooks {
             match hook.run() {
@@ -2688,12 +1358,6 @@ impl App {
         for hook in sync_hooks.into_iter().rev() {
             hook();
         }
-
-        // Run lifespan cleanup last (mirrors startup order)
-        let lifespan_cleanup = self.lifespan_cleanup.lock().take();
-        if let Some(cleanup) = lifespan_cleanup {
-            cleanup.await;
-        }
     }
 
     /// Transfers shutdown hooks to a [`ShutdownController`].
@@ -2727,62 +1391,6 @@ impl App {
     pub fn pending_shutdown_hooks(&self) -> usize {
         self.shutdown_hooks.lock().len() + self.async_shutdown_hooks.lock().len()
     }
-
-    // =========================================================================
-    // Testing Support
-    // =========================================================================
-
-    /// Creates a [`crate::TestClient`] for this application.
-    ///
-    /// The test client provides in-process testing without network overhead,
-    /// simulating HTTP requests against the full application stack including
-    /// middleware, routing, and handlers.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fastapi_core::{App, Request, Response, RequestContext, Method};
-    ///
-    /// async fn hello(ctx: &RequestContext, req: &mut Request) -> Response {
-    ///     Response::ok().body_text("Hello!")
-    /// }
-    ///
-    /// let app = App::builder()
-    ///     .route("/hello", Method::Get, hello)
-    ///     .build();
-    ///
-    /// // Create test client from app
-    /// let client = app.test_client();
-    ///
-    /// // Make requests
-    /// let response = client.get("/hello").send();
-    /// assert_eq!(response.status().as_u16(), 200);
-    /// assert_eq!(response.text(), "Hello!");
-    /// ```
-    #[must_use]
-    pub fn test_client(self: Arc<Self>) -> crate::testing::TestClient<Arc<App>> {
-        crate::testing::TestClient::new(self)
-    }
-
-    /// Creates a [`crate::TestClient`] with a specific seed for deterministic testing.
-    ///
-    /// Using the same seed produces reproducible behavior for tests involving
-    /// concurrent operations or random elements.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let app = Arc::new(App::builder().build());
-    /// let client = app.test_client_with_seed(42);
-    /// // Tests will be deterministic with this seed
-    /// ```
-    #[must_use]
-    pub fn test_client_with_seed(
-        self: Arc<Self>,
-        seed: u64,
-    ) -> crate::testing::TestClient<Arc<App>> {
-        crate::testing::TestClient::with_seed(self, seed)
-    }
 }
 
 impl std::fmt::Debug for App {
@@ -2792,39 +1400,10 @@ impl std::fmt::Debug for App {
             .field("routes", &self.routes.len())
             .field("middleware", &self.middleware.len())
             .field("state", &self.state)
-            .field("dependency_overrides", &self.dependency_overrides)
             .field("exception_handlers", &self.exception_handlers)
             .field("startup_hooks", &self.startup_hooks.lock().len())
             .field("shutdown_hooks", &self.pending_shutdown_hooks())
             .finish()
-    }
-}
-
-impl Handler for App {
-    fn call<'a>(
-        &'a self,
-        ctx: &'a RequestContext,
-        req: &'a mut Request,
-    ) -> BoxFuture<'a, Response> {
-        Box::pin(async move { self.handle(ctx, req).await })
-    }
-
-    fn dependency_overrides(&self) -> Option<Arc<DependencyOverrides>> {
-        Some(Arc::clone(&self.dependency_overrides))
-    }
-}
-
-impl Handler for Arc<App> {
-    fn call<'a>(
-        &'a self,
-        ctx: &'a RequestContext,
-        req: &'a mut Request,
-    ) -> BoxFuture<'a, Response> {
-        Box::pin(async move { self.handle(ctx, req).await })
-    }
-
-    fn dependency_overrides(&self) -> Option<Arc<DependencyOverrides>> {
-        Some(Arc::clone(&self.dependency_overrides))
     }
 }
 
@@ -2840,58 +1419,8 @@ impl<'a> Handler for RouteHandler<'a> {
         req: &'b mut Request,
     ) -> BoxFuture<'b, Response> {
         let handler = self.entry.handler.clone();
-        Box::pin(async move {
-            let _ = ctx.checkpoint();
-            handler(ctx, req).await
-        })
+        Box::pin(async move { handler(ctx, req).await })
     }
-}
-
-/// Strip the body from a response for HEAD requests.
-///
-/// Per HTTP spec (RFC 7231 Section 4.3.2), HEAD responses must have the
-/// same headers as the corresponding GET response, including Content-Length
-/// if applicable, but with an empty message body.
-///
-/// This function:
-/// - Preserves Content-Length header if already present
-/// - Adds Content-Length for known-length bodies (Bytes) if not present
-/// - Does not add Content-Length for streaming bodies (length unknown)
-/// - Strips the body, returning an empty response
-fn strip_body_for_head(response: Response) -> Response {
-    use crate::response::ResponseBody;
-
-    // Check if Content-Length already exists
-    let has_content_length = response
-        .headers()
-        .iter()
-        .any(|(name, _): &(String, Vec<u8>)| name.eq_ignore_ascii_case("content-length"));
-
-    // Decompose the response
-    let (status, headers, body) = response.into_parts();
-
-    // Determine if we should add Content-Length
-    // Only add if not present and body has known length (Bytes, not Stream)
-    let content_length_to_add: Option<usize> = if has_content_length {
-        None
-    } else {
-        match &body {
-            ResponseBody::Bytes(b) => Some(b.len()),
-            ResponseBody::Empty => Some(0),
-            ResponseBody::Stream(_) => None, // Unknown length, can't add
-        }
-    };
-
-    // Build new response with empty body but preserved headers
-    let mut new_response = Response::with_status(status)
-        .body(ResponseBody::Empty)
-        .rebuild_with_headers(headers);
-
-    if let Some(len) = content_length_to_add {
-        new_response = new_response.header("content-length", len.to_string().as_bytes().to_vec());
-    }
-
-    new_response
 }
 
 #[cfg(test)]
@@ -2899,9 +1428,6 @@ mod tests {
     use super::*;
 
     use crate::response::ResponseBody;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     // Test handlers that return 'static futures (no borrowing from parameters)
     fn test_handler(_ctx: &RequestContext, _req: &mut Request) -> std::future::Ready<Response> {
@@ -2946,274 +1472,6 @@ mod tests {
     }
 
     #[test]
-    fn app_config_defaults() {
-        let config = AppConfig::default();
-        assert_eq!(config.name, "fastapi_rust");
-        assert_eq!(config.version, "0.1.0");
-        assert!(!config.debug);
-        assert_eq!(config.max_body_size, 1024 * 1024);
-        assert_eq!(config.request_timeout_ms, 30_000);
-    }
-
-    #[test]
-    fn app_config_from_env_parses_values() {
-        let mut env = HashMap::new();
-        env.insert("FASTAPI_NAME".to_string(), "Env API".to_string());
-        env.insert("FASTAPI_VERSION".to_string(), "9.9.9".to_string());
-        env.insert("FASTAPI_DEBUG".to_string(), "true".to_string());
-        env.insert("FASTAPI_MAX_BODY_SIZE".to_string(), "4096".to_string());
-        env.insert(
-            "FASTAPI_REQUEST_TIMEOUT_MS".to_string(),
-            "15000".to_string(),
-        );
-
-        let mut config = AppConfig::default();
-        config
-            .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
-                Ok(env.get(key).cloned())
-            })
-            .expect("env config");
-        config.validate().expect("env config");
-
-        assert_eq!(config.name, "Env API");
-        assert_eq!(config.version, "9.9.9");
-        assert!(config.debug);
-        assert_eq!(config.max_body_size, 4096);
-        assert_eq!(config.request_timeout_ms, 15_000);
-    }
-
-    #[test]
-    fn app_config_from_env_invalid_value() {
-        let mut env = HashMap::new();
-        env.insert(
-            "FASTAPI_MAX_BODY_SIZE".to_string(),
-            "not-a-number".to_string(),
-        );
-
-        let mut config = AppConfig::default();
-        let err = config
-            .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
-                Ok(env.get(key).cloned())
-            })
-            .expect_err("invalid env should error");
-        match err {
-            ConfigError::InvalidEnvVar { key, .. } => {
-                assert_eq!(key, "FASTAPI_MAX_BODY_SIZE");
-            }
-            _ => panic!("expected invalid env var error"),
-        }
-    }
-
-    #[test]
-    fn app_config_validation_rejects_empty_name() {
-        let config = AppConfig {
-            name: String::new(),
-            ..Default::default()
-        };
-        let err = config.validate().expect_err("empty name invalid");
-        assert!(matches!(err, ConfigError::Validation(_)));
-    }
-
-    #[test]
-    fn app_config_from_file_json() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let mut path = std::env::temp_dir();
-        path.push(format!("fastapi_config_{stamp}.json"));
-
-        let json = r#"{
-  "name": "File API",
-  "version": "2.1.0",
-  "debug": true,
-  "max_body_size": 2048,
-  "request_timeout_ms": 8000
-}"#;
-        std::fs::write(&path, json).expect("write temp config");
-
-        let config = AppConfig::from_file(&path).expect("file config");
-        assert_eq!(config.name, "File API");
-        assert_eq!(config.version, "2.1.0");
-        assert!(config.debug);
-        assert_eq!(config.max_body_size, 2048);
-        assert_eq!(config.request_timeout_ms, 8000);
-    }
-
-    #[test]
-    fn app_config_env_overrides_file() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let mut path = std::env::temp_dir();
-        path.push(format!("fastapi_config_override_{stamp}.json"));
-
-        let json = r#"{
-  "name": "File API",
-  "version": "1.0.0",
-  "debug": false,
-  "max_body_size": 1024,
-  "request_timeout_ms": 1000
-}"#;
-        std::fs::write(&path, json).expect("write temp config");
-
-        let mut env = HashMap::new();
-        env.insert("FASTAPI_NAME".to_string(), "Env API".to_string());
-        env.insert("FASTAPI_DEBUG".to_string(), "1".to_string());
-
-        let mut config = AppConfig::from_file(&path).expect("file config");
-        config
-            .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
-                Ok(env.get(key).cloned())
-            })
-            .expect("env+file config");
-        config.validate().expect("env+file config");
-
-        assert_eq!(config.name, "Env API");
-        assert!(config.debug);
-        assert_eq!(config.version, "1.0.0");
-        assert_eq!(config.max_body_size, 1024);
-    }
-
-    #[test]
-    fn app_config_default_root_path() {
-        let config = AppConfig::default();
-        assert!(config.root_path.is_empty());
-        assert!(config.root_path_in_servers);
-    }
-
-    #[test]
-    fn app_config_builder_root_path() {
-        let config = AppConfig::new()
-            .root_path("/api/v1")
-            .root_path_in_servers(false);
-
-        assert_eq!(config.root_path, "/api/v1");
-        assert!(!config.root_path_in_servers);
-    }
-
-    #[test]
-    fn app_config_from_env_root_path() {
-        let mut env = HashMap::new();
-        env.insert("FASTAPI_ROOT_PATH".to_string(), "/proxy".to_string());
-        env.insert(
-            "FASTAPI_ROOT_PATH_IN_SERVERS".to_string(),
-            "false".to_string(),
-        );
-
-        let mut config = AppConfig::default();
-        config
-            .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
-                Ok(env.get(key).cloned())
-            })
-            .expect("env config");
-
-        assert_eq!(config.root_path, "/proxy");
-        assert!(!config.root_path_in_servers);
-    }
-
-    #[test]
-    fn app_config_from_env_root_path_in_servers_truthy() {
-        for truthy in &["true", "1", "yes", "on"] {
-            let mut env = HashMap::new();
-            env.insert(
-                "FASTAPI_ROOT_PATH_IN_SERVERS".to_string(),
-                (*truthy).to_string(),
-            );
-
-            let mut config = AppConfig::new().root_path_in_servers(false);
-            config
-                .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
-                    Ok(env.get(key).cloned())
-                })
-                .expect("env config");
-
-            assert!(
-                config.root_path_in_servers,
-                "expected true for value: {}",
-                truthy
-            );
-        }
-    }
-
-    #[test]
-    fn app_config_from_env_root_path_in_servers_falsy() {
-        for falsy in &["false", "0", "no", "off"] {
-            let mut env = HashMap::new();
-            env.insert(
-                "FASTAPI_ROOT_PATH_IN_SERVERS".to_string(),
-                (*falsy).to_string(),
-            );
-
-            let mut config = AppConfig::default();
-            config
-                .apply_env_with(AppConfig::DEFAULT_ENV_PREFIX, |key| {
-                    Ok(env.get(key).cloned())
-                })
-                .expect("env config");
-
-            assert!(
-                !config.root_path_in_servers,
-                "expected false for value: {}",
-                falsy
-            );
-        }
-    }
-
-    #[test]
-    fn app_config_from_file_root_path() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let mut path = std::env::temp_dir();
-        path.push(format!("fastapi_config_root_{stamp}.json"));
-
-        let json = r#"{
-  "name": "Proxied API",
-  "root_path": "/api/v2",
-  "root_path_in_servers": false
-}"#;
-        std::fs::write(&path, json).expect("write temp config");
-
-        let config = AppConfig::from_file(&path).expect("file config");
-        assert_eq!(config.name, "Proxied API");
-        assert_eq!(config.root_path, "/api/v2");
-        assert!(!config.root_path_in_servers);
-    }
-
-    #[test]
-    fn app_config_openapi_server_returns_some_when_configured() {
-        let config = AppConfig::new()
-            .root_path("/api/v1")
-            .root_path_in_servers(true);
-
-        let server = config.openapi_server();
-        assert!(server.is_some());
-
-        let (url, description) = server.unwrap();
-        assert_eq!(url, "/api/v1");
-        assert!(description.is_some());
-    }
-
-    #[test]
-    fn app_config_openapi_server_returns_none_when_disabled() {
-        let config = AppConfig::new()
-            .root_path("/api/v1")
-            .root_path_in_servers(false);
-
-        assert!(config.openapi_server().is_none());
-    }
-
-    #[test]
-    fn app_config_openapi_server_returns_none_when_empty_root_path() {
-        let config = AppConfig::new().root_path_in_servers(true);
-
-        assert!(config.openapi_server().is_none());
-    }
-
-    #[test]
     fn state_container_insert_and_get() {
         #[derive(Debug, PartialEq)]
         struct MyState {
@@ -3252,7 +1510,7 @@ mod tests {
         }
 
         let app = App::builder()
-            .with_state(DbPool {
+            .state(DbPool {
                 connection_count: 10,
             })
             .get("/", test_handler)
@@ -3296,160 +1554,6 @@ mod tests {
         assert_eq!(response.status().as_u16(), 405);
     }
 
-    // ========================================================================
-    // HEAD Method Tests
-    // ========================================================================
-
-    #[test]
-    fn head_request_returns_empty_body() {
-        // GET handler returns a body
-        let app = App::builder().get("/", test_handler).build();
-
-        let ctx = test_context();
-        let mut req = Request::new(Method::Head, "/");
-
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-        // Body should be empty for HEAD
-        assert!(response.body_ref().is_empty());
-    }
-
-    #[test]
-    fn head_request_preserves_content_type() {
-        // Handler that sets Content-Type
-        fn json_handler(_ctx: &RequestContext, _req: &mut Request) -> std::future::Ready<Response> {
-            std::future::ready(
-                Response::ok()
-                    .header("content-type", b"application/json".to_vec())
-                    .body(ResponseBody::Bytes(br#"{"status":"ok"}"#.to_vec())),
-            )
-        }
-
-        let app = App::builder().get("/api", json_handler).build();
-
-        let ctx = test_context();
-        let mut req = Request::new(Method::Head, "/api");
-
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-        assert!(response.body_ref().is_empty());
-
-        // Content-Type should be preserved
-        let content_type = response
-            .headers()
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"));
-        assert!(content_type.is_some());
-        assert_eq!(content_type.unwrap().1, b"application/json");
-    }
-
-    #[test]
-    fn head_request_adds_content_length_for_known_body() {
-        let app = App::builder().get("/", test_handler).build();
-
-        let ctx = test_context();
-        let mut req = Request::new(Method::Head, "/");
-
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-        assert!(response.body_ref().is_empty());
-
-        // Content-Length should be set to original body length ("Hello, World!" = 13 bytes)
-        let content_length = response
-            .headers()
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"));
-        assert!(content_length.is_some());
-        assert_eq!(content_length.unwrap().1, b"13");
-    }
-
-    #[test]
-    fn head_request_preserves_existing_content_length() {
-        // Handler that explicitly sets Content-Length
-        fn explicit_length_handler(
-            _ctx: &RequestContext,
-            _req: &mut Request,
-        ) -> std::future::Ready<Response> {
-            std::future::ready(
-                Response::ok()
-                    .header("content-length", b"999".to_vec()) // Explicit, different from actual
-                    .body(ResponseBody::Bytes(b"short".to_vec())),
-            )
-        }
-
-        let app = App::builder().get("/", explicit_length_handler).build();
-
-        let ctx = test_context();
-        let mut req = Request::new(Method::Head, "/");
-
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-        assert!(response.body_ref().is_empty());
-
-        // Should preserve the explicit Content-Length, not replace it
-        let content_length = response
-            .headers()
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"));
-        assert!(content_length.is_some());
-        assert_eq!(content_length.unwrap().1, b"999");
-    }
-
-    #[test]
-    fn head_request_for_empty_body_adds_zero_content_length() {
-        fn empty_handler(
-            _ctx: &RequestContext,
-            _req: &mut Request,
-        ) -> std::future::Ready<Response> {
-            std::future::ready(Response::ok().body(ResponseBody::Empty))
-        }
-
-        let app = App::builder().get("/", empty_handler).build();
-
-        let ctx = test_context();
-        let mut req = Request::new(Method::Head, "/");
-
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-        assert!(response.body_ref().is_empty());
-
-        // Content-Length should be 0 for empty body
-        let content_length = response
-            .headers()
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"));
-        assert!(content_length.is_some());
-        assert_eq!(content_length.unwrap().1, b"0");
-    }
-
-    #[test]
-    fn head_falls_through_to_get_route() {
-        // Only register GET, HEAD should still work
-        let app = App::builder()
-            .get("/resource", test_handler)
-            .post("/resource", test_handler) // Different route for POST
-            .build();
-
-        let ctx = test_context();
-
-        // HEAD to GET route should work
-        let mut head_req = Request::new(Method::Head, "/resource");
-        let response = futures_executor::block_on(app.handle(&ctx, &mut head_req));
-        assert_eq!(response.status().as_u16(), 200);
-        assert!(response.body_ref().is_empty());
-    }
-
-    #[test]
-    fn head_to_unknown_path_returns_404() {
-        let app = App::builder().get("/", test_handler).build();
-
-        let ctx = test_context();
-        let mut req = Request::new(Method::Head, "/unknown");
-
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 404);
-    }
-
     #[test]
     fn app_builder_all_methods() {
         let app = App::builder()
@@ -3465,9 +1569,7 @@ mod tests {
 
     #[test]
     fn route_entry_debug() {
-        let entry = RouteEntry::new(Method::Get, "/test", |ctx, req| {
-            Box::pin(test_handler(ctx, req))
-        });
+        let entry = RouteEntry::new(Method::Get, "/test", test_handler);
         let debug = format!("{:?}", entry);
         assert!(debug.contains("RouteEntry"));
         assert!(debug.contains("Get"));
@@ -3576,8 +1678,7 @@ mod tests {
 
         assert!(handlers.has_handler::<crate::HttpError>());
         assert!(handlers.has_handler::<crate::ValidationErrors>());
-        assert!(handlers.has_handler::<crate::CancelledError>());
-        assert_eq!(handlers.len(), 3);
+        assert_eq!(handlers.len(), 2);
     }
 
     #[test]
@@ -3724,10 +1825,6 @@ mod tests {
             app.exception_handlers()
                 .has_handler::<crate::ValidationErrors>()
         );
-        assert!(
-            app.exception_handlers()
-                .has_handler::<crate::CancelledError>()
-        );
     }
 
     #[test]
@@ -3860,8 +1957,8 @@ mod tests {
                 .body(ResponseBody::Bytes(detail.as_bytes().to_vec()))
         });
 
-        // Still has 3 handlers (HttpError, ValidationErrors, CancelledError)
-        assert_eq!(handlers.len(), 3);
+        // Still has 2 handlers (HttpError and ValidationErrors)
+        assert_eq!(handlers.len(), 2);
 
         let ctx = test_context();
         let err = crate::HttpError::bad_request().with_detail("test error");
@@ -3919,50 +2016,6 @@ mod tests {
     }
 
     #[test]
-    fn exception_handlers_default_cancelled_error() {
-        let handlers = ExceptionHandlers::with_defaults();
-
-        let ctx = test_context();
-        let err = crate::CancelledError;
-
-        let response = handlers.handle(&ctx, err);
-        assert!(response.is_some());
-
-        let response = response.unwrap();
-        // CancelledError should return 499 Client Closed Request
-        assert_eq!(response.status().as_u16(), 499);
-    }
-
-    #[test]
-    fn exception_handlers_override_cancelled_error() {
-        let mut handlers = ExceptionHandlers::with_defaults();
-
-        // Override CancelledError handler to return 504 Gateway Timeout
-        handlers.register::<crate::CancelledError>(|_ctx, _err| {
-            Response::with_status(StatusCode::GATEWAY_TIMEOUT)
-                .header("x-cancelled", b"true".to_vec())
-        });
-
-        let ctx = test_context();
-        let err = crate::CancelledError;
-
-        let response = handlers.handle(&ctx, err);
-        assert!(response.is_some());
-
-        let response = response.unwrap();
-        // Custom handler returns 504 instead of 499
-        assert_eq!(response.status().as_u16(), 504);
-
-        // Check custom header
-        let cancelled_header = response
-            .headers()
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("x-cancelled"))
-            .map(|(_, v)| v.as_slice());
-        assert_eq!(cancelled_header, Some(b"true".as_slice()));
-    }
-
-    #[test]
     fn exception_handlers_debug_format() {
         let handlers = ExceptionHandlers::new()
             .handler::<TestError>(|_ctx, _err| Response::with_status(StatusCode::BAD_REQUEST));
@@ -3971,130 +2024,6 @@ mod tests {
         assert!(debug.contains("ExceptionHandlers"));
         assert!(debug.contains("count"));
         assert!(debug.contains("1"));
-        assert!(debug.contains("has_panic_handler"));
-    }
-
-    // =========================================================================
-    // Panic Handler Tests
-    // =========================================================================
-
-    #[test]
-    fn panic_handler_default_response() {
-        let handlers = ExceptionHandlers::new();
-        assert!(!handlers.has_panic_handler());
-
-        let response = handlers.handle_panic(None, "test panic");
-        assert_eq!(response.status().as_u16(), 500);
-    }
-
-    #[test]
-    fn panic_handler_custom_handler() {
-        let handlers = ExceptionHandlers::new().panic_handler(|_ctx, msg| {
-            Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("x-panic", msg.as_bytes().to_vec())
-        });
-
-        assert!(handlers.has_panic_handler());
-
-        let response = handlers.handle_panic(None, "custom panic");
-        assert_eq!(response.status().as_u16(), 503);
-
-        let panic_header = response
-            .headers()
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("x-panic"))
-            .map(|(_, v)| String::from_utf8_lossy(v).to_string());
-        assert_eq!(panic_header, Some("custom panic".to_string()));
-    }
-
-    #[test]
-    fn panic_handler_with_context() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let ctx_received = Arc::new(AtomicBool::new(false));
-        let ctx_received_clone = ctx_received.clone();
-
-        let handlers = ExceptionHandlers::new().panic_handler(move |ctx, _msg| {
-            ctx_received_clone.store(ctx.is_some(), Ordering::SeqCst);
-            Response::with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        });
-
-        let ctx = test_context();
-        let _ = handlers.handle_panic(Some(&ctx), "panic with context");
-
-        assert!(ctx_received.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn panic_handler_set_panic_handler() {
-        let mut handlers = ExceptionHandlers::new();
-        assert!(!handlers.has_panic_handler());
-
-        handlers.set_panic_handler(|_ctx, _msg| Response::with_status(StatusCode::GATEWAY_TIMEOUT));
-
-        assert!(handlers.has_panic_handler());
-
-        let response = handlers.handle_panic(None, "test");
-        assert_eq!(response.status().as_u16(), 504);
-    }
-
-    #[test]
-    fn panic_handler_extract_panic_message_str() {
-        // Simulate a panic payload with &str
-        let payload: Box<dyn std::any::Any + Send> = Box::new("test panic");
-        let msg = ExceptionHandlers::extract_panic_message(&*payload);
-        assert_eq!(msg, "test panic");
-    }
-
-    #[test]
-    fn panic_handler_extract_panic_message_string() {
-        // Simulate a panic payload with String
-        let payload: Box<dyn std::any::Any + Send> = Box::new("test string panic".to_string());
-        let msg = ExceptionHandlers::extract_panic_message(&*payload);
-        assert_eq!(msg, "test string panic");
-    }
-
-    #[test]
-    fn panic_handler_extract_panic_message_unknown() {
-        // Simulate a panic payload with unknown type
-        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
-        let msg = ExceptionHandlers::extract_panic_message(&*payload);
-        assert_eq!(msg, "unknown panic");
-    }
-
-    #[test]
-    fn panic_handler_merge_prefers_other() {
-        let mut handlers1 = ExceptionHandlers::new()
-            .panic_handler(|_ctx, _msg| Response::with_status(StatusCode::BAD_REQUEST));
-
-        let handlers2 = ExceptionHandlers::new()
-            .panic_handler(|_ctx, _msg| Response::with_status(StatusCode::SERVICE_UNAVAILABLE));
-
-        handlers1.merge(handlers2);
-
-        let response = handlers1.handle_panic(None, "test");
-        // Should use handlers2's panic handler (503) after merge
-        assert_eq!(response.status().as_u16(), 503);
-    }
-
-    #[test]
-    fn panic_handler_merge_keeps_existing_if_other_empty() {
-        let mut handlers1 = ExceptionHandlers::new()
-            .panic_handler(|_ctx, _msg| Response::with_status(StatusCode::BAD_REQUEST));
-
-        let handlers2 = ExceptionHandlers::new(); // No panic handler
-
-        handlers1.merge(handlers2);
-
-        let response = handlers1.handle_panic(None, "test");
-        // Should keep handlers1's panic handler (400)
-        assert_eq!(response.status().as_u16(), 400);
-    }
-
-    #[test]
-    fn panic_handler_default_panic_response() {
-        let response = ExceptionHandlers::default_panic_response();
-        assert_eq!(response.status().as_u16(), 500);
     }
 
     #[test]
@@ -4490,844 +2419,5 @@ mod tests {
         // Second run - no hooks left
         futures_executor::block_on(app.run_shutdown_hooks());
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    // =========================================================================
-    // Async Lifecycle Hooks Tests
-    // =========================================================================
-
-    #[test]
-    fn async_startup_hook_runs() {
-        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let counter_clone = Arc::clone(&counter);
-
-        let app = App::builder()
-            .on_startup_async(move || {
-                let counter = Arc::clone(&counter_clone);
-                async move {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok(())
-                }
-            })
-            .get("/", test_handler)
-            .build();
-
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(outcome.can_proceed());
-        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn async_startup_hook_error_aborts() {
-        let app = App::builder()
-            .on_startup_async(|| async { Err(StartupHookError::new("async connection failed")) })
-            .get("/", test_handler)
-            .build();
-
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(!outcome.can_proceed());
-
-        if let StartupOutcome::Aborted(err) = outcome {
-            assert!(err.message.contains("async connection failed"));
-        } else {
-            panic!("Expected Aborted outcome");
-        }
-    }
-
-    #[test]
-    fn async_shutdown_hook_runs() {
-        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let counter_clone = Arc::clone(&counter);
-
-        let app = App::builder()
-            .on_shutdown_async(move || {
-                let counter = Arc::clone(&counter_clone);
-                async move {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
-            })
-            .get("/", test_handler)
-            .build();
-
-        futures_executor::block_on(app.run_shutdown_hooks());
-        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn mixed_sync_and_async_startup_hooks() {
-        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
-
-        let order1 = Arc::clone(&order);
-        let order2 = Arc::clone(&order);
-        let order3 = Arc::clone(&order);
-
-        let app = App::builder()
-            .on_startup(move || {
-                order1.lock().push(1);
-                Ok(())
-            })
-            .on_startup_async(move || {
-                let order = Arc::clone(&order2);
-                async move {
-                    order.lock().push(2);
-                    Ok(())
-                }
-            })
-            .on_startup(move || {
-                order3.lock().push(3);
-                Ok(())
-            })
-            .get("/", test_handler)
-            .build();
-
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(outcome.can_proceed());
-
-        // FIFO order: 1, 2, 3
-        assert_eq!(*order.lock(), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn mixed_sync_and_async_shutdown_hooks() {
-        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
-
-        let order1 = Arc::clone(&order);
-        let order2 = Arc::clone(&order);
-        let order3 = Arc::clone(&order);
-
-        let app = App::builder()
-            .on_shutdown(move || {
-                order1.lock().push(1);
-            })
-            .on_shutdown_async(move || {
-                let order = Arc::clone(&order2);
-                async move {
-                    order.lock().push(2);
-                }
-            })
-            .on_shutdown(move || {
-                order3.lock().push(3);
-            })
-            .get("/", test_handler)
-            .build();
-
-        futures_executor::block_on(app.run_shutdown_hooks());
-
-        // Async hooks run first (LIFO within async), then sync hooks (LIFO within sync)
-        // Async: [2], Sync LIFO: [3, 1] => [2, 3, 1]
-        assert_eq!(*order.lock(), vec![2, 3, 1]);
-    }
-
-    // =========================================================================
-    // State Accessible in Handlers Tests
-    // =========================================================================
-
-    #[test]
-    fn state_accessible_via_app_get_state() {
-        #[derive(Debug, Clone)]
-        struct DatabasePool {
-            connection_count: usize,
-        }
-
-        #[derive(Debug, Clone)]
-        struct CacheClient {
-            max_entries: usize,
-        }
-
-        let app = App::builder()
-            .with_state(DatabasePool {
-                connection_count: 10,
-            })
-            .with_state(CacheClient { max_entries: 1000 })
-            .get("/", test_handler)
-            .build();
-
-        // Multiple state types accessible
-        let db = app.get_state::<DatabasePool>();
-        assert!(db.is_some());
-        assert_eq!(db.unwrap().connection_count, 10);
-
-        let cache = app.get_state::<CacheClient>();
-        assert!(cache.is_some());
-        assert_eq!(cache.unwrap().max_entries, 1000);
-
-        // Non-existent state returns None
-        let missing = app.get_state::<String>();
-        assert!(missing.is_none());
-    }
-
-    #[test]
-    fn state_container_replace_on_duplicate_type() {
-        struct Counter(u32);
-
-        let mut container = StateContainer::new();
-        container.insert(Counter(1));
-        assert_eq!(container.get::<Counter>().unwrap().0, 1);
-
-        // Replace with new value
-        container.insert(Counter(42));
-        assert_eq!(container.get::<Counter>().unwrap().0, 42);
-
-        // Still only one entry
-        assert_eq!(container.len(), 1);
-    }
-
-    #[test]
-    fn state_container_empty_checks() {
-        let container = StateContainer::new();
-        assert!(container.is_empty());
-        assert_eq!(container.len(), 0);
-
-        let mut container = StateContainer::new();
-        container.insert(42i32);
-        assert!(!container.is_empty());
-        assert_eq!(container.len(), 1);
-    }
-
-    // =========================================================================
-    // Configuration Validation Tests
-    // =========================================================================
-
-    #[test]
-    fn app_config_validation_rejects_empty_version() {
-        let config = AppConfig {
-            version: String::new(),
-            ..Default::default()
-        };
-        let err = config.validate().expect_err("empty version invalid");
-        assert!(matches!(err, ConfigError::Validation(_)));
-    }
-
-    #[test]
-    fn app_config_validation_rejects_zero_body_size() {
-        let config = AppConfig {
-            max_body_size: 0,
-            ..Default::default()
-        };
-        let err = config.validate().expect_err("zero body size invalid");
-        assert!(matches!(err, ConfigError::Validation(_)));
-    }
-
-    #[test]
-    fn app_config_validation_rejects_zero_timeout() {
-        let config = AppConfig {
-            request_timeout_ms: 0,
-            ..Default::default()
-        };
-        let err = config.validate().expect_err("zero timeout invalid");
-        assert!(matches!(err, ConfigError::Validation(_)));
-    }
-
-    #[test]
-    fn app_config_debug_bool_parsing() {
-        // Test various boolean string formats
-        assert!(parse_bool("test", "true").unwrap());
-        assert!(parse_bool("test", "TRUE").unwrap());
-        assert!(parse_bool("test", "1").unwrap());
-        assert!(parse_bool("test", "yes").unwrap());
-        assert!(parse_bool("test", "YES").unwrap());
-        assert!(parse_bool("test", "on").unwrap());
-        assert!(parse_bool("test", "ON").unwrap());
-
-        assert!(!parse_bool("test", "false").unwrap());
-        assert!(!parse_bool("test", "FALSE").unwrap());
-        assert!(!parse_bool("test", "0").unwrap());
-        assert!(!parse_bool("test", "no").unwrap());
-        assert!(!parse_bool("test", "NO").unwrap());
-        assert!(!parse_bool("test", "off").unwrap());
-        assert!(!parse_bool("test", "OFF").unwrap());
-
-        // Invalid values
-        assert!(parse_bool("test", "maybe").is_err());
-        assert!(parse_bool("test", "2").is_err());
-    }
-
-    #[test]
-    fn app_config_unsupported_format() {
-        let err = AppConfig::from_file("/tmp/config.yaml");
-        assert!(matches!(err, Err(ConfigError::UnsupportedFormat { .. })));
-    }
-
-    // =========================================================================
-    // Full Lifecycle Integration Tests
-    // =========================================================================
-
-    #[test]
-    fn full_lifecycle_startup_serve_shutdown() {
-        let lifecycle_log = Arc::new(parking_lot::Mutex::new(Vec::new()));
-
-        let log1 = Arc::clone(&lifecycle_log);
-        let log2 = Arc::clone(&lifecycle_log);
-        let log3 = Arc::clone(&lifecycle_log);
-        let log4 = Arc::clone(&lifecycle_log);
-
-        let app = App::builder()
-            .on_startup(move || {
-                log1.lock().push("startup_1");
-                Ok(())
-            })
-            .on_startup(move || {
-                log2.lock().push("startup_2");
-                Ok(())
-            })
-            .on_shutdown(move || {
-                log3.lock().push("shutdown_1");
-            })
-            .on_shutdown(move || {
-                log4.lock().push("shutdown_2");
-            })
-            .get("/", test_handler)
-            .build();
-
-        // Phase 1: Startup
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(outcome.can_proceed());
-
-        // Phase 2: Serve (simulated - just verify app is functional)
-        let ctx = test_context();
-        let mut req = Request::new(Method::Get, "/");
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-
-        // Phase 3: Shutdown
-        futures_executor::block_on(app.run_shutdown_hooks());
-
-        // Verify lifecycle order
-        let log = lifecycle_log.lock();
-        assert_eq!(
-            *log,
-            vec!["startup_1", "startup_2", "shutdown_2", "shutdown_1"]
-        );
-    }
-
-    #[test]
-    fn lifecycle_startup_failure_prevents_serving() {
-        let serve_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        let app = App::builder()
-            .on_startup(|| Err(StartupHookError::new("database unavailable")))
-            .get("/", test_handler)
-            .build();
-
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-
-        // Startup failed - should not proceed to serving
-        if outcome.can_proceed() {
-            serve_attempted.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-
-        assert!(!serve_attempted.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(matches!(outcome, StartupOutcome::Aborted(_)));
-    }
-
-    #[test]
-    fn lifecycle_with_state_initialization() {
-        #[derive(Debug)]
-        struct AppState {
-            initialized: std::sync::atomic::AtomicBool,
-        }
-
-        let state = Arc::new(AppState {
-            initialized: std::sync::atomic::AtomicBool::new(false),
-        });
-        let state_for_hook = Arc::clone(&state);
-
-        let app = App::builder()
-            .on_startup(move || {
-                state_for_hook
-                    .initialized
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            })
-            .get("/", test_handler)
-            .build();
-
-        // Before startup
-        assert!(!state.initialized.load(std::sync::atomic::Ordering::SeqCst));
-
-        // Run startup
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(outcome.can_proceed());
-
-        // After startup - state initialized
-        assert!(state.initialized.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
-    #[test]
-    fn lifecycle_shutdown_runs_even_after_failed_startup() {
-        let shutdown_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let shutdown_flag = Arc::clone(&shutdown_ran);
-
-        let app = App::builder()
-            .on_startup(|| Err(StartupHookError::new("startup failed")))
-            .on_shutdown(move || {
-                shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            })
-            .get("/", test_handler)
-            .build();
-
-        // Startup fails
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(!outcome.can_proceed());
-
-        // But shutdown hooks should still be available to run for cleanup
-        futures_executor::block_on(app.run_shutdown_hooks());
-        assert!(shutdown_ran.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
-    #[test]
-    fn multiple_lifecycle_phases_with_async_hooks() {
-        let log = Arc::new(parking_lot::Mutex::new(Vec::<&str>::new()));
-
-        let log1 = Arc::clone(&log);
-        let log2 = Arc::clone(&log);
-        let log3 = Arc::clone(&log);
-        let log4 = Arc::clone(&log);
-
-        let app = App::builder()
-            .on_startup(move || {
-                log1.lock().push("sync_startup");
-                Ok(())
-            })
-            .on_startup_async(move || {
-                let log = Arc::clone(&log2);
-                async move {
-                    log.lock().push("async_startup");
-                    Ok(())
-                }
-            })
-            .on_shutdown(move || {
-                log3.lock().push("sync_shutdown");
-            })
-            .on_shutdown_async(move || {
-                let log = Arc::clone(&log4);
-                async move {
-                    log.lock().push("async_shutdown");
-                }
-            })
-            .get("/", test_handler)
-            .build();
-
-        // Run full lifecycle
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(outcome.can_proceed());
-
-        futures_executor::block_on(app.run_shutdown_hooks());
-
-        // Verify order: startup FIFO, shutdown LIFO
-        let events = log.lock();
-        assert_eq!(
-            *events,
-            vec![
-                "sync_startup",
-                "async_startup",
-                "async_shutdown",
-                "sync_shutdown"
-            ]
-        );
-    }
-
-    // =========================================================================
-    // Lifespan Tests
-    // =========================================================================
-
-    #[test]
-    fn lifespan_scope_creation() {
-        let scope = LifespanScope::new(42i32);
-        assert_eq!(scope.state, 42);
-    }
-
-    #[test]
-    fn lifespan_scope_with_cleanup() {
-        let cleanup_called = Arc::new(Mutex::new(false));
-        let cleanup_called_clone = Arc::clone(&cleanup_called);
-
-        let mut scope = LifespanScope::new("state").on_shutdown(async move {
-            *cleanup_called_clone.lock().unwrap() = true;
-        });
-
-        // Cleanup should not be called yet
-        assert!(!*cleanup_called.lock().unwrap());
-
-        // Take the cleanup
-        let cleanup = scope.take_cleanup();
-        assert!(cleanup.is_some());
-
-        // Run the cleanup
-        futures_executor::block_on(cleanup.unwrap());
-        assert!(*cleanup_called.lock().unwrap());
-    }
-
-    #[test]
-    fn lifespan_error_display() {
-        let err = LifespanError::new("connection failed");
-        assert!(err.to_string().contains("connection failed"));
-        assert!(err.source.is_none());
-
-        let io_err = std::io::Error::other("disk full");
-        let err_with_source = LifespanError::with_source("backup failed", io_err);
-        assert!(err_with_source.to_string().contains("backup failed"));
-        assert!(err_with_source.source.is_some());
-    }
-
-    #[test]
-    fn lifespan_error_into_startup_hook_error() {
-        let err = LifespanError::new("startup failed");
-        let hook_err: StartupHookError = err.into();
-        assert!(hook_err.abort);
-        assert!(hook_err.message.contains("startup failed"));
-    }
-
-    /// Simulated database pool for testing.
-    struct TestDbPool {
-        connection_count: i32,
-    }
-
-    #[test]
-    fn lifespan_injects_state() {
-        let app = App::builder()
-            .lifespan(|| async {
-                let pool = TestDbPool {
-                    connection_count: 10,
-                };
-                Ok(LifespanScope::new(pool))
-            })
-            .get("/", test_handler)
-            .build();
-
-        // Run startup hooks (which runs lifespan)
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(outcome.can_proceed());
-
-        // State should now be available
-        let pool = app.get_state::<TestDbPool>();
-        assert!(pool.is_some());
-        assert_eq!(pool.unwrap().connection_count, 10);
-    }
-
-    #[test]
-    fn lifespan_runs_cleanup_on_shutdown() {
-        let cleanup_log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
-        let log_clone = Arc::clone(&cleanup_log);
-
-        let app = App::builder()
-            .lifespan(move || {
-                let log = Arc::clone(&log_clone);
-                async move {
-                    let pool = TestDbPool {
-                        connection_count: 5,
-                    };
-                    Ok(LifespanScope::new(pool).on_shutdown(async move {
-                        log.lock().unwrap().push("cleanup");
-                    }))
-                }
-            })
-            .get("/", test_handler)
-            .build();
-
-        // Run startup
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-        assert!(outcome.can_proceed());
-
-        // Cleanup not called yet
-        assert!(cleanup_log.lock().unwrap().is_empty());
-
-        // Run shutdown
-        futures_executor::block_on(app.run_shutdown_hooks());
-
-        // Cleanup should have been called
-        assert_eq!(*cleanup_log.lock().unwrap(), vec!["cleanup"]);
-    }
-
-    #[test]
-    fn lifespan_error_aborts_startup() {
-        let app = App::builder()
-            .lifespan(|| async {
-                Err::<LifespanScope<()>, _>(LifespanError::new("database connection failed"))
-            })
-            .get("/", test_handler)
-            .build();
-
-        let outcome = futures_executor::block_on(app.run_startup_hooks());
-
-        match outcome {
-            StartupOutcome::Aborted(err) => {
-                assert!(err.message.contains("database connection failed"));
-                assert!(err.abort);
-            }
-            _ => panic!("expected Aborted outcome"),
-        }
-    }
-
-    #[test]
-    fn lifespan_runs_before_other_startup_hooks() {
-        let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
-        let log1 = Arc::clone(&log);
-        let log2 = Arc::clone(&log);
-
-        let app = App::builder()
-            .on_startup(move || {
-                log1.lock().unwrap().push("regular_hook");
-                Ok(())
-            })
-            .lifespan(move || {
-                let log = Arc::clone(&log2);
-                async move {
-                    log.lock().unwrap().push("lifespan");
-                    Ok(LifespanScope::new(()))
-                }
-            })
-            .get("/", test_handler)
-            .build();
-
-        futures_executor::block_on(app.run_startup_hooks());
-
-        // Lifespan should run before regular hooks
-        let events = log.lock().unwrap();
-        assert_eq!(*events, vec!["lifespan", "regular_hook"]);
-    }
-
-    #[test]
-    fn lifespan_cleanup_runs_after_other_shutdown_hooks() {
-        let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
-        let log1 = Arc::clone(&log);
-        let log2 = Arc::clone(&log);
-
-        let app = App::builder()
-            .on_shutdown(move || {
-                log1.lock().unwrap().push("regular_hook");
-            })
-            .lifespan(move || {
-                let log = Arc::clone(&log2);
-                async move {
-                    Ok(LifespanScope::new(()).on_shutdown(async move {
-                        log.lock().unwrap().push("lifespan_cleanup");
-                    }))
-                }
-            })
-            .get("/", test_handler)
-            .build();
-
-        futures_executor::block_on(app.run_startup_hooks());
-        futures_executor::block_on(app.run_shutdown_hooks());
-
-        // Lifespan cleanup should run after regular hooks
-        let events = log.lock().unwrap();
-        assert_eq!(*events, vec!["regular_hook", "lifespan_cleanup"]);
-    }
-
-    // =========================================================================
-    // Sub-Application Mounting Tests
-    // =========================================================================
-
-    #[test]
-    fn mounted_app_prefix_matching() {
-        let mounted = MountedApp::new("/admin", App::builder().build());
-
-        // Exact match returns "/"
-        assert_eq!(mounted.match_prefix("/admin"), Some("/"));
-
-        // Prefix match with remaining path
-        assert_eq!(mounted.match_prefix("/admin/users"), Some("/users"));
-        assert_eq!(mounted.match_prefix("/admin/users/123"), Some("/users/123"));
-
-        // No match - different prefix
-        assert_eq!(mounted.match_prefix("/api"), None);
-        assert_eq!(mounted.match_prefix("/"), None);
-
-        // No match - partial prefix without slash boundary
-        assert_eq!(mounted.match_prefix("/administrator"), None);
-    }
-
-    #[test]
-    fn mounted_app_prefix_normalization() {
-        // Prefix without leading slash gets normalized
-        let mounted = MountedApp::new("admin", App::builder().build());
-        assert_eq!(mounted.prefix(), "/admin");
-
-        // Trailing slash gets removed
-        let mounted = MountedApp::new("/admin/", App::builder().build());
-        assert_eq!(mounted.prefix(), "/admin");
-
-        // Multiple trailing slashes get removed
-        let mounted = MountedApp::new("/admin///", App::builder().build());
-        assert_eq!(mounted.prefix(), "/admin");
-    }
-
-    #[test]
-    fn app_builder_mount_adds_mounted_app() {
-        let sub_app = App::builder().get("/", test_handler).build();
-
-        let app = App::builder()
-            .get("/", test_handler)
-            .mount("/admin", sub_app)
-            .build();
-
-        assert_eq!(app.mounted_apps().len(), 1);
-        assert_eq!(app.mounted_apps()[0].prefix(), "/admin");
-    }
-
-    #[test]
-    fn app_builder_multiple_mounts() {
-        let admin_app = App::builder().get("/", test_handler).build();
-        let api_app = App::builder().get("/", test_handler).build();
-        let docs_app = App::builder().get("/", test_handler).build();
-
-        let app = App::builder()
-            .get("/", test_handler)
-            .mount("/admin", admin_app)
-            .mount("/api", api_app)
-            .mount("/docs", docs_app)
-            .build();
-
-        assert_eq!(app.mounted_apps().len(), 3);
-        assert_eq!(app.mounted_apps()[0].prefix(), "/admin");
-        assert_eq!(app.mounted_apps()[1].prefix(), "/api");
-        assert_eq!(app.mounted_apps()[2].prefix(), "/docs");
-    }
-
-    fn admin_handler(_ctx: &RequestContext, _req: &mut Request) -> std::future::Ready<Response> {
-        std::future::ready(Response::ok().body(ResponseBody::Bytes(b"Admin Panel".to_vec())))
-    }
-
-    #[test]
-    fn app_routes_to_mounted_app() {
-        let admin_app = App::builder()
-            .get("/", admin_handler)
-            .get("/users", admin_handler)
-            .build();
-
-        let app = App::builder()
-            .get("/", test_handler)
-            .mount("/admin", admin_app)
-            .build();
-
-        let ctx = test_context();
-
-        // Request to parent app
-        let mut req = Request::new(Method::Get, "/");
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-        if let ResponseBody::Bytes(body) = response.body_ref() {
-            assert_eq!(body.as_slice(), b"Hello, World!");
-        }
-
-        // Request to mounted app (exact prefix)
-        let mut req = Request::new(Method::Get, "/admin");
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-        if let ResponseBody::Bytes(body) = response.body_ref() {
-            assert_eq!(body.as_slice(), b"Admin Panel");
-        }
-
-        // Request to mounted app (with path)
-        let mut req = Request::new(Method::Get, "/admin/users");
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 200);
-        if let ResponseBody::Bytes(body) = response.body_ref() {
-            assert_eq!(body.as_slice(), b"Admin Panel");
-        }
-    }
-
-    #[test]
-    fn mounted_app_404_for_unknown_routes() {
-        let admin_app = App::builder().get("/users", admin_handler).build();
-
-        let app = App::builder()
-            .get("/", test_handler)
-            .mount("/admin", admin_app)
-            .build();
-
-        let ctx = test_context();
-
-        // Request to mounted app for unknown route
-        let mut req = Request::new(Method::Get, "/admin/unknown");
-        let response = futures_executor::block_on(app.handle(&ctx, &mut req));
-        assert_eq!(response.status().as_u16(), 404);
-    }
-
-    // ========================================================================
-    // Debug Config Integration Tests
-    // ========================================================================
-
-    #[test]
-    fn app_config_debug_config_default() {
-        let config = AppConfig::default();
-        assert!(!config.debug_config.enabled);
-        assert!(config.debug_config.debug_header.is_none());
-        assert!(config.debug_config.debug_token.is_none());
-        assert!(!config.debug_config.allow_unauthenticated);
-    }
-
-    #[test]
-    fn app_config_debug_config_builder() {
-        let config = AppConfig::new().debug_config(
-            crate::error::DebugConfig::new()
-                .enable()
-                .with_debug_header("X-Debug-Token", "secret-abc"),
-        );
-
-        assert!(config.debug_config.enabled);
-        assert_eq!(
-            config.debug_config.debug_header,
-            Some("X-Debug-Token".to_owned())
-        );
-        assert_eq!(
-            config.debug_config.debug_token,
-            Some("secret-abc".to_owned())
-        );
-    }
-
-    #[test]
-    fn app_config_debug_config_unauthenticated() {
-        let config = AppConfig::new().debug_config(
-            crate::error::DebugConfig::new()
-                .enable()
-                .allow_unauthenticated(),
-        );
-
-        assert!(config.debug_config.enabled);
-        assert!(config.debug_config.allow_unauthenticated);
-    }
-
-    #[test]
-    fn app_debug_config_accessible_from_app() {
-        let app = App::builder()
-            .config(
-                AppConfig::new().debug_config(
-                    crate::error::DebugConfig::new()
-                        .enable()
-                        .with_debug_header("X-Debug", "tok123"),
-                ),
-            )
-            .get("/", test_handler)
-            .build();
-
-        assert!(app.config().debug_config.enabled);
-        assert_eq!(
-            app.config().debug_config.debug_header,
-            Some("X-Debug".to_owned())
-        );
-    }
-
-    #[test]
-    fn app_debug_config_is_authorized_integration() {
-        let config = AppConfig::new().debug_config(
-            crate::error::DebugConfig::new()
-                .enable()
-                .with_debug_header("X-Debug-Token", "my-secret"),
-        );
-
-        // Correct token
-        let headers = vec![("X-Debug-Token".to_owned(), b"my-secret".to_vec())];
-        assert!(config.debug_config.is_authorized(&headers));
-
-        // Wrong token
-        let headers = vec![("X-Debug-Token".to_owned(), b"wrong".to_vec())];
-        assert!(!config.debug_config.is_authorized(&headers));
-
-        // Missing header
-        let headers: Vec<(String, Vec<u8>)> = vec![];
-        assert!(!config.debug_config.is_authorized(&headers));
     }
 }

@@ -6,13 +6,6 @@
 //! - JSON Schema types
 //! - `JsonSchema` trait for compile-time schema generation
 //!
-//! # Role In The System
-//!
-//! `fastapi-openapi` owns the OpenAPI 3.1 and JSON Schema data model. It is
-//! fed by metadata emitted from `fastapi-macros` and by runtime route info from
-//! `fastapi-core`/`fastapi-router`. The resulting spec is then exposed through
-//! the `fastapi` facade so applications can serve or export documentation.
-//!
 //! # Example
 //!
 //! ```ignore
@@ -45,35 +38,10 @@ mod schema;
 mod spec;
 
 pub use schema::{
-    ArraySchema, ConstSchema, Discriminator, EnumSchema, JsonSchema, ObjectSchema, PrimitiveSchema,
-    RefSchema, Schema, SchemaRegistry, SchemaType, StringEnumSchema,
+    ArraySchema, EnumSchema, JsonSchema, ObjectSchema, OneOfSchema, PrimitiveSchema, RefSchema,
+    Schema, SchemaType,
 };
 pub use spec::{
-    // Security types
-    ApiKeyLocation,
-    // Core document types
-    Components,
-    Example,
-    HasParamMeta,
-    Info,
-    MediaType,
-    OAuth2Flow,
-    OAuth2Flows,
-    OpenApi,
-    OpenApiBuilder,
-    Operation,
-    ParamMeta,
-    Parameter,
-    ParameterLocation,
-    PathItem,
-    RequestBody,
-    Response,
-    SecurityRequirement,
-    SecurityScheme,
-    Server,
-    Tag,
-    // Path parameter generation
-    converter_to_schema,
-    param_info_to_parameter,
-    path_params_to_parameters,
+    Components, Example, HasParamMeta, Info, MediaType, OpenApi, OpenApiBuilder, Operation,
+    ParamMeta, Parameter, ParameterLocation, PathItem, RequestBody, Response, Server, Tag,
 };

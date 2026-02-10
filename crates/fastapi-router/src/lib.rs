@@ -9,14 +9,6 @@
 //! - Path parameter extraction (`/items/{id}`)
 //! - Type-safe path converters
 //! - Static route optimization
-//!
-//! # Role In The System
-//!
-//! `fastapi-router` is responsible for matching incoming paths to handlers and
-//! extracting typed parameters. `fastapi-core` uses it for request dispatch,
-//! while `fastapi-openapi` reads its parameter metadata when generating specs.
-//! Keeping the router isolated allows the rest of the framework to stay focused
-//! on request semantics rather than path matching internals.
 
 #![warn(unsafe_code)]
 // Pedantic clippy lints allowed (style suggestions, not correctness issues)
@@ -46,7 +38,4 @@ mod trie;
 
 pub use r#match::{AllowedMethods, RouteLookup, RouteMatch};
 pub use registry::{RouteRegistration, registered_routes};
-pub use trie::{
-    ConversionError, Converter, InvalidRouteError, ParamInfo, ParamValue, Route, RouteAddError,
-    RouteConflictError, RouteResponse, RouteSecurityRequirement, Router, extract_path_params,
-};
+pub use trie::{Converter, ParamInfo, Route, RouteConflictError, Router};

@@ -13,24 +13,9 @@
 //! - All types support `Send + Sync`
 //! - Cancel-correct via asupersync integration
 //!
-//! # Role In The System
-//!
-//! `fastapi-core` is the heart of the framework. It defines the request/response
-//! model, extractors, dependency injection, middleware, and application builder.
-//! Other crates layer on top of these types:
-//!
-//! - `fastapi` re-exports this crate as the public facade.
-//! - `fastapi-http` uses core types when parsing and serving HTTP.
-//! - `fastapi-router` plugs into core routing and parameter extraction.
-//! - `fastapi-openapi` builds schemas and specs from core metadata.
-//!
-//! This crate intentionally contains no network I/O. That separation keeps
-//! business logic and protocol parsing decoupled, and makes deterministic tests
-//! straightforward.
-//!
 //! # Asupersync Integration
 //!
-//! This crate uses [asupersync](https://github.com/Dicklesworthstone/asupersync) as its async
+//! This crate uses [asupersync](https://github.com/user/asupersync) as its async
 //! runtime foundation, providing:
 //!
 //! - **Structured concurrency**: Request handlers run in regions
@@ -66,165 +51,65 @@
 #![allow(clippy::elidable_lifetime_names)]
 #![allow(clippy::map_unwrap_or)]
 
-pub mod api_router;
 pub mod app;
-pub mod bench;
 mod context;
-pub mod coverage;
 mod dependency;
-pub mod docs;
 pub mod error;
 mod extract;
-pub mod fault;
-pub mod fixtures;
-pub mod health;
-pub mod loadtest;
 pub mod logging;
 pub mod middleware;
-pub mod ndjson;
-pub mod password;
 mod request;
 mod response;
-pub mod routing;
 pub mod shutdown;
-pub mod sse;
-pub mod static_files;
 pub mod testing;
 pub mod validation;
-pub mod versioning;
 
-#[cfg(feature = "proptest")]
-pub mod proptest;
-
-pub use context::{
-    BodyLimitConfig, CancelledError, DEFAULT_MAX_BODY_SIZE, IntoOutcome, RequestContext,
-};
+pub use context::{CancelledError, IntoOutcome, RequestContext};
 pub use dependency::{
-    CircularDependencyError, CleanupFn, CleanupStack, DefaultConfig, DefaultDependencyConfig,
-    DependencyCache, DependencyOverrides, DependencyScope, DependencyScopeError, Depends,
-    DependsCleanup, DependsConfig, FromDependency, FromDependencyWithCleanup, NoCache,
+    DefaultConfig, DefaultDependencyConfig, DependencyCache, DependencyOverrides, DependencyScope,
+    Depends, DependsConfig, FromDependency, NoCache,
 };
-pub use error::{
-    DebugConfig, DebugInfo, HttpError, LocItem, ResponseValidationError, ValidationError,
-    ValidationErrors, disable_debug_mode, enable_debug_mode, is_debug_mode_enabled,
-};
+pub use error::{HttpError, LocItem, ValidationError, ValidationErrors};
 pub use extract::{
-    Accept, AcceptEncodingHeader, AcceptEncodingItem, AcceptHeader, AcceptItem,
-    AcceptLanguageHeader, AcceptLanguageItem, ApiKeyCookie, ApiKeyCookieConfig, ApiKeyCookieError,
-    ApiKeyHeader, ApiKeyHeaderConfig, ApiKeyHeaderError, ApiKeyQuery, ApiKeyQueryConfig,
-    ApiKeyQueryError, AppState, Authorization, BackgroundTasks, BackgroundTasksInner, BasicAuth,
-    BasicAuthError, BearerToken, BearerTokenError, Bytes, ContentType, Cookie, CookieExtractError,
-    CookieName, CookiePrefix, CookiePrefixError, CsrfTokenCookie, DEFAULT_API_KEY_COOKIE,
-    DEFAULT_API_KEY_HEADER, DEFAULT_API_KEY_QUERY_PARAM, DEFAULT_FORM_LIMIT, DEFAULT_JSON_LIMIT,
-    DEFAULT_MULTIPART_FILE_SIZE, DEFAULT_MULTIPART_MAX_FIELDS, DEFAULT_MULTIPART_TOTAL_SIZE,
-    DEFAULT_PAGE, DEFAULT_PER_PAGE, DEFAULT_RAW_BODY_LIMIT, DigestAuth, DigestAuthError, File,
-    FileConfig, Form, FormConfig, FormExtractError, FromHeaderValue, FromRequest, Header,
+    Accept, ApiKey, ApiKeyConfig, ApiKeyError, ApiKeyErrorKind, ApiKeyLocation, AppState,
+    Authorization, BasicAuth, BasicAuthError, BasicAuthErrorKind, ContentType, Cookie,
+    CookieExtractError, CookieExtractErrorKind, CookieName, CsrfToken, DEFAULT_JSON_LIMIT, Form,
+    FormExtractError, FormExtractErrorKind, FromHeaderValue, FromRequest, Header,
     HeaderExtractError, HeaderName, HeaderValues, Host, Json, JsonConfig, JsonExtractError,
-    MAX_PER_PAGE, MediaType, Multipart, MultipartConfig, MultipartExtractError, MultipartPart,
-    NamedHeader, NotAcceptableError, OAuth2AuthorizationCodeBearer,
-    OAuth2AuthorizationCodeBearerConfig, OAuth2BearerError, OAuth2BearerErrorKind,
-    OAuth2PasswordBearer, OAuth2PasswordBearerConfig, OAuth2PasswordFormError,
-    OAuth2PasswordRequestForm, OAuth2PasswordRequestFormStrict, Page, Pagination, PaginationConfig,
-    Path, PathExtractError, PathParams, Query, QueryExtractError, QueryParams, RawBodyConfig,
-    RawBodyError, RequestCookie, RequestCookies, RequestRef, ResponseMut, ResponseMutations,
-    SameSite, SecureCompare, SecurityScopes, SecurityScopesError, SessionIdCookie, State,
-    StateExtractError, StringBody, UploadedFile, UserAgent, Valid, ValidExtractError, VaryBuilder,
-    XRequestId, constant_time_eq, constant_time_str_eq, snake_to_header_case,
+    NamedHeader, OAuth2BearerError, OAuth2BearerErrorKind, OAuth2PasswordBearer,
+    OAuth2PasswordBearerConfig, Path, PathExtractError, PathParams, Query, QueryExtractError,
+    QueryParams, SessionId, State, StateExtractError, UserAgent, Valid, ValidExtractError,
+    Validate, XRequestId, snake_to_header_case,
 };
 pub use middleware::{
-    AddResponseHeader, BoxFuture, CompositeKeyExtractor, ConditionalInterceptor, ControlFlow, Cors,
-    CorsConfig, CsrfConfig, CsrfMiddleware, CsrfMode, CsrfToken, DebugInfoInterceptor,
-    ErrorResponseTransformer, Handler, HeaderKeyExtractor, HeaderTransformInterceptor,
-    HttpsRedirectConfig, HttpsRedirectMiddleware, InspectionVerbosity, IpKeyExtractor,
-    KeyExtractor, Layer, Layered, Middleware, MiddlewareStack, NoopMiddleware, OriginPattern,
-    PathKeyExtractor, PathPrefixFilter, RateLimitAlgorithm, RateLimitBuilder, RateLimitConfig,
-    RateLimitMiddleware, RateLimitResult, ReferrerPolicy, RequestId, RequestIdConfig,
-    RequestIdMiddleware, RequestInspectionMiddleware, RequestResponseLogger, RequireHeader,
-    ResponseBodyTransform, ResponseInterceptor, ResponseInterceptorContext,
-    ResponseInterceptorMiddleware, ResponseInterceptorStack, SecurityHeaders,
-    SecurityHeadersConfig, ServerTimingBuilder, ServerTimingEntry, TimingHistogram,
-    TimingHistogramBucket, TimingInterceptor, TimingMetrics, TimingMetricsConfig,
-    TimingMetricsMiddleware, TraceRejectionMiddleware, XFrameOptions,
+    AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, Handler, Layer, Layered,
+    Middleware, MiddlewareStack, NoopMiddleware, OriginPattern, PathPrefixFilter, RequestId,
+    RequestIdConfig, RequestIdMiddleware, RequestResponseLogger, RequireHeader,
 };
-#[cfg(feature = "compression")]
-pub use middleware::{CompressionConfig, CompressionMiddleware};
-pub use ndjson::{
-    NDJSON_CONTENT_TYPE, NDJSON_CONTENT_TYPE_ALT, NdjsonConfig, NdjsonResponse, NdjsonStream,
-    ndjson_iter, ndjson_response,
-};
-pub use request::{
-    Body, Headers, HttpVersion, Method, Request, RequestBodyStream, RequestBodyStreamError,
-};
+pub use request::{Body, Headers, Method, Request};
 pub use response::{
-    Binary, BinaryWithType, BodyStream, FileResponse, Html, IntoResponse, Link, LinkHeader,
-    LinkRel, NoContent, Redirect, Response, ResponseBody, ResponseModel, ResponseModelConfig,
-    ResponseProduces, StatusCode, Text, ValidatedResponse, apply_conditional, check_if_match,
-    check_if_none_match, exclude_fields, include_fields, mime_type_for_extension,
+    BodyStream, FileResponse, Html, IntoResponse, NoContent, Redirect, Response, ResponseBody,
+    StatusCode, Text, mime_type_for_extension,
 };
-pub use sse::{SseConfig, SseEvent, SseResponse, SseStream, sse_response};
-pub use static_files::{StaticFiles, StaticFilesConfig};
 
 // Re-export key asupersync types for convenience
 pub use asupersync::{Budget, Cx, Outcome, RegionId, TaskId};
 
 // Re-export testing utilities
-pub use testing::{
-    CapturedLog, CookieJar, E2ECapture, E2EReport, E2EScenario, E2EStep, E2EStepResult,
-    FixtureGuard, IntegrationTest, IntegrationTestContext, LogCapture, RequestBuilder,
-    ResponseDiff, ResponseSnapshot, TestClient, TestFixture, TestLogger, TestResponse, TestServer,
-    TestServerConfig, TestServerLogEntry, TestTimings, json_contains,
-};
-// Note: e2e_test!, assert_with_logs!, assert_eq_with_logs! macros are automatically exported
-// at crate root via #[macro_export]
+pub use testing::{CookieJar, RequestBuilder, TestClient, TestResponse, json_contains};
 
 // Re-export assertion macros (defined via #[macro_export] in testing module)
 // Note: The macros assert_status!, assert_header!, assert_body_contains!,
 // assert_json!, and assert_body_matches! are automatically exported at the crate root
 // due to #[macro_export]. Users can import them with `use fastapi_core::assert_status;`
 
-// Re-export coverage utilities
-pub use coverage::{
-    BranchHits, CoverageConfig, CoverageReport, CoverageTracker, EndpointHits, OutputFormat,
-};
-
-// Re-export fault injection utilities
-pub use fault::{FaultConfig, FaultInjector, FaultRule, FaultType};
-
-// Re-export fixture factories
-pub use fixtures::{
-    AuthFactory, CommonFixtures, JsonArrayFactory, JsonFactory, JsonObjectFactory, JwtFactory,
-    RequestFactory, ResponseFactory, UserFactory,
-};
-
-// Re-export load testing utilities
-pub use loadtest::{LoadTest, LoadTestConfig, LoadTestReport};
-
-// Re-export password hashing utilities
-pub use password::{Algorithm, HashConfig, PasswordHasher};
-
 // Re-export logging utilities
 pub use logging::{AutoSpan, LogConfig, LogEntry, LogLevel, Span};
 
-// Re-export health check utilities
-pub use health::{
-    HealthCheckRegistry, HealthCheckResult, HealthReport, HealthStatus, basic_health_handler,
-    detailed_health_handler, liveness_handler, readiness_handler,
-};
-
-// Re-export documentation utilities
-pub use docs::{
-    DocsConfig, oauth2_redirect_html, oauth2_redirect_response, redoc_html, redoc_response,
-    swagger_ui_html, swagger_ui_response,
-};
-
-// Re-export api_router utilities
-pub use api_router::{APIRouter, IncludeConfig, ResponseDef, RouterDependency, RouterRoute};
-
 // Re-export app utilities
 pub use app::{
-    App, AppBuilder, AppConfig, BoxLifespanFn, ConfigError, ExceptionHandlers, HasState,
-    LifespanError, LifespanScope, MountedApp, RequiresState, RouteEntry, StartupHook,
-    StartupHookError, StartupOutcome, StateContainer, StateRegistry,
+    App, AppBuilder, AppConfig, ExceptionHandlers, OpenApiConfig, RouteEntry, StartupHook,
+    StartupHookError, StartupOutcome, StateContainer,
 };
 
 // Re-export shutdown utilities
@@ -232,13 +117,4 @@ pub use shutdown::{
     GracefulConfig, GracefulShutdown, InFlightGuard, ShutdownAware, ShutdownController,
     ShutdownHook, ShutdownOutcome, ShutdownPhase, ShutdownReceiver, grace_expired_cancel_reason,
     shutdown_cancel_reason, subdivide_grace_budget,
-};
-
-// Re-export routing utilities
-// Re-export versioning utilities
-pub use versioning::{ApiVersion, VersionConfig, VersionStrategy};
-
-pub use routing::{
-    Converter, ParamInfo, PathSegment, RouteLookup, RoutePattern, RouteTable, TrailingSlashMode,
-    format_allow_header,
 };

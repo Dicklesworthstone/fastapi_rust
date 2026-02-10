@@ -5,45 +5,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation = "https://docs.rs/fastapi-core"
-readme = "../../README.md"
-keywords = ["fastapi", "web", "framework", "http", "core"]
-categories = ["web-programming", "web-programming::http-server", "asynchronous"]
 
 [dependencies]
 asupersync = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = "0.12"
-memchr = "2.7"
+fastapi-types = { workspace = true }
+fastapi-router = { workspace = true }
+fastapi-openapi = { workspace = true }
 
 # Testing utilities (used by TestClient for sync execution)
 futures-executor = "0.3"
 
 # Optional regex support for testing assertions
-regex = { version = "1", optional = true }
-
-# Optional compression support (gzip)
-flate2 = { version = "1.1", optional = true }
-
-# Optional property-based testing support
-proptest = { version = "1.5", optional = true }
+regex = { version = "1.12", optional = true }
 
 [features]
 default = []
 # Enable regex support in testing assertions
 regex = ["dep:regex"]
-# Enable response compression middleware
-compression = ["dep:flate2"]
-# Enable property-based testing support
-proptest = ["dep:proptest"]
-
-[dev-dependencies]
-fastapi-macros = { workspace = true }
-regex = "1"
-serial_test = "2"
 
 [lints]
 workspace = true
