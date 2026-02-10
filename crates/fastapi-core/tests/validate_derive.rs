@@ -18,6 +18,7 @@
 #![allow(clippy::ref_option)]
 #![allow(clippy::modulo_one)]
 
+use fastapi_core::error::LocItem;
 use fastapi_macros::Validate;
 
 // ============================================================================
@@ -1491,4 +1492,37 @@ fn test_ends_with_invalid() {
         domain: "example.org".to_string(),
     };
     assert!(v.validate().is_err());
+}
+
+// ============================================================================
+// Tuple / Unit Struct Support
+// ============================================================================
+
+#[derive(Validate)]
+struct TupleStructTest(
+    #[validate(length(min = 3))] String,
+    #[validate(range(ge = 0))] i32,
+);
+
+#[derive(Validate)]
+struct UnitStructTest;
+
+#[test]
+fn test_tuple_struct_validation_uses_index_loc() {
+    let v = TupleStructTest("ab".to_string(), -1);
+    let err = v.validate().unwrap_err();
+    assert_eq!(err.len(), 2);
+
+    let expected0 = vec![LocItem::field("body"), LocItem::index(0)];
+    let expected1 = vec![LocItem::field("body"), LocItem::index(1)];
+
+    let locs: Vec<_> = err.errors.iter().map(|e| e.loc.clone()).collect();
+    assert!(locs.iter().any(|l| l == &expected0));
+    assert!(locs.iter().any(|l| l == &expected1));
+}
+
+#[test]
+fn test_unit_struct_validation_always_ok() {
+    let v = UnitStructTest;
+    assert!(v.validate().is_ok());
 }

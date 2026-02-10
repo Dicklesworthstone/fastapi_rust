@@ -18,9 +18,11 @@
 //! - `#[validate(custom = path::to::fn_name)]` - Custom validation function
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{Attribute, Data, DeriveInput, Expr, Fields, Ident, Lit, Type, parse_macro_input};
+use syn::{
+    Attribute, Data, DeriveInput, Expr, Fields, Index, Lit, Member, Type, parse_macro_input,
+};
 
 /// Validation constraint parsed from attributes.
 #[derive(Debug, Default)]
@@ -128,16 +130,42 @@ fn generate_struct_validations(fields: &Fields) -> Result<TokenStream2, syn::Err
                 let field_type = &field.ty;
 
                 let validation = parse_validation_attrs(&field.attrs)?;
+                let member = Member::Named(field_name.clone());
+                let loc = quote! { vec![LocItem::field("body"), LocItem::field(#field_name_str)] };
+                let prefix =
+                    quote! { vec![LocItem::field("body"), LocItem::field(#field_name_str)] };
                 let field_validations =
-                    generate_field_validation(field_name, &field_name_str, field_type, &validation);
+                    generate_field_validation(&member, &loc, &prefix, field_type, &validation);
 
                 if !field_validations.is_empty() {
                     validations.push(field_validations);
                 }
             }
         }
-        Fields::Unnamed(_) | Fields::Unit => {
-            // Tuple structs and unit structs not supported for now
+        Fields::Unnamed(unnamed) => {
+            for (idx, field) in unnamed.unnamed.iter().enumerate() {
+                let index_u32 = u32::try_from(idx).map_err(|_| {
+                    syn::Error::new(Span::call_site(), "tuple struct has too many fields")
+                })?;
+                let member = Member::Unnamed(Index {
+                    index: index_u32,
+                    span: Span::call_site(),
+                });
+                let field_type = &field.ty;
+
+                let validation = parse_validation_attrs(&field.attrs)?;
+                let loc = quote! { vec![LocItem::field("body"), LocItem::index(#idx)] };
+                let prefix = quote! { vec![LocItem::field("body"), LocItem::index(#idx)] };
+                let field_validations =
+                    generate_field_validation(&member, &loc, &prefix, field_type, &validation);
+
+                if !field_validations.is_empty() {
+                    validations.push(field_validations);
+                }
+            }
+        }
+        Fields::Unit => {
+            // Unit structs have no fields to validate.
         }
     }
 
@@ -225,8 +253,9 @@ fn parse_validation_attrs(attrs: &[Attribute]) -> Result<FieldValidation, syn::E
 
 #[allow(clippy::too_many_lines)]
 fn generate_field_validation(
-    field_name: &Ident,
-    field_name_str: &str,
+    member: &Member,
+    loc: &TokenStream2,
+    prefix: &TokenStream2,
     field_type: &Type,
     validation: &FieldValidation,
 ) -> TokenStream2 {
@@ -235,16 +264,11 @@ fn generate_field_validation(
     // Check if this is an Option<T> type - extract inner type for validation
     let (is_optional, _inner_type) = extract_option_inner(field_type);
 
-    // Generate location path for this field
-    let loc = quote! {
-        vec![LocItem::field("body"), LocItem::field(#field_name_str)]
-    };
-
     // Length validation (for String types)
     if let Some(min) = validation.length_min {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if val.len() < #min {
                         errors.push(ValidationError::string_too_short(#loc, #min)
                             .with_input(serde_json::json!(val)));
@@ -253,9 +277,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if self.#field_name.len() < #min {
+                if self.#member.len() < #min {
                     errors.push(ValidationError::string_too_short(#loc, #min)
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -265,7 +289,7 @@ fn generate_field_validation(
     if let Some(max) = validation.length_max {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if val.len() > #max {
                         errors.push(ValidationError::string_too_long(#loc, #max)
                             .with_input(serde_json::json!(val)));
@@ -274,9 +298,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if self.#field_name.len() > #max {
+                if self.#member.len() > #max {
                     errors.push(ValidationError::string_too_long(#loc, #max)
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -288,7 +312,7 @@ fn generate_field_validation(
     if let Some(ge) = validation.range_ge {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if (*val as f64) < #ge {
                         errors.push(ValidationError::greater_than_equal(#loc, #ge)
                             .with_input(serde_json::json!(val)));
@@ -297,9 +321,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if (self.#field_name as f64) < #ge {
+                if (self.#member as f64) < #ge {
                     errors.push(ValidationError::greater_than_equal(#loc, #ge)
-                        .with_input(serde_json::json!(self.#field_name)));
+                        .with_input(serde_json::json!(self.#member)));
                 }
             }
         };
@@ -310,7 +334,7 @@ fn generate_field_validation(
     if let Some(gt) = validation.range_gt {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if (*val as f64) <= #gt {
                         errors.push(ValidationError::value_error(#loc, format!("Input should be greater than {}", #gt))
                             .with_input(serde_json::json!(val)));
@@ -319,9 +343,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if (self.#field_name as f64) <= #gt {
+                if (self.#member as f64) <= #gt {
                     errors.push(ValidationError::value_error(#loc, format!("Input should be greater than {}", #gt))
-                        .with_input(serde_json::json!(self.#field_name)));
+                        .with_input(serde_json::json!(self.#member)));
                 }
             }
         };
@@ -332,7 +356,7 @@ fn generate_field_validation(
     if let Some(le) = validation.range_le {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if (*val as f64) > #le {
                         errors.push(ValidationError::less_than_equal(#loc, #le)
                             .with_input(serde_json::json!(val)));
@@ -341,9 +365,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if (self.#field_name as f64) > #le {
+                if (self.#member as f64) > #le {
                     errors.push(ValidationError::less_than_equal(#loc, #le)
-                        .with_input(serde_json::json!(self.#field_name)));
+                        .with_input(serde_json::json!(self.#member)));
                 }
             }
         };
@@ -354,7 +378,7 @@ fn generate_field_validation(
     if let Some(lt) = validation.range_lt {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if (*val as f64) >= #lt {
                         errors.push(ValidationError::value_error(#loc, format!("Input should be less than {}", #lt))
                             .with_input(serde_json::json!(val)));
@@ -363,9 +387,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if (self.#field_name as f64) >= #lt {
+                if (self.#member as f64) >= #lt {
                     errors.push(ValidationError::value_error(#loc, format!("Input should be less than {}", #lt))
-                        .with_input(serde_json::json!(self.#field_name)));
+                        .with_input(serde_json::json!(self.#member)));
                 }
             }
         };
@@ -376,7 +400,7 @@ fn generate_field_validation(
     if validation.email {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if !fastapi_core::validation::is_valid_email(val) {
                         errors.push(ValidationError::invalid_email(#loc)
                             .with_input(serde_json::json!(val)));
@@ -385,9 +409,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if !fastapi_core::validation::is_valid_email(&self.#field_name) {
+                if !fastapi_core::validation::is_valid_email(&self.#member) {
                     errors.push(ValidationError::invalid_email(#loc)
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -398,7 +422,7 @@ fn generate_field_validation(
     if validation.url {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if !fastapi_core::validation::is_valid_url(val) {
                         errors.push(ValidationError::invalid_url(#loc)
                             .with_input(serde_json::json!(val)));
@@ -407,9 +431,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if !fastapi_core::validation::is_valid_url(&self.#field_name) {
+                if !fastapi_core::validation::is_valid_url(&self.#member) {
                     errors.push(ValidationError::invalid_url(#loc)
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -420,7 +444,7 @@ fn generate_field_validation(
     if validation.phone {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if !fastapi_core::validation::is_valid_phone(val) {
                         errors.push(ValidationError::value_error(#loc, "Invalid phone number")
                             .with_input(serde_json::json!(val)));
@@ -429,9 +453,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if !fastapi_core::validation::is_valid_phone(&self.#field_name) {
+                if !fastapi_core::validation::is_valid_phone(&self.#member) {
                     errors.push(ValidationError::value_error(#loc, "Invalid phone number")
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -442,7 +466,7 @@ fn generate_field_validation(
     if let Some(ref pattern) = validation.regex {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if !fastapi_core::validation::matches_pattern(val, #pattern) {
                         errors.push(ValidationError::pattern_mismatch(#loc, #pattern)
                             .with_input(serde_json::json!(val)));
@@ -451,9 +475,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if !fastapi_core::validation::matches_pattern(&self.#field_name, #pattern) {
+                if !fastapi_core::validation::matches_pattern(&self.#member, #pattern) {
                     errors.push(ValidationError::pattern_mismatch(#loc, #pattern)
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -464,7 +488,7 @@ fn generate_field_validation(
     if let Some(ref needle) = validation.contains {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if !val.contains(#needle) {
                         errors.push(ValidationError::value_error(#loc, format!("Input should contain '{}'", #needle))
                             .with_input(serde_json::json!(val)));
@@ -473,9 +497,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if !self.#field_name.contains(#needle) {
+                if !self.#member.contains(#needle) {
                     errors.push(ValidationError::value_error(#loc, format!("Input should contain '{}'", #needle))
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -485,7 +509,7 @@ fn generate_field_validation(
     if let Some(ref prefix) = validation.starts_with {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if !val.starts_with(#prefix) {
                         errors.push(ValidationError::value_error(#loc, format!("Input should start with '{}'", #prefix))
                             .with_input(serde_json::json!(val)));
@@ -494,9 +518,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if !self.#field_name.starts_with(#prefix) {
+                if !self.#member.starts_with(#prefix) {
                     errors.push(ValidationError::value_error(#loc, format!("Input should start with '{}'", #prefix))
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -506,7 +530,7 @@ fn generate_field_validation(
     if let Some(ref suffix) = validation.ends_with {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if !val.ends_with(#suffix) {
                         errors.push(ValidationError::value_error(#loc, format!("Input should end with '{}'", #suffix))
                             .with_input(serde_json::json!(val)));
@@ -515,9 +539,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if !self.#field_name.ends_with(#suffix) {
+                if !self.#member.ends_with(#suffix) {
                     errors.push(ValidationError::value_error(#loc, format!("Input should end with '{}'", #suffix))
-                        .with_input(serde_json::json!(&self.#field_name)));
+                        .with_input(serde_json::json!(&self.#member)));
                 }
             }
         };
@@ -528,7 +552,7 @@ fn generate_field_validation(
     if let Some(ref multiple_of) = validation.multiple_of {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if *val % (#multiple_of) != 0 {
                         errors.push(ValidationError::value_error(#loc, format!("Input should be a multiple of {}", #multiple_of))
                             .with_input(serde_json::json!(val)));
@@ -537,9 +561,9 @@ fn generate_field_validation(
             }
         } else {
             quote! {
-                if self.#field_name % (#multiple_of) != 0 {
+                if self.#member % (#multiple_of) != 0 {
                     errors.push(ValidationError::value_error(#loc, format!("Input should be a multiple of {}", #multiple_of))
-                        .with_input(serde_json::json!(self.#field_name)));
+                        .with_input(serde_json::json!(self.#member)));
                 }
             }
         };
@@ -550,7 +574,7 @@ fn generate_field_validation(
     if validation.nested {
         let check = if is_optional {
             quote! {
-                if let Some(ref val) = self.#field_name {
+                if let Some(ref val) = self.#member {
                     if let Err(err) = fastapi_core::validation::Validate::validate(val) {
                         let mut err = *err;
                         for e in &mut err.errors {
@@ -558,21 +582,21 @@ fn generate_field_validation(
                                 e.loc.remove(0);
                             }
                         }
-                        let prefix = vec![LocItem::field("body"), LocItem::field(#field_name_str)];
+                        let prefix = #prefix;
                         errors.merge(err.with_loc_prefix(prefix));
                     }
                 }
             }
         } else {
             quote! {
-                if let Err(err) = fastapi_core::validation::Validate::validate(&self.#field_name) {
+                if let Err(err) = fastapi_core::validation::Validate::validate(&self.#member) {
                     let mut err = *err;
                     for e in &mut err.errors {
                         if e.loc.first().and_then(LocItem::as_str) == Some("body") {
                             e.loc.remove(0);
                         }
                     }
-                    let prefix = vec![LocItem::field("body"), LocItem::field(#field_name_str)];
+                    let prefix = #prefix;
                     errors.merge(err.with_loc_prefix(prefix));
                 }
             }
@@ -583,9 +607,9 @@ fn generate_field_validation(
     // Custom validation function
     if let Some(ref func_path) = validation.custom {
         let check = quote! {
-            if let Err(msg) = #func_path(&self.#field_name) {
+            if let Err(msg) = #func_path(&self.#member) {
                 errors.push(ValidationError::value_error(#loc, msg)
-                    .with_input(serde_json::json!(&self.#field_name)));
+                    .with_input(serde_json::json!(&self.#member)));
             }
         };
         checks.push(check);
