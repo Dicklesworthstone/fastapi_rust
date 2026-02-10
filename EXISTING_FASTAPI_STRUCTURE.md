@@ -963,9 +963,9 @@ Per `PLAN_TO_PORT_FASTAPI_TO_RUST.md`, these are EXCLUDED:
 4. **CLI tooling** (`fastapi dev`, `fastapi run`)
 5. **TestClient** (use Rust testing tools)
 6. **Multipart handling** (defer to external crate)
-7. **BackgroundTasks** (use Tokio spawn)
+7. **BackgroundTasks** (if/when added, use **asupersync** structured concurrency; no detached task runtime)
 8. **WebSocket support** (Phase 2)
-9. **ASGI middleware** (use Tower)
+9. **ASGI middleware bridging** (out of scope; use native middleware stack, no Tower)
 
 ---
 

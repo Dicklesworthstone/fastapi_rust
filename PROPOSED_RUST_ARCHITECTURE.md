@@ -43,7 +43,7 @@ This section is a living, high-level parity view against the legacy FastAPI beha
 | Extractors: Path/Query/Header/Cookie/Auth | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/dependency.rs` | Implemented | Large extractor surface; verify edge-case parity in spec as matrix expands. |
 | Dependency injection | `crates/fastapi-core/src/dependency.rs` | Implemented | Type-based `Depends<T>` with caching/overrides/scopes; differs from Python callable-based dependency declaration. |
 | Validation errors (422 format) | `crates/fastapi-core/src/error.rs` | Implemented | JSON shape is designed to be FastAPI-compatible; keep expanding exact rule coverage vs spec. |
-| Validation derive | `crates/fastapi-core/src/validation.rs`, `crates/fastapi-macros/src/validate.rs` | Partial | Core plumbing exists; rule coverage is not yet a full FastAPI/Pydantic parity set. |
+| Validation derive | `crates/fastapi-core/src/validation.rs`, `crates/fastapi-macros/src/validate.rs` | Implemented | Current suite: length, range(gt/ge/lt/le), email, url, regex subset (anchors/classes/\\d/quantifiers), multiple_of, nested, phone, contains/starts_with/ends_with, custom paths. Still not full Pydantic parity. |
 | Responses (JSON/HTML/files) | `crates/fastapi-core/src/response.rs` | Partial | Core response types exist; advanced streaming/file semantics may need more parity work. |
 | Background tasks | `crates/fastapi-core/src/extract.rs` (BackgroundTasks) | Implemented | Server executes tasks after response in `crates/fastapi-http/src/server.rs`. |
 | Security primitives | `crates/fastapi-core/src/extract.rs` | Partial | Credential extractors exist; token validation logic is app-specific. |
