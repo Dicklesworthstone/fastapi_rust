@@ -1,14 +1,14 @@
 //! Structured logging infrastructure for fastapi_rust.
 //!
-//! This module provides structured logging that integrates with asupersync's
-//! observability system and automatically propagates request context.
+//! This module provides structured logging designed to integrate with
+//! asupersync observability APIs and automatically propagate request context.
 //!
 //! # Design Principles
 //!
 //! 1. **Context propagation**: Log macros auto-inject request_id, region_id, task_id
 //! 2. **Structured output**: All logs are JSON-formatted for production
 //! 3. **Span-based timing**: Instrument operations with hierarchical spans
-//! 4. **asupersync integration**: Delegates to asupersync's observability module
+//! 4. **asupersync integration**: Designed to integrate with asupersync observability APIs
 //! 5. **Zero-allocation fast path**: Critical paths avoid heap allocation
 //!
 //! # Usage
@@ -91,9 +91,9 @@ use std::time::Instant;
 
 use crate::context::RequestContext;
 
-// Re-export asupersync's log types for convenience
-// In full implementation, these would come from asupersync::observability
-// For now, we define our own compatible types
+// These types mirror an intended asupersync observability surface. The current
+// implementation provides a minimal built-in sink (stderr) and can be wired to
+// asupersync observability when that API is available.
 
 /// Log levels matching asupersync's observability module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -342,8 +342,7 @@ impl Span {
         let duration = self.elapsed();
         if !self.ended {
             self.ended = true;
-            // In full implementation, this would emit a span-end event
-            // to asupersync's DiagnosticContext
+            // Today we only record duration locally. Span export is not yet wired.
         }
         duration
     }
@@ -400,7 +399,7 @@ impl AutoSpan {
 impl Drop for AutoSpan {
     fn drop(&mut self) {
         let duration = self.inner.end();
-        // In full implementation, would emit a log entry like:
+        // Future enhancement: emit a structured span-end log entry here, e.g.:
         // log_debug!(ctx, "Span ended", span => self.inner.name(), duration_us => duration.as_micros());
         let _ = (duration, self.ctx_request_id); // Suppress warnings for now
     }
@@ -588,8 +587,8 @@ impl<'a> RequestLogger<'a> {
             entry.to_compact()
         };
 
-        // In production, this would delegate to asupersync's observability
-        // or a configured log sink. For now, print to stderr.
+        // Current default sink: print to stderr. A configurable sink/export path
+        // can be added without changing call sites.
         eprintln!("{output}");
     }
 

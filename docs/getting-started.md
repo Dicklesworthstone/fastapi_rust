@@ -134,11 +134,9 @@ let app = App::builder()
     .put("/users", update_users)    // PUT /users
     .delete("/users", delete_users) // DELETE /users
     .patch("/users", patch_users)   // PATCH /users
+    .get("/users/{id}", get_user)   // GET /users/{id}
     .build();
 ```
-
-> **Note**: Path parameter support (e.g., `/users/{id}`) is coming soon.
-> The router implementation supports it, but App integration is in progress.
 
 ## Adding Middleware
 
@@ -244,9 +242,9 @@ my_api/
 ## Next Steps
 
 - [Hello World Example](../crates/fastapi/examples/hello_world.rs) - See a working example
-- [API Router](./api-router.md) - Organize routes into modules (coming soon)
-- [Middleware Guide](./middleware.md) - Build custom middleware (coming soon)
-- [Testing Guide](./testing.md) - Advanced testing patterns (coming soon)
+- [Routing Guide](./guide/routing.md) - Organize routes into modules
+- [Middleware Guide](./guide/middleware.md) - Build custom middleware
+- [Testing Guide](./guide/testing.md) - Advanced testing patterns
 
 ## Getting Help
 
@@ -265,10 +263,9 @@ fastapi_rust is under active development. The current version provides:
 - CORS middleware
 - Comprehensive TestClient for testing
 - Path parameter extraction
-
-Coming soon:
-- Full HTTP server integration
-- JSON extractors
-- Query parameter extractors
-- OpenAPI schema generation
-- Database integration examples
+- JSON extraction (`Json<T>`) and validation error formatting (422)
+- Query string extraction (`Query<T>`)
+- Header and cookie extractors
+- Dependency injection (`Depends<T>`, overrides, caching, scopes)
+- HTTP/1.1 parser + TCP server (`serve(app, addr)`) built on asupersync
+- OpenAPI: schema/spec types and route-aware stubs (generation is still being expanded)

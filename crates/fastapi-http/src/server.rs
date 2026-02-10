@@ -683,8 +683,8 @@ where
             ExpectResult::ExpectsContinue => {
                 // Expect: 100-continue present
                 // Send 100 Continue to tell client to proceed with body
-                // Note: In a full implementation, pre-body validation hooks would run here
-                // to validate auth, content-type, content-length before accepting the body.
+                // Pre-body validation hooks (auth/content-type/content-length gating) are not yet
+                // implemented here; callers should validate inside handlers/middleware.
                 ctx.trace("Sending 100 Continue for Expect: 100-continue");
                 write_raw_response(&mut stream, CONTINUE_RESPONSE).await?;
             }
@@ -905,7 +905,7 @@ impl TcpServer {
             // 1. This is only called during graceful shutdown (not a hot path)
             // 2. The default poll interval is 10ms (minimal CPU impact)
             // 3. During shutdown, blocking briefly is acceptable
-            // 4. Using async sleep would require threading Time through the API
+            // 4. Using async sleep requires threading Time (or Cx) through this API
             //
             // If this becomes a bottleneck, consider:
             // - Using asupersync::runtime::yield_now() in a tighter loop
@@ -1456,7 +1456,7 @@ impl TcpServer {
             connection_counter.fetch_sub(1, Ordering::Relaxed);
 
             if let Err(e) = result {
-                // Log error - in production this would use proper logging
+                // Current default: print to stderr. A structured sink can be wired via fastapi-core::logging.
                 eprintln!("Connection error from {peer_addr}: {e}");
             }
         })

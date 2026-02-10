@@ -163,10 +163,9 @@ let users = APIRouter::new()
     .prefix("/users")
     .get("", list_users)           // GET /users
     .post("", create_user);        // POST /users
-    // Path parameters coming soon:
-    // .get("/{id}", get_user)     // GET /users/{id}
-    // .put("/{id}", update_user)  // PUT /users/{id}
-    // .delete("/{id}", delete_user)  // DELETE /users/{id}
+    .get("/{id}", get_user)        // GET /users/{id}
+    .put("/{id}", update_user)     // PUT /users/{id}
+    .delete("/{id}", delete_user); // DELETE /users/{id}
 ```
 
 ### API Versioning
@@ -214,10 +213,11 @@ Always include the leading slash:
 
 ## Current Limitations
 
-> **Note**: The following features are implemented in the router but not yet integrated with the App:
+Path parameters and converters are supported end-to-end:
 
-- **Path Parameters**: `/users/{id}` syntax is recognized but parameters aren't extracted to handlers yet
-- **Path Converters**: `{id:int}`, `{id:uuid}` type validation exists but isn't exposed
+- The router matches patterns like `/users/{id}` and validates converters like `{id:int}`.
+- `App::handle()` stores matched parameters in request extensions.
+- Handlers read them via the `Path<T>` extractor (single value, tuple, or struct).
 
 These features are coming in a future release.
 

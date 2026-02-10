@@ -1,6 +1,6 @@
 # Dependency Injection
 
-> **Status**: Dependency injection is partially implemented. Basic overrides work, with full `Depends` support coming soon.
+> **Status (as of 2026-02-10)**: Type-based dependency injection is implemented via `Depends<T>` where `T: FromDependency`. Overrides, caching, and scopes are supported.
 
 ## Concept
 
@@ -30,57 +30,51 @@ let app = App::builder()
     .build();
 ```
 
-## Coming Soon
+## Depends<T>
 
-The full `Depends` system is planned:
+Dependencies are resolved from types, not functions. Implement `FromDependency` for any type you want to inject.
 
 ```rust
-// Planned syntax (not yet implemented)
-async fn get_db() -> Database {
-    Database::connect().await
-}
+use fastapi::prelude::*;
 
-async fn get_current_user(db: Depends<Database>) -> User {
-    // Use db to fetch user
+#[derive(Clone)]
+struct Database;
+
+impl FromDependency for Database {
+    type Error = HttpError;
+
+    async fn from_dependency(_ctx: &RequestContext, _req: &mut Request) -> Result<Self, HttpError> {
+        // Construct once per request by default and cache.
+        Ok(Database)
+    }
 }
 
 #[get("/profile")]
-async fn profile(
-    user: Depends<get_current_user>,
-    db: Depends<get_db>,
-) -> Json<Profile> {
-    // Both dependencies injected
+async fn profile(_cx: &Cx, db: Depends<Database>) -> StatusCode {
+    let _db: &Database = &db;
+    StatusCode::OK
 }
 ```
 
-### Planned Features
+### Scopes and Caching
 
-- **Automatic Resolution**: Dependencies resolved from type signatures
-- **Scopes**: Request, application, or custom scopes
-- **Caching**: Avoid duplicate resolution within scope
-- **Nested Dependencies**: Dependencies can have dependencies
-
-## Current Workarounds
-
-Until full DI is available, use application state:
+By default, dependencies are request-scoped and cached (resolved once per request). You can opt out of caching:
 
 ```rust
-struct Services {
-    db: DatabasePool,
-    cache: CacheClient,
+use fastapi::prelude::*;
+
+#[derive(Clone)]
+struct CounterDep;
+
+impl FromDependency for CounterDep {
+    type Error = HttpError;
+    async fn from_dependency(_ctx: &RequestContext, _req: &mut Request) -> Result<Self, HttpError> {
+        Ok(CounterDep)
+    }
 }
 
-let app = App::builder()
-    .state(Services {
-        db: DatabasePool::new(),
-        cache: CacheClient::new(),
-    })
-    .get("/users", list_users)
-    .build();
-
-// In handler, access via state
-fn list_users(ctx: &RequestContext, req: &mut Request) -> ... {
-    // Access services from app state
+async fn handler(_cx: &Cx, _dep: Depends<CounterDep, NoCache>) -> StatusCode {
+    StatusCode::OK
 }
 ```
 

@@ -1,10 +1,15 @@
 # Deployment
 
-> **Status**: Full HTTP server integration is coming soon. This chapter covers preparation for production.
+> **Status (as of 2026-02-10)**: `fastapi_rust` includes an HTTP/1.1 TCP server built on **asupersync** (`fastapi_http::TcpServer` and `fastapi_rust::serve`). This chapter covers practical deployment guidance and the remaining hardening work.
 
 ## Current State
 
-fastapi_rust currently provides application building and testing capabilities. Full HTTP server integration is in development.
+fastapi_rust provides:
+
+- An application runtime (`App`) with routing, middleware, extraction, DI, and error formatting
+- An HTTP/1.1 parser + TCP server (`serve(app, addr)`)
+
+The server surface is usable, but production hardening (resource limits, metrics, signal integration, load/perf characterization) is ongoing.
 
 ## Production Checklist
 
@@ -91,16 +96,16 @@ impl Middleware for LoggingMiddleware {
 }
 ```
 
-## Coming Soon
+## Roadmap Items (Hardening)
 
-- **HTTP Server**: Native server binding
-- **Graceful Shutdown**: Handle SIGTERM cleanly
-- **Health Checks**: Kubernetes-ready endpoints
-- **Metrics**: Prometheus integration
+- Structured metrics export (Prometheus/OpenTelemetry style)
+- Signal-driven graceful shutdown wiring (SIGTERM/SIGINT)
+- Load testing, p95 latency characterization, and perf tuning
+- More complete observability integration (spans/log sinks)
 
 ## Reverse Proxy Setup
 
-While waiting for native server support, you can test with a reverse proxy:
+If you deploy behind a reverse proxy (recommended), configure standard forwarded headers and TLS termination there:
 
 ### nginx Example
 

@@ -177,11 +177,11 @@ let app = App::builder()
 // Auth middleware can log request IDs for audit trails
 ```
 
-## Coming Soon
+## Not Built In Yet (Or App-Specific)
 
-- **OAuth2 / JWT Support**: Built-in token validation
-- **Rate Limiting**: Protect against abuse
-- **CSRF Protection**: Form submission security
+- OAuth2/JWT validation logic is application-specific (extractors provide credentials, apps validate)
+- CSRF protection primitives are not provided as a first-class built-in yet
+- Rate limiting support depends on which middleware you enable/configure (and is still being expanded)
 
 ## Next Steps
 

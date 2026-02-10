@@ -1,6 +1,6 @@
 # OpenAPI Documentation
 
-> **Status**: The OpenAPI crate exists with types defined, but automatic schema generation is not yet integrated with the App.
+> **Status (as of 2026-02-10)**: OpenAPI schema/spec types exist (`fastapi-openapi`), `#[derive(JsonSchema)]` exists, and `App` can serve an OpenAPI JSON endpoint. Automatic, full-coverage generation from all handler/extractor types is still being expanded.
 
 ## Concept
 
@@ -28,12 +28,11 @@ let spec = OpenApiBuilder::new()
     .build();
 ```
 
-## Coming Soon
+## Not Implemented Yet (Or Still Expanding)
 
-Automatic schema generation from types:
+OpenAPI generation coverage is currently incomplete for the full framework surface (all extractors, responses, and security flows).
 
 ```rust
-// Planned syntax (not yet implemented)
 #[derive(JsonSchema)]
 struct User {
     id: i64,
@@ -41,16 +40,14 @@ struct User {
     email: String,
 }
 
-// Schema automatically derived
-// GET /openapi.json returns full specification
+// JSON Schema is derived from Rust types and can be registered in OpenAPI components.
 ```
 
-### Planned Features
+### Areas Being Expanded
 
-- **Automatic Route Discovery**: Routes added to spec automatically
-- **Type-Driven Schemas**: Generate from Rust types
-- **Request/Response Docs**: Document inputs and outputs
-- **Interactive UI**: Swagger UI / ReDoc integration
+- Route-to-operation mapping from registered handlers (params, request bodies, responses)
+- Request/response schema coverage and examples
+- Security scheme integration and per-route requirements
 
 ## Current Workarounds
 

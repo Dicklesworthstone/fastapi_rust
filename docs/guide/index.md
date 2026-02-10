@@ -64,12 +64,8 @@ fastapi_rust is under active development. This guide covers features that are cu
 - Application configuration
 - Startup/shutdown hooks
 
-**Coming Soon:**
-- Path parameter extraction in handlers
-- Full HTTP server
-- JSON extractors
-- Query parameter extractors
-- OpenAPI schema generation
+**Not Implemented Yet (or still expanding):**
+- Fully automatic OpenAPI generation from handler/extractor types (schema/spec types exist; generation coverage is being expanded)
 
 ## Prerequisites
 

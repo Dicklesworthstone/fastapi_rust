@@ -1,6 +1,6 @@
 # Request Handling
 
-> **Status**: This chapter covers features that are partially implemented. Some extractors are available, with more coming soon.
+> **Status (as of 2026-02-10)**: This chapter documents the request API and the extractor surface that exists today (Path, Query, Json, headers, cookies, auth).
 
 ## Request Object
 
@@ -25,7 +25,7 @@ fn handler(_ctx: &RequestContext, req: &mut Request) -> std::future::Ready<Respo
 }
 ```
 
-## Available Now
+## Core Request API
 
 ### Headers
 
@@ -44,26 +44,25 @@ let method = req.method();  // Method enum
 let path = req.path();      // &str
 ```
 
-## Coming Soon
+## Extractors
 
-The following extractors are planned:
-
-- **Path Parameters**: Extract typed parameters from URL paths
-- **Query Parameters**: Parse query strings into typed structs
-- **JSON Body**: Deserialize JSON request bodies
-- **Form Data**: Handle form submissions
-- **Multipart**: File uploads
-
-Example of planned API:
+fastapi_rust supports typed extraction in handler signatures. Examples:
 
 ```rust
-// Planned syntax (not yet implemented)
-fn get_user(
-    ctx: &RequestContext,
-    id: Path<i64>,           // Extract from /users/{id}
-    query: Query<Pagination>, // Extract from ?page=1&limit=10
-) -> Json<User> {
-    // ...
+use fastapi::prelude::*;
+
+#[derive(Deserialize)]
+struct Pagination {
+    page: Option<u32>,
+    limit: Option<u32>,
+}
+
+#[get("/users/{id}")]
+async fn get_user(_cx: &Cx, id: Path<i64>, q: Query<Pagination>) -> StatusCode {
+    let _id: i64 = id.0;
+    let _page: Option<u32> = q.page;
+    let _limit: Option<u32> = q.limit;
+    StatusCode::OK
 }
 ```
 

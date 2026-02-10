@@ -897,6 +897,8 @@ enum AsyncChunkedState {
     ChunkData { remaining: usize },
     /// Expecting CRLF after chunk data.
     ChunkDataEnd,
+    /// Reading trailers (after final chunk).
+    Trailers,
     /// Complete.
     Complete,
     /// Error.
@@ -1047,11 +1049,20 @@ where
         }
     }
 
-    fn poll_read_more(
+    fn poll_read_more_sized(
         &mut self,
         cx: &mut Context<'_>,
+        max_read: usize,
     ) -> Poll<Result<usize, RequestBodyStreamError>> {
         self.compact_buffer_if_needed();
+
+        let max_read = max_read.min(self.read_buffer.len());
+        if max_read == 0 {
+            self.state = AsyncChunkedState::Error;
+            return Poll::Ready(Err(RequestBodyStreamError::Io(
+                "invalid read buffer size".to_string(),
+            )));
+        }
 
         let mut reader = match self.reader.take() {
             Some(r) => r,
@@ -1061,25 +1072,26 @@ where
             }
         };
 
-        // Read into the scratch buffer, then append.
         let read_result = {
-            let mut read_buf = asupersync::io::ReadBuf::new(&mut self.read_buffer);
+            let mut read_buf = asupersync::io::ReadBuf::new(&mut self.read_buffer[..max_read]);
             match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
-                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().to_vec())),
+                Poll::Ready(Ok(())) => {
+                    let filled = read_buf.filled();
+                    Poll::Ready(Ok(filled.len()))
+                }
                 Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
                 Poll::Pending => Poll::Pending,
             }
         };
 
         match read_result {
-            Poll::Ready(Ok(bytes)) => {
-                let n = bytes.len();
+            Poll::Ready(Ok(n)) => {
                 if n == 0 {
                     self.state = AsyncChunkedState::Error;
                     self.reader = Some(reader);
                     return Poll::Ready(Err(RequestBodyStreamError::ConnectionClosed));
                 }
-                self.buffer.extend_from_slice(&bytes);
+                self.buffer.extend_from_slice(&self.read_buffer[..n]);
                 self.reader = Some(reader);
                 Poll::Ready(Ok(n))
             }
@@ -1106,17 +1118,6 @@ where
         // Check if complete or error
         if self.state == AsyncChunkedState::Complete || self.state == AsyncChunkedState::Error {
             return Poll::Ready(None);
-        }
-
-        // Check size limit
-        if self.bytes_decoded > self.max_size {
-            self.state = AsyncChunkedState::Error;
-            let bytes_decoded = self.bytes_decoded;
-            let max_size = self.max_size;
-            return Poll::Ready(Some(Err(RequestBodyStreamError::TooLarge {
-                received: bytes_decoded,
-                max: max_size,
-            })));
         }
 
         loop {
@@ -1156,6 +1157,19 @@ where
                             }
                         };
 
+                        // Enforce max size before consuming/streaming this chunk.
+                        if chunk_size > 0
+                            && self.bytes_decoded.saturating_add(chunk_size) > self.max_size
+                        {
+                            self.state = AsyncChunkedState::Error;
+                            let bytes_decoded = self.bytes_decoded;
+                            let max_size = self.max_size;
+                            return Poll::Ready(Some(Err(RequestBodyStreamError::TooLarge {
+                                received: bytes_decoded,
+                                max: max_size,
+                            })));
+                        }
+
                         // Reject unreasonably large chunk sizes early
                         const MAX_SINGLE_CHUNK: usize = 16 * 1024 * 1024;
                         if chunk_size > MAX_SINGLE_CHUNK {
@@ -1168,9 +1182,9 @@ where
                         self.consume(crlf_pos + 2);
 
                         if chunk_size == 0 {
-                            // Final chunk - complete
-                            self.state = AsyncChunkedState::Complete;
-                            return Poll::Ready(None);
+                            // Final chunk - transition to trailers (includes required CRLF)
+                            self.state = AsyncChunkedState::Trailers;
+                            continue;
                         }
 
                         self.state = AsyncChunkedState::ChunkData {
@@ -1190,13 +1204,26 @@ where
                         ))));
                     }
 
-                    match self.poll_read_more(cx) {
+                    // Read minimally to avoid consuming bytes beyond request boundaries
+                    // on keep-alive connections.
+                    match self.poll_read_more_sized(cx, 1) {
                         Poll::Ready(Ok(_n)) => {}
                         Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
                         Poll::Pending => return Poll::Pending,
                     }
                 }
                 AsyncChunkedState::ChunkData { remaining } => {
+                    // Ensure we never yield bytes beyond max_size.
+                    if remaining > 0 && self.bytes_decoded >= self.max_size {
+                        self.state = AsyncChunkedState::Error;
+                        let bytes_decoded = self.bytes_decoded;
+                        let max_size = self.max_size;
+                        return Poll::Ready(Some(Err(RequestBodyStreamError::TooLarge {
+                            received: bytes_decoded,
+                            max: max_size,
+                        })));
+                    }
+
                     // Read chunk data from buffer
                     let buffer_remaining = self.buffer_remaining();
                     let to_read = remaining.min(buffer_remaining.len()).min(self.chunk_size);
@@ -1219,7 +1246,9 @@ where
                     }
 
                     // Need more data from the reader (socket).
-                    match self.poll_read_more(cx) {
+                    // Read at most the remaining bytes in this chunk to avoid read-ahead.
+                    let want = remaining.min(self.chunk_size).max(1);
+                    match self.poll_read_more_sized(cx, want) {
                         Poll::Ready(Ok(_n)) => {}
                         Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
                         Poll::Pending => return Poll::Pending,
@@ -1241,7 +1270,41 @@ where
                     }
 
                     // Need more data from the reader (socket).
-                    match self.poll_read_more(cx) {
+                    match self.poll_read_more_sized(cx, 1) {
+                        Poll::Ready(Ok(_n)) => {}
+                        Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncChunkedState::Trailers => {
+                    // Skip trailers until empty line (CRLF). Trailers are not exposed to the app.
+                    //
+                    // Read minimally to avoid swallowing bytes that belong to the next request
+                    // on keep-alive connections.
+                    let remaining = self.buffer_remaining();
+
+                    if remaining.len() >= 2 && &remaining[..2] == b"\r\n" {
+                        self.consume(2);
+                        self.state = AsyncChunkedState::Complete;
+                        return Poll::Ready(None);
+                    }
+
+                    // Defensive cap: trailer lines must be reasonably bounded.
+                    const MAX_TRAILER_LINE: usize = 8 * 1024;
+                    if remaining.len() > MAX_TRAILER_LINE {
+                        self.state = AsyncChunkedState::Error;
+                        return Poll::Ready(Some(Err(RequestBodyStreamError::Io(
+                            "trailer line too long".to_string(),
+                        ))));
+                    }
+
+                    if let Some(crlf_pos) = remaining.windows(2).position(|w| w == b"\r\n") {
+                        // Skip one trailer line (header) and continue.
+                        self.consume(crlf_pos + 2);
+                        continue;
+                    }
+
+                    match self.poll_read_more_sized(cx, 1) {
                         Poll::Ready(Ok(_n)) => {}
                         Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
                         Poll::Pending => return Poll::Pending,

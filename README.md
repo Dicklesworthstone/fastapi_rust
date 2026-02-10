@@ -114,8 +114,15 @@ fn main() {
         .middleware(Cors::permissive())
         .build();
 
-    // Run with asupersync (TCP server coming soon)
-    // asupersync::block_on(app.serve("0.0.0.0:8000"));
+    // Run with asupersync
+    let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime must build");
+    rt.block_on(async move {
+        serve(app, "0.0.0.0:8000")
+            .await
+            .expect("server must start");
+    });
 }
 ```
 

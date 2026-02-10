@@ -107,14 +107,14 @@ error_response(StatusCode::NOT_FOUND, "User not found")
 error_response(StatusCode::BAD_REQUEST, "Invalid input")
 ```
 
-## Coming Soon
+## Helpers
 
-The following response helpers are planned:
+The core response type includes built-in helpers (examples):
 
-- **Json<T>**: Automatic JSON serialization
-- **Html**: HTML responses with proper content type
-- **FileResponse**: Serve files
-- **Streaming**: Streaming response bodies
+- `Response::json(&value)` to create a JSON response (sets `Content-Type`)
+- `ResponseFactory::*` helpers in testing/fixtures for common statuses
+
+Some higher-level convenience response types (file serving, advanced streaming primitives, etc.) are still being expanded.
 
 ## Next Steps
 
