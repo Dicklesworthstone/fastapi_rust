@@ -32,12 +32,17 @@
 //! }
 //!
 //! fn main() {
-//!     let app = App::new()
+//!     let app = App::builder()
 //!         .title("My API")
-//!         .route(get_item);
+//!         .route_entry(get_item_route())
+//!         .build();
 //!
-//!     // Run with asupersync
-//!     // asupersync::block_on(app.serve("0.0.0.0:8000"));
+//!     let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+//!         .build()
+//!         .expect("runtime must build");
+//!     rt.block_on(async move {
+//!         serve(app, "0.0.0.0:8000").await.expect("server must start");
+//!     });
 //! }
 //! ```
 //!
@@ -238,7 +243,7 @@ pub use fastapi_router as router;
 
 // Re-export commonly used types
 pub use fastapi_core::{
-    App, AppBuilder, AppConfig, ConfigError, Cors, CorsConfig, DefaultConfig,
+    App, AppBuilder, AppConfig, ConfigError, Cors, CorsConfig, Cx, DefaultConfig,
     DefaultDependencyConfig, DependencyOverrides, DependencyScope, Depends, DependsConfig,
     FromDependency, FromRequest, HttpError, IntoResponse, Method, NoCache, Request, RequestId,
     RequestIdConfig, RequestIdMiddleware, Response, ResponseBody, StateContainer, StatusCode,
@@ -350,6 +355,8 @@ pub mod prelude {
         Cookie,
         Cors,
         CorsConfig,
+        // asupersync context
+        Cx,
         DefaultConfig,
         DefaultDependencyConfig,
         DependencyOverrides,

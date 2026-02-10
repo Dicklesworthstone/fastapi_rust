@@ -723,7 +723,7 @@ impl Route {
     /// Create a route with a placeholder handler.
     ///
     /// This is used by the route registration macros during compile-time route
-    /// discovery. The placeholder handler returns 501 Not Implemented.
+    /// discovery. The placeholder handler panics if invoked.
     ///
     /// **Note**: Routes created with this method should have their handlers
     /// replaced before being used to handle actual requests.
@@ -899,10 +899,10 @@ impl Route {
     }
 }
 
-/// A placeholder handler that returns 501 Not Implemented.
+/// A placeholder handler used for macro-time route registration.
 ///
-/// Used for routes created during macro registration before the actual
-/// handler is wired up.
+/// This exists to allow building metadata-rich `Route` values without
+/// wiring up a real handler. It must never be used for request handling.
 struct PlaceholderHandler;
 
 impl Handler for PlaceholderHandler {
@@ -912,8 +912,10 @@ impl Handler for PlaceholderHandler {
         _req: &'a mut fastapi_core::Request,
     ) -> fastapi_core::BoxFuture<'a, fastapi_core::Response> {
         Box::pin(async {
-            // 501 Not Implemented
-            fastapi_core::Response::with_status(fastapi_core::StatusCode::from_u16(501))
+            panic!(
+                "fastapi_router::Route placeholder handler invoked: this Route was created for \
+                 discovery/OpenAPI metadata and must not be used for request handling"
+            );
         })
     }
 }

@@ -134,7 +134,14 @@ let app = App::builder()
     .put("/users", update_users)    // PUT /users
     .delete("/users", delete_users) // DELETE /users
     .patch("/users", patch_users)   // PATCH /users
-    .get("/users/{id}", get_user)   // GET /users/{id}
+    .build();
+```
+
+If you use the route attribute macros (e.g., `#[get("/users/{id}")]`), register the generated route entry:
+
+```rust
+let app = App::builder()
+    .route_entry(get_user_route())
     .build();
 ```
 

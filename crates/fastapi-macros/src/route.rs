@@ -232,6 +232,22 @@ fn is_context_type(ty: &Type) -> bool {
     false
 }
 
+fn is_mut_request_ref(ty: &Type) -> bool {
+    let Type::Reference(ref_type) = ty else {
+        return false;
+    };
+    if ref_type.mutability.is_none() {
+        return false;
+    }
+    let Type::Path(type_path) = &*ref_type.elem else {
+        return false;
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return false;
+    };
+    segment.ident == "Request"
+}
+
 /// Extract the type from a function argument, excluding pattern binding.
 fn extract_param_type(arg: &FnArg) -> Option<&Type> {
     match arg {
@@ -379,6 +395,7 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
     let fn_attrs = &input_fn.attrs;
 
     let route_fn_name = syn::Ident::new(&format!("__route_{fn_name}"), fn_name.span());
+    let route_entry_fn_name = syn::Ident::new(&format!("{fn_name}_route"), fn_name.span());
     let reg_name = syn::Ident::new(&format!("__FASTAPI_ROUTE_REG_{fn_name}"), fn_name.span());
 
     let method_ident = syn::Ident::new(method, proc_macro2::Span::call_site());
@@ -399,6 +416,21 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
         return syn::Error::new(fn_name.span(), error_msg)
             .to_compile_error()
             .into();
+    }
+
+    // Validation 0b: If the handler requests `&mut Request`, require it to be last.
+    for (idx, arg) in fn_inputs.iter().enumerate() {
+        let Some(ty) = extract_param_type(arg) else {
+            continue;
+        };
+        if is_mut_request_ref(ty) && idx != fn_inputs.len().saturating_sub(1) {
+            return syn::Error::new_spanned(
+                ty,
+                "`&mut Request` parameters must be the last handler argument",
+            )
+            .to_compile_error()
+            .into();
+        }
     }
 
     // =========================================================================
@@ -639,6 +671,57 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
         })
         .collect();
 
+    // Generate extraction + invocation wrapper for runtime routing.
+    let mut arg_extracts: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for (i, arg) in fn_inputs.iter().enumerate() {
+        let Some(ty) = extract_param_type(arg) else {
+            continue;
+        };
+
+        // Context injections are passed directly.
+        if is_context_type(ty) {
+            if let Type::Reference(ref_type) = ty {
+                if let Type::Path(type_path) = &*ref_type.elem {
+                    if let Some(segment) = type_path.path.segments.last() {
+                        let name = segment.ident.to_string();
+                        match name.as_str() {
+                            "Cx" => {
+                                call_args.push(quote! { ctx.cx() });
+                                continue;
+                            }
+                            "RequestContext" => {
+                                call_args.push(quote! { ctx });
+                                continue;
+                            }
+                            "Request" => {
+                                call_args.push(quote! { req });
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        let ident = syn::Ident::new(&format!("__fastapi_arg_{i}"), Span::call_site());
+        arg_extracts.push(quote! {
+            let #ident: #ty = match <#ty as fastapi_core::FromRequest>::from_request(ctx, req).await {
+                Ok(v) => v,
+                Err(e) => return __into_response(e),
+            };
+        });
+        call_args.push(quote! { #ident });
+    }
+
+    let call_handler = if fn_asyncness.is_some() {
+        quote! { #fn_name(#(#call_args),*).await }
+    } else {
+        quote! { #fn_name(#(#call_args),*) }
+    };
+
     // Generate the expanded code
     let expanded = quote! {
         // Original function preserved for direct calling
@@ -671,6 +754,29 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
             #deprecated_call
             #request_body_call
             #(#response_calls)*
+        }
+
+        /// Build a runtime [`fastapi_core::RouteEntry`] for this handler.
+        ///
+        /// This wraps the handler with extractor evaluation (`FromRequest`) and converts
+        /// both extractor errors and handler return values into a [`fastapi_core::Response`].
+        #[allow(non_snake_case)]
+        pub fn #route_entry_fn_name() -> fastapi_core::RouteEntry {
+            fn __into_response<T: fastapi_core::IntoResponse>(v: T) -> fastapi_core::Response {
+                v.into_response()
+            }
+
+            fastapi_core::RouteEntry::new(
+                fastapi_core::Method::#method_ident,
+                #path_str,
+                |ctx, req| {
+                    Box::pin(async move {
+                        #(#arg_extracts)*
+                        let out = #call_handler;
+                        __into_response(out)
+                    }) as fastapi_core::BoxFuture<'_, fastapi_core::Response>
+                },
+            )
         }
 
         // Static registration for route discovery

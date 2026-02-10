@@ -1595,6 +1595,16 @@ impl<S: StateRegistry> AppBuilder<S> {
         self
     }
 
+    /// Adds a pre-built [`RouteEntry`] to the application.
+    ///
+    /// This is primarily used by proc-macro generated route builders that already
+    /// know the method/path and can build an extraction wrapper.
+    #[must_use]
+    pub fn route_entry(mut self, entry: RouteEntry) -> Self {
+        self.routes.push(entry);
+        self
+    }
+
     /// Adds a GET route.
     #[must_use]
     pub fn get<H, Fut>(self, path: impl Into<String>, handler: H) -> Self

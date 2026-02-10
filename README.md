@@ -107,9 +107,9 @@ fn main() {
     let app = App::builder()
         .title("My API")
         .version("1.0.0")
-        .route(get_item)
-        .route(create_item)
-        .route(search)
+        .route_entry(get_item_route())
+        .route_entry(create_item_route())
+        .route_entry(search_route())
         .middleware(RequestIdMiddleware::new())
         .middleware(Cors::permissive())
         .build();
@@ -568,16 +568,16 @@ Shutdown propagates through asupersync regions - no orphaned tasks.
 ```rust
 use fastapi_rust::prelude::*;
 
-let app = App::builder()
-    // Metadata
-    .title("My API")
-    .version("1.0.0")
-    .description("A sample API built with fastapi_rust")
+	let app = App::builder()
+	    // Metadata
+	    .title("My API")
+	    .version("1.0.0")
+	    .description("A sample API built with fastapi_rust")
 
-    // Routes
-    .route(get_item)
-    .route(create_item)
-    .route(delete_item)
+	    // Routes
+	    .route_entry(get_item_route())
+	    .route_entry(create_item_route())
+	    .route_entry(delete_item_route())
 
     // Middleware (order matters)
     .middleware(RequestIdMiddleware::new())
