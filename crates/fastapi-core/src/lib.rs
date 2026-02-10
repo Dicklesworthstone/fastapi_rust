@@ -54,6 +54,7 @@
 pub mod app;
 mod context;
 mod dependency;
+pub mod digest;
 pub mod docs;
 pub mod error;
 mod extract;
@@ -74,6 +75,7 @@ pub use dependency::{
     DefaultConfig, DefaultDependencyConfig, DependencyCache, DependencyOverrides, DependencyScope,
     Depends, DependsCleanup, DependsConfig, FromDependency, FromDependencyWithCleanup, NoCache,
 };
+pub use digest::{DigestAlgorithm, DigestAuth, DigestAuthError, DigestAuthErrorKind, DigestQop};
 pub use error::{HttpError, LocItem, ValidationError, ValidationErrors};
 pub use extract::{
     Accept, ApiKey, ApiKeyConfig, ApiKeyError, ApiKeyErrorKind, ApiKeyLocation, AppState,
