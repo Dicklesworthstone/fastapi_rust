@@ -59,6 +59,7 @@ pub mod error;
 mod extract;
 pub mod logging;
 pub mod middleware;
+pub mod multipart;
 mod password;
 mod request;
 mod response;
@@ -80,10 +81,11 @@ pub use extract::{
     CookieName, CsrfToken, CsrfTokenCookie, DEFAULT_JSON_LIMIT, DEFAULT_PAGE, DEFAULT_PER_PAGE,
     Form, FormExtractError, FormExtractErrorKind, FromHeaderValue, FromRequest, Header,
     HeaderExtractError, HeaderName, HeaderValues, Host, Json, JsonConfig, JsonExtractError,
-    MAX_PER_PAGE, NamedHeader, OAuth2BearerError, OAuth2BearerErrorKind, OAuth2PasswordBearer,
-    OAuth2PasswordBearerConfig, Page, Pagination, PaginationConfig, Path, PathExtractError,
-    PathParams, Query, QueryExtractError, QueryParams, SessionId, State, StateExtractError,
-    UserAgent, Valid, ValidExtractError, Validate, XRequestId, snake_to_header_case,
+    MAX_PER_PAGE, MultipartExtractError, NamedHeader, OAuth2BearerError, OAuth2BearerErrorKind,
+    OAuth2PasswordBearer, OAuth2PasswordBearerConfig, Page, Pagination, PaginationConfig, Path,
+    PathExtractError, PathParams, Query, QueryExtractError, QueryParams, SessionId, State,
+    StateExtractError, UserAgent, Valid, ValidExtractError, Validate, XRequestId,
+    snake_to_header_case,
 };
 pub use middleware::{
     AddResponseHeader, BoxFuture, ControlFlow, Cors, CorsConfig, Handler, Layer, Layered,
@@ -100,6 +102,10 @@ pub use response::{
     Redirect, Response, ResponseBody, ResponseModelAliases, ResponseModelConfig, ResponseProduces,
     SameSite, SetCookie, StatusCode, Text, ValidatedResponse, apply_conditional, check_if_match,
     check_if_none_match, exclude_fields, include_fields, mime_type_for_extension,
+};
+pub use multipart::{
+    MultipartConfig, MultipartError, MultipartForm, MultipartParser, Part, UploadFile,
+    DEFAULT_MAX_FIELDS, DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_TOTAL_SIZE, parse_boundary,
 };
 
 // Re-export interactive docs helpers.
