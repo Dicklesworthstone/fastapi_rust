@@ -342,7 +342,6 @@ impl Span {
         let duration = self.elapsed();
         if !self.ended {
             self.ended = true;
-            // Today we only record duration locally. Span export is not yet wired.
         }
         duration
     }
@@ -382,16 +381,34 @@ impl Drop for Span {
 /// when it goes out of scope, making it ideal for RAII-style usage.
 pub struct AutoSpan {
     inner: Span,
-    ctx_request_id: u64,
+    ctx: RequestContext,
+    config: LogConfig,
 }
 
 impl AutoSpan {
-    /// Creates a new auto-ending span.
+    /// Creates a new auto-ending span using the default [`LogConfig`].
+    ///
+    /// The span end event is emitted at DEBUG level, so it will only be visible
+    /// if DEBUG logging is enabled.
     #[must_use]
     pub fn new(ctx: &RequestContext, name: impl Into<String>) -> Self {
+        Self::new_with_config(ctx, LogConfig::default(), name)
+    }
+
+    /// Creates a new auto-ending span using an explicit [`LogConfig`].
+    ///
+    /// The span end event is emitted at DEBUG level, so it will only be visible
+    /// if DEBUG logging is enabled.
+    #[must_use]
+    pub fn new_with_config(
+        ctx: &RequestContext,
+        config: LogConfig,
+        name: impl Into<String>,
+    ) -> Self {
         Self {
             inner: Span::new(ctx, name),
-            ctx_request_id: ctx.request_id(),
+            ctx: ctx.clone(),
+            config,
         }
     }
 }
@@ -399,9 +416,16 @@ impl AutoSpan {
 impl Drop for AutoSpan {
     fn drop(&mut self) {
         let duration = self.inner.end();
-        // Future enhancement: emit a structured span-end log entry here, e.g.:
-        // log_debug!(ctx, "Span ended", span => self.inner.name(), duration_us => duration.as_micros());
-        let _ = (duration, self.ctx_request_id); // Suppress warnings for now
+        let logger = RequestLogger::new(&self.ctx, self.config.clone());
+        logger.debug_with_fields("Span ended", |e| {
+            let mut e = e.target(module_path!());
+            e = e.field("span", self.inner.name());
+            e = e.field("span_id", self.inner.span_id());
+            if let Some(parent_id) = self.inner.parent_id() {
+                e = e.field("parent_id", parent_id);
+            }
+            e.field("duration_us", duration.as_micros())
+        });
     }
 }
 
@@ -691,7 +715,7 @@ impl<'a> RequestLogger<'a> {
     /// Creates an auto-ending span.
     #[must_use]
     pub fn span_auto(&self, name: impl Into<String>) -> AutoSpan {
-        AutoSpan::new(self.ctx, name)
+        AutoSpan::new_with_config(self.ctx, self.config.clone(), name)
     }
 }
 
@@ -957,8 +981,8 @@ mod tests {
         let ctx = test_context();
         let span = AutoSpan::new(&ctx, "test_span");
 
-        // AutoSpan stores the context's request ID
-        assert_eq!(span.ctx_request_id, 12345);
+        // AutoSpan stores a clone of the request context.
+        assert_eq!(span.ctx.request_id(), 12345);
     }
 
     #[test]
