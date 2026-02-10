@@ -216,7 +216,7 @@ goal tracked in Beads (see `bd-uz2s`).
 ### When to Consider Alternatives
 
 - You need production-proven stability today (fastapi_rust is v0.1.2)
-- You require WebSocket support (coming in Phase 2)
+- You require production-hardened WebSocket support (basic support exists; full parity tracked in `bd-z09e`)
 - You have existing Tokio-based infrastructure
 - You need the massive ecosystem of Tower middleware
 
@@ -661,7 +661,7 @@ Current parity status and the concrete gap list are tracked in:
 - **OpenAPI generation**: currently minimal; needs real operation/schema mapping from route metadata.
 - **TCP server integration/hardening**: `fastapi-http` has a server implementation, but the end-to-end
   surface is still evolving.
-- **WebSockets**: missing (`bd-z09e`).
+- **WebSockets**: partial (handshake + basic frames). Full FastAPI/Starlette parity is tracked in `bd-z09e`.
 - **Multipart/form-data + file uploads**: partially implemented (core parser + `MultipartForm` extractor).
   Full FastAPI/Starlette `UploadFile` semantics (streaming/spooled tempfiles/async file API) are tracked in `bd-3ess`.
 - **HTTP/2**: missing (`bd-2c9t`).

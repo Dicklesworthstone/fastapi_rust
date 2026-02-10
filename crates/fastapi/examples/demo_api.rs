@@ -162,7 +162,7 @@ fn get_user(id: u64) -> Result<ApiResponse<User>, (u16, String)> {
 /// Create a new user.
 fn create_user(input: CreateUser) -> ApiResponse<User> {
     let user = User {
-        id: 42, // In production, this would be auto-generated
+        id: 42, // In production, this is typically auto-generated
         name: input.name,
         email: input.email,
         role: input.role.unwrap_or(UserRole::Viewer),

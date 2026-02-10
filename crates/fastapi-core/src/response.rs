@@ -350,7 +350,7 @@ impl SetCookie {
         }
 
         if !is_valid_cookie_name(&self.name) || !is_valid_cookie_value(&self.value) {
-            // An invalid cookie name/value would generate a broken header; return empty so
+            // An invalid cookie name/value generates a broken header; return empty so
             // callers can choose to drop the header.
             return String::new();
         }

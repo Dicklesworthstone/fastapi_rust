@@ -201,8 +201,9 @@ pub type BoxWebSocketHandler = Box<
             &RequestContext,
             &mut Request,
             crate::websocket::WebSocket,
-        ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), crate::websocket::WebSocketError>> + Send>>
-        + Send
+        ) -> std::pin::Pin<
+            Box<dyn Future<Output = Result<(), crate::websocket::WebSocketError>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -1475,6 +1476,15 @@ impl App {
         self.ws_routes.len()
     }
 
+    /// Returns true if a websocket route matches the given path.
+    #[must_use]
+    pub fn has_websocket_route(&self, path: &str) -> bool {
+        matches!(
+            self.ws_router.lookup(path, Method::Get),
+            RouteLookup::Match(_)
+        )
+    }
+
     /// Returns an iterator over route metadata (method, path).
     ///
     /// This is useful for generating OpenAPI specifications or debugging.
@@ -1531,6 +1541,12 @@ impl App {
     /// Clear all registered dependency overrides.
     pub fn clear_dependency_overrides(&self) {
         self.dependency_overrides.clear();
+    }
+
+    /// Returns the shared dependency overrides registry.
+    #[must_use]
+    pub fn dependency_overrides(&self) -> Arc<crate::dependency::DependencyOverrides> {
+        Arc::clone(&self.dependency_overrides)
     }
 
     /// Take request-scoped background tasks (if any) from a request.
@@ -1614,6 +1630,47 @@ impl App {
         }
     }
 
+    /// Handles an incoming websocket upgrade request after the handshake has been accepted.
+    ///
+    /// The HTTP server is responsible for validating the upgrade headers and writing the 101
+    /// response. This function only performs path matching and calls the websocket handler.
+    pub async fn handle_websocket(
+        &self,
+        ctx: &RequestContext,
+        req: &mut Request,
+        ws: crate::websocket::WebSocket,
+    ) -> Result<(), crate::websocket::WebSocketError> {
+        match self.ws_router.lookup(req.path(), Method::Get) {
+            RouteLookup::Match(route_match) => {
+                let entry = self
+                    .ws_routes
+                    .iter()
+                    .find(|e| e.path == route_match.route.path);
+                let Some(entry) = entry else {
+                    return Err(crate::websocket::WebSocketError::Protocol(
+                        "websocket route missing handler",
+                    ));
+                };
+
+                if !route_match.params.is_empty() {
+                    let path_params = crate::extract::PathParams::from_pairs(
+                        route_match
+                            .params
+                            .iter()
+                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                            .collect(),
+                    );
+                    req.insert_extension(path_params);
+                }
+
+                entry.call(ctx, req, ws).await
+            }
+            _ => Err(crate::websocket::WebSocketError::Protocol(
+                "no websocket route matched",
+            )),
+        }
+    }
+
     // =========================================================================
     // Lifecycle Hook Execution
     // =========================================================================
@@ -1648,47 +1705,9 @@ impl App {
                         }
                         Err(_) => {
                             warnings += 1;
-        }
-    }
-
-    /// Handles an incoming websocket upgrade request after the handshake has been accepted.
-    ///
-    /// The HTTP server is responsible for validating the upgrade headers and writing the 101
-    /// response. This function only performs path matching and calls the websocket handler.
-    pub async fn handle_websocket(
-        &self,
-        ctx: &RequestContext,
-        req: &mut Request,
-        ws: crate::websocket::WebSocket,
-    ) -> Result<(), crate::websocket::WebSocketError> {
-        match self.ws_router.lookup(req.path(), Method::Get) {
-            RouteLookup::Match(route_match) => {
-                let entry = self.ws_routes.iter().find(|e| e.path == route_match.route.path);
-                let Some(entry) = entry else {
-                    return Err(crate::websocket::WebSocketError::Protocol(
-                        "websocket route missing handler",
-                    ));
-                };
-
-                if !route_match.params.is_empty() {
-                    let path_params = crate::extract::PathParams::from_pairs(
-                        route_match
-                            .params
-                            .iter()
-                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                            .collect(),
-                    );
-                    req.insert_extension(path_params);
+                        }
+                    }
                 }
-
-                entry.call(ctx, req, ws).await
-            }
-            _ => Err(crate::websocket::WebSocketError::Protocol(
-                "no websocket route matched",
-            )),
-        }
-    }
-}
                 Err(e) if e.abort => {
                     return StartupOutcome::Aborted(e);
                 }

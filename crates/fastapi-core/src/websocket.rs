@@ -54,8 +54,7 @@ pub fn websocket_accept_from_key(key: &str) -> Result<String, WebSocketHandshake
         return Err(WebSocketHandshakeError::MissingHeader("sec-websocket-key"));
     }
 
-    let decoded =
-        base64_decode(key).ok_or(WebSocketHandshakeError::InvalidKeyBase64)?;
+    let decoded = base64_decode(key).ok_or(WebSocketHandshakeError::InvalidKeyBase64)?;
     if decoded.len() != 16 {
         return Err(WebSocketHandshakeError::InvalidKeyLength {
             decoded_len: decoded.len(),
@@ -163,7 +162,10 @@ impl WebSocket {
     /// Create a websocket from a TCP stream and an optional prefix of already-buffered bytes.
     #[must_use]
     pub fn new(stream: TcpStream, buffered: Vec<u8>) -> Self {
-        Self { stream, rx: buffered }
+        Self {
+            stream,
+            rx: buffered,
+        }
     }
 
     /// Read the next frame.
@@ -173,17 +175,20 @@ impl WebSocket {
         let b1 = header[1];
 
         let fin = (b0 & 0x80) != 0;
-        let opcode = OpCode::from_u8(b0 & 0x0f).ok_or(WebSocketError::Protocol("invalid opcode"))?;
+        let opcode =
+            OpCode::from_u8(b0 & 0x0f).ok_or(WebSocketError::Protocol("invalid opcode"))?;
         let masked = (b1 & 0x80) != 0;
-        let mut len7 = (b1 & 0x7f) as u64;
+        let mut len7 = u64::from(b1 & 0x7f);
 
         if opcode.is_control() && !fin {
-            return Err(WebSocketError::Protocol("control frames must not be fragmented"));
+            return Err(WebSocketError::Protocol(
+                "control frames must not be fragmented",
+            ));
         }
 
         if len7 == 126 {
             let b = self.read_exact_buf(2).await?;
-            len7 = u16::from_be_bytes([b[0], b[1]]) as u64;
+            len7 = u64::from(u16::from_be_bytes([b[0], b[1]]));
         } else if len7 == 127 {
             let b = self.read_exact_buf(8).await?;
             len7 = u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
@@ -199,7 +204,8 @@ impl WebSocket {
             ));
         }
         let mask = self.read_exact_buf(4).await?;
-        let payload_len = usize::try_from(len7).map_err(|_| WebSocketError::Protocol("len too large"))?;
+        let payload_len =
+            usize::try_from(len7).map_err(|_| WebSocketError::Protocol("len too large"))?;
 
         if opcode.is_control() && payload_len > 125 {
             return Err(WebSocketError::Protocol("control frame too large"));
@@ -223,12 +229,13 @@ impl WebSocket {
         let b0 = (if frame.fin { 0x80 } else { 0 }) | (frame.opcode as u8);
         out.push(b0);
 
-        let len = frame.payload.len() as u64;
+        let len = u64::try_from(frame.payload.len())
+            .map_err(|_| WebSocketError::Protocol("len too large"))?;
         if len <= 125 {
             out.push(len as u8);
-        } else if len <= u16::MAX as u64 {
+        } else if let Ok(len16) = u16::try_from(len) {
             out.push(126);
-            out.extend_from_slice(&(len as u16).to_be_bytes());
+            out.extend_from_slice(&len16.to_be_bytes());
         } else {
             out.push(127);
             out.extend_from_slice(&len.to_be_bytes());
@@ -314,7 +321,8 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h4: u32 = 0xC3D2E1F0;
 
     let bit_len = (data.len() as u64) * 8;
-    let mut msg = Vec::with_capacity(((data.len() + 9 + 63) / 64) * 64);
+    let padded_len = (data.len() + 9).div_ceil(64) * 64;
+    let mut msg = Vec::with_capacity(padded_len);
     msg.extend_from_slice(data);
     msg.push(0x80);
     while (msg.len() % 64) != 56 {
@@ -323,46 +331,54 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
     for chunk in msg.chunks_exact(64) {
-        let mut w = [0u32; 80];
-        for (i, word) in w.iter_mut().take(16).enumerate() {
-            let j = i * 4;
-            *word = u32::from_be_bytes([chunk[j], chunk[j + 1], chunk[j + 2], chunk[j + 3]]);
+        let mut words = [0u32; 80];
+        for (word_index, word) in words.iter_mut().take(16).enumerate() {
+            let byte_index = word_index * 4;
+            *word = u32::from_be_bytes([
+                chunk[byte_index],
+                chunk[byte_index + 1],
+                chunk[byte_index + 2],
+                chunk[byte_index + 3],
+            ]);
         }
         for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+            words[i] = (words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16]).rotate_left(1);
         }
 
-        let mut a = h0;
-        let mut b = h1;
-        let mut c = h2;
-        let mut d = h3;
-        let mut e = h4;
+        let mut state_a = h0;
+        let mut state_b = h1;
+        let mut state_c = h2;
+        let mut state_d = h3;
+        let mut state_e = h4;
 
-        for i in 0..80 {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A827999),
-                20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
-                _ => (b ^ c ^ d, 0xCA62C1D6),
+        for (round, &word) in words.iter().enumerate() {
+            let (mix, constant) = match round {
+                0..=19 => ((state_b & state_c) | ((!state_b) & state_d), 0x5A827999),
+                20..=39 => (state_b ^ state_c ^ state_d, 0x6ED9EBA1),
+                40..=59 => (
+                    (state_b & state_c) | (state_b & state_d) | (state_c & state_d),
+                    0x8F1BBCDC,
+                ),
+                _ => (state_b ^ state_c ^ state_d, 0xCA62C1D6),
             };
-            let temp = a
+            let temp = state_a
                 .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
+                .wrapping_add(mix)
+                .wrapping_add(state_e)
+                .wrapping_add(constant)
+                .wrapping_add(word);
+            state_e = state_d;
+            state_d = state_c;
+            state_c = state_b.rotate_left(30);
+            state_b = state_a;
+            state_a = temp;
         }
 
-        h0 = h0.wrapping_add(a);
-        h1 = h1.wrapping_add(b);
-        h2 = h2.wrapping_add(c);
-        h3 = h3.wrapping_add(d);
-        h4 = h4.wrapping_add(e);
+        h0 = h0.wrapping_add(state_a);
+        h1 = h1.wrapping_add(state_b);
+        h2 = h2.wrapping_add(state_c);
+        h3 = h3.wrapping_add(state_d);
+        h4 = h4.wrapping_add(state_e);
     }
 
     let mut out = [0u8; 20];
@@ -381,29 +397,36 @@ fn sha1(data: &[u8]) -> [u8; 20] {
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn base64_encode(data: &[u8]) -> String {
-    let mut out = Vec::with_capacity(((data.len() + 2) / 3) * 4);
-    let mut i = 0;
-    while i + 3 <= data.len() {
-        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
-        out.push(B64[((n >> 18) & 0x3f) as usize]);
-        out.push(B64[((n >> 12) & 0x3f) as usize]);
-        out.push(B64[((n >> 6) & 0x3f) as usize]);
-        out.push(B64[(n & 0x3f) as usize]);
-        i += 3;
+    let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
+    let mut idx = 0;
+    while idx + 3 <= data.len() {
+        let b0 = u32::from(data[idx]);
+        let b1 = u32::from(data[idx + 1]);
+        let b2 = u32::from(data[idx + 2]);
+        let word24 = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(B64[((word24 >> 18) & 0x3f) as usize]);
+        out.push(B64[((word24 >> 12) & 0x3f) as usize]);
+        out.push(B64[((word24 >> 6) & 0x3f) as usize]);
+        out.push(B64[(word24 & 0x3f) as usize]);
+        idx += 3;
     }
 
-    let rem = data.len() - i;
+    let rem = data.len() - idx;
     if rem == 1 {
-        let n = (data[i] as u32) << 16;
-        out.push(B64[((n >> 18) & 0x3f) as usize]);
-        out.push(B64[((n >> 12) & 0x3f) as usize]);
+        let b0 = u32::from(data[idx]);
+        let word24 = b0 << 16;
+        out.push(B64[((word24 >> 18) & 0x3f) as usize]);
+        out.push(B64[((word24 >> 12) & 0x3f) as usize]);
         out.push(b'=');
         out.push(b'=');
     } else if rem == 2 {
-        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8);
-        out.push(B64[((n >> 18) & 0x3f) as usize]);
-        out.push(B64[((n >> 12) & 0x3f) as usize]);
-        out.push(B64[((n >> 6) & 0x3f) as usize]);
+        let b0 = u32::from(data[idx]);
+        let b1 = u32::from(data[idx + 1]);
+        let word24 = (b0 << 16) | (b1 << 8);
+        out.push(B64[((word24 >> 18) & 0x3f) as usize]);
+        out.push(B64[((word24 >> 12) & 0x3f) as usize]);
+        out.push(B64[((word24 >> 6) & 0x3f) as usize]);
         out.push(b'=');
     }
 
@@ -411,33 +434,50 @@ fn base64_encode(data: &[u8]) -> String {
     String::from_utf8(out).unwrap()
 }
 
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    let s = s.trim();
-    if s.len() % 4 != 0 {
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let input = input.trim();
+    if input.len() % 4 != 0 {
         return None;
     }
-    let mut out = Vec::with_capacity((s.len() / 4) * 3);
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let a = decode_b64(bytes[i])?;
-        let b = decode_b64(bytes[i + 1])?;
-        let c = bytes[i + 2];
-        let d = bytes[i + 3];
+    let mut out = Vec::with_capacity((input.len() / 4) * 3);
+    let bytes = input.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let is_last = idx + 4 == bytes.len();
 
-        let c_val = if c == b'=' { 64 } else { decode_b64(c)? as u32 };
-        let d_val = if d == b'=' { 64 } else { decode_b64(d)? as u32 };
+        let v0 = decode_b64(bytes[idx])?;
+        let v1 = decode_b64(bytes[idx + 1])?;
+        let b2 = bytes[idx + 2];
+        let b3 = bytes[idx + 3];
 
-        let n = ((a as u32) << 18) | ((b as u32) << 12) | (c_val << 6) | d_val;
-        out.push(((n >> 16) & 0xff) as u8);
-        if c != b'=' {
-            out.push(((n >> 8) & 0xff) as u8);
+        let v2 = if b2 == b'=' {
+            if !is_last || b3 != b'=' {
+                return None;
+            }
+            64u32
+        } else {
+            u32::from(decode_b64(b2)?)
+        };
+
+        let v3 = if b3 == b'=' {
+            if !is_last {
+                return None;
+            }
+            64u32
+        } else {
+            u32::from(decode_b64(b3)?)
+        };
+
+        let word24 = (u32::from(v0) << 18) | (u32::from(v1) << 12) | (v2 << 6) | v3;
+        out.push(((word24 >> 16) & 0xff) as u8);
+        if b2 != b'=' {
+            out.push(((word24 >> 8) & 0xff) as u8);
         }
-        if d != b'=' {
-            out.push((n & 0xff) as u8);
+        if b3 != b'=' {
+            out.push((word24 & 0xff) as u8);
         }
 
-        i += 4;
+        idx += 4;
     }
     Some(out)
 }
@@ -473,4 +513,3 @@ mod tests {
         assert_eq!(dec, data);
     }
 }
-

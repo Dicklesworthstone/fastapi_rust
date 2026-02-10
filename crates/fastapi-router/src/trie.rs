@@ -22,7 +22,7 @@
 //!
 //! ## Conflict Detection
 //!
-//! Routes that would be ambiguous are rejected at registration:
+//! Routes that are ambiguous are rejected at registration:
 //! - `/files/{name}` and `/files/{*path}` conflict (both match `/files/foo`)
 //! - `/api/{a}` and `/api/{b}` conflict (same structure, different names)
 //!
@@ -3356,7 +3356,7 @@ mod tests {
         let mut router = Router::new();
         router.add(route(Method::Get, "/data/{value}")).unwrap();
 
-        // Double-encoded percent sign: %25 -> % -> %2520 would be %20
+        // Double-encoded percent sign remains encoded; the router does not percent-decode the path.
         let m = router.match_path("/data/%2520", Method::Get);
         assert!(m.is_some());
         assert_eq!(m.unwrap().params[0], ("value", "%2520"));

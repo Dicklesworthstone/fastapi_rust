@@ -402,7 +402,7 @@ impl DependsConfig for NoCache {
 ///
 /// This error contains the full cycle path showing which types form the cycle.
 /// For example, if `DbPool` depends on `UserService` which depends on `DbPool`,
-/// the cycle would be: `["DbPool", "UserService", "DbPool"]`.
+/// the cycle is: `["DbPool", "UserService", "DbPool"]`.
 ///
 /// # Example
 ///
@@ -420,7 +420,7 @@ pub struct CircularDependencyError {
 ///
 /// This occurs when a request-scoped dependency depends on a function-scoped
 /// dependency. Since request-scoped dependencies are cached for the lifetime
-/// of the request, they would hold stale values from function-scoped
+/// of the request, they hold stale values from function-scoped
 /// dependencies (which should be resolved fresh on each call).
 ///
 /// # Example
@@ -429,7 +429,7 @@ pub struct CircularDependencyError {
 /// Dependency scope violation: request-scoped 'CachedUser' depends on
 /// function-scoped 'DbConnection'. Request-scoped dependencies cannot
 /// depend on function-scoped dependencies because the cached value
-/// would become stale.
+/// becomes stale.
 /// ```
 ///
 /// # Why This Matters
@@ -503,7 +503,7 @@ impl std::fmt::Display for DependencyScopeError {
             f,
             "Dependency scope violation: request-scoped '{}' depends on function-scoped '{}'. \
              Request-scoped dependencies cannot depend on function-scoped dependencies \
-             because the cached value would become stale.",
+             because the cached value becomes stale.",
             self.request_scoped_type, self.function_scoped_type
         )
     }
@@ -604,7 +604,7 @@ impl ResolutionStack {
         }
     }
 
-    /// Check if a type is currently being resolved (would form a cycle).
+    /// Check if a type is currently being resolved (forms a cycle).
     ///
     /// Returns `Some(cycle_path)` if the type is already on the stack,
     /// or `None` if it's safe to proceed.
@@ -2508,7 +2508,7 @@ mod tests {
         assert!(msg.contains("Dependency scope violation"));
         assert!(msg.contains("request-scoped 'CachedUser'"));
         assert!(msg.contains("function-scoped 'DbConnection'"));
-        assert!(msg.contains("cached value would become stale"));
+        assert!(msg.contains("cached value becomes stale"));
     }
 
     // Test: DependencyScopeError into_response

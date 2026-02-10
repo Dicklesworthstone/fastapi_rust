@@ -802,7 +802,7 @@ mod tests {
 /// # Example
 ///
 /// For a route `/users/{user_id}/posts/{post_id}` matched against
-/// `/users/42/posts/99`, this would contain:
+/// `/users/42/posts/99`, this contains:
 /// `[("user_id", "42"), ("post_id", "99")]`
 #[derive(Debug, Clone, Default)]
 pub struct PathParams(pub Vec<(String, String)>);

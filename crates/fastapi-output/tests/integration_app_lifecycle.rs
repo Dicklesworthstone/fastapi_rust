@@ -199,7 +199,7 @@ fn test_request_logging_integration() {
 
         let logger = RequestLogger::new(OutputMode::Plain);
 
-        // Simulate various requests that would go through App.handle()
+        // Simulate various requests that go through App.handle().
         let requests = vec![
             LogEntry {
                 method: HttpMethod::Get,
@@ -302,7 +302,7 @@ fn test_request_logging_performance() {
 // Error Handling Integration Tests
 // =============================================================================
 
-/// Tests validation error formatting as it would appear in App error responses.
+/// Tests validation error formatting as it appears in App error responses.
 #[test]
 #[serial]
 fn test_validation_error_formatting() {
@@ -353,7 +353,7 @@ fn test_validation_error_formatting() {
     });
 }
 
-/// Tests HTTP error formatting as it would appear in App error responses.
+/// Tests HTTP error formatting as it appears in App error responses.
 #[test]
 #[serial]
 fn test_http_error_formatting() {
@@ -401,7 +401,7 @@ fn test_http_error_formatting() {
 // Shutdown Lifecycle Integration Tests
 // =============================================================================
 
-/// Tests shutdown progress display as it would appear during App shutdown.
+/// Tests shutdown progress display as it appears during App shutdown.
 #[test]
 #[serial]
 fn test_shutdown_lifecycle() {
@@ -489,7 +489,7 @@ fn test_shutdown_lifecycle() {
 // Middleware Stack Display Integration Tests
 // =============================================================================
 
-/// Tests middleware stack visualization as it would appear during App startup.
+/// Tests middleware stack visualization as it appears during App startup.
 #[test]
 #[serial]
 fn test_middleware_stack_display() {
@@ -530,7 +530,7 @@ fn test_middleware_stack_display() {
 // Dependency Tree Display Integration Tests
 // =============================================================================
 
-/// Tests dependency tree visualization as it would appear for DI debugging.
+/// Tests dependency tree visualization as it appears for DI debugging.
 #[test]
 #[serial]
 fn test_dependency_tree_display() {

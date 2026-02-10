@@ -59,7 +59,7 @@ use asupersync::stream::Stream;
 use asupersync::time::timeout;
 use asupersync::{Budget, Cx, Scope, Time};
 use fastapi_core::app::App;
-use fastapi_core::{Request, RequestContext, Response, StatusCode};
+use fastapi_core::{Method, Request, RequestContext, Response, StatusCode};
 use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -601,6 +601,51 @@ fn host_matches_pattern(host: &HostHeader, pattern: &str) -> bool {
     }
 
     false
+}
+
+fn header_str<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers()
+        .get(name)
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .map(str::trim)
+}
+
+fn connection_has_token(req: &Request, token: &str) -> bool {
+    let Some(v) = header_str(req, "connection") else {
+        return false;
+    };
+    v.split(',')
+        .map(str::trim)
+        .any(|t| t.eq_ignore_ascii_case(token))
+}
+
+fn is_websocket_upgrade_request(req: &Request) -> bool {
+    if req.method() != Method::Get {
+        return false;
+    }
+    let upgrade = header_str(req, "upgrade").unwrap_or("");
+    if !upgrade.eq_ignore_ascii_case("websocket") {
+        return false;
+    }
+    connection_has_token(req, "upgrade")
+}
+
+fn has_request_body_headers(req: &Request) -> bool {
+    if req.headers().contains("transfer-encoding") {
+        return true;
+    }
+    if let Some(v) = header_str(req, "content-length") {
+        if v.is_empty() {
+            return true;
+        }
+        match v.parse::<usize>() {
+            Ok(0) => false,
+            Ok(_) => true,
+            Err(_) => true,
+        }
+    } else {
+        false
+    }
 }
 
 impl From<io::Error> for ServerError {
@@ -1229,6 +1274,19 @@ impl TcpServer {
         self.accept_loop_handler(cx, listener, handler).await
     }
 
+    /// Runs the server for a concrete [`App`].
+    ///
+    /// This enables protocol-aware features that require connection ownership,
+    /// such as WebSocket upgrades.
+    pub async fn serve_app(&self, cx: &Cx, app: Arc<App>) -> Result<(), ServerError> {
+        let bind_addr = self.config.bind_addr.clone();
+        let listener = TcpListener::bind(bind_addr).await?;
+        let local_addr = listener.local_addr()?;
+
+        cx.trace(&format!("Server listening on {local_addr}"));
+        self.accept_loop_app(cx, listener, app).await
+    }
+
     /// Runs the server on a specific listener with a Handler trait object.
     pub async fn serve_on_handler(
         &self,
@@ -1237,6 +1295,91 @@ impl TcpServer {
         handler: Arc<dyn fastapi_core::Handler>,
     ) -> Result<(), ServerError> {
         self.accept_loop_handler(cx, listener, handler).await
+    }
+
+    /// Runs the server on a specific listener for a concrete [`App`].
+    ///
+    /// This enables protocol-aware features that require connection ownership,
+    /// such as WebSocket upgrades, while allowing callers (tests/embedders) to
+    /// control the bind step and observe the selected local address.
+    pub async fn serve_on_app(
+        &self,
+        cx: &Cx,
+        listener: TcpListener,
+        app: Arc<App>,
+    ) -> Result<(), ServerError> {
+        self.accept_loop_app(cx, listener, app).await
+    }
+
+    async fn accept_loop_app(
+        &self,
+        cx: &Cx,
+        listener: TcpListener,
+        app: Arc<App>,
+    ) -> Result<(), ServerError> {
+        loop {
+            if cx.is_cancel_requested() {
+                cx.trace("Server shutdown requested");
+                return Ok(());
+            }
+            if self.is_draining() {
+                cx.trace("Server draining, stopping accept loop");
+                return Err(ServerError::Shutdown);
+            }
+
+            let (mut stream, peer_addr) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => {
+                    cx.trace(&format!("Accept error: {e}"));
+                    if is_fatal_accept_error(&e) {
+                        return Err(ServerError::Io(e));
+                    }
+                    continue;
+                }
+            };
+
+            if !self.try_acquire_connection() {
+                cx.trace(&format!(
+                    "Connection limit reached ({}), rejecting {peer_addr}",
+                    self.config.max_connections
+                ));
+
+                let response = Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header("connection", b"close".to_vec())
+                    .body(fastapi_core::ResponseBody::Bytes(
+                        b"503 Service Unavailable: connection limit reached".to_vec(),
+                    ));
+                let mut writer = crate::response::ResponseWriter::new();
+                let response_bytes = writer.write(response);
+                let _ = write_response(&mut stream, response_bytes).await;
+                continue;
+            }
+
+            if self.config.tcp_nodelay {
+                let _ = stream.set_nodelay(true);
+            }
+
+            cx.trace(&format!(
+                "Accepted connection from {peer_addr} ({}/{})",
+                self.current_connections(),
+                if self.config.max_connections == 0 {
+                    "∞".to_string()
+                } else {
+                    self.config.max_connections.to_string()
+                }
+            ));
+
+            let result = self
+                .handle_connection_app(cx, stream, peer_addr, app.as_ref())
+                .await;
+
+            self.release_connection();
+
+            if let Err(e) = result {
+                cx.trace(&format!("Connection error from {peer_addr}: {e}"));
+            }
+        }
     }
 
     /// Accept loop for Handler trait objects.
@@ -1531,6 +1674,236 @@ impl TcpServer {
                 .lock()
                 .map_or(0, |h| h.iter().filter(|t| !t.is_finished()).count())
         ));
+    }
+
+    async fn handle_connection_app(
+        &self,
+        cx: &Cx,
+        mut stream: TcpStream,
+        peer_addr: SocketAddr,
+        app: &App,
+    ) -> Result<(), ServerError> {
+        let mut parser = StatefulParser::new().with_limits(self.config.parse_limits.clone());
+        let mut read_buffer = vec![0u8; self.config.read_buffer_size];
+        let mut response_writer = ResponseWriter::new();
+        let mut requests_on_connection: usize = 0;
+        let max_requests = self.config.max_requests_per_connection;
+
+        loop {
+            if cx.is_cancel_requested() {
+                return Ok(());
+            }
+
+            let parse_result = parser.feed(&[])?;
+            let mut request = match parse_result {
+                ParseStatus::Complete { request, .. } => request,
+                ParseStatus::Incomplete => {
+                    let keep_alive_timeout = self.config.keep_alive_timeout;
+                    let bytes_read = if keep_alive_timeout.is_zero() {
+                        read_into_buffer(&mut stream, &mut read_buffer).await?
+                    } else {
+                        match read_with_timeout(&mut stream, &mut read_buffer, keep_alive_timeout)
+                            .await
+                        {
+                            Ok(0) => return Ok(()),
+                            Ok(n) => n,
+                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                                self.metrics_counters
+                                    .total_timed_out
+                                    .fetch_add(1, Ordering::Relaxed);
+                                return Err(ServerError::KeepAliveTimeout);
+                            }
+                            Err(e) => return Err(ServerError::Io(e)),
+                        }
+                    };
+
+                    if bytes_read == 0 {
+                        return Ok(());
+                    }
+
+                    self.record_bytes_in(bytes_read as u64);
+
+                    match parser.feed(&read_buffer[..bytes_read])? {
+                        ParseStatus::Complete { request, .. } => request,
+                        ParseStatus::Incomplete => continue,
+                    }
+                }
+            };
+
+            requests_on_connection += 1;
+
+            let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
+
+            // Per-request budget for HTTP requests.
+            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let overrides = app.dependency_overrides();
+            let ctx = RequestContext::with_overrides_and_body_limit(
+                request_cx,
+                request_id,
+                overrides,
+                app.config().max_body_size,
+            );
+
+            // Validate Host header
+            if let Err(err) = validate_host_header(&request, &self.config) {
+                ctx.trace(&format!(
+                    "Rejecting request from {peer_addr}: {}",
+                    err.detail
+                ));
+                let response = err.response().header("connection", b"close".to_vec());
+                let response_write = response_writer.write(response);
+                write_response(&mut stream, response_write).await?;
+                return Ok(());
+            }
+
+            // Header-only validators before any body reads / 100-continue.
+            if let Err(response) = self.config.pre_body_validators.validate_all(&request) {
+                let response = response.header("connection", b"close".to_vec());
+                let response_write = response_writer.write(response);
+                write_response(&mut stream, response_write).await?;
+                return Ok(());
+            }
+
+            // WebSocket upgrade: only attempt when request looks like a WS handshake.
+            //
+            // NOTE: This consumes the connection: after a successful 101 upgrade, we hand the
+            // TcpStream to the websocket handler and stop HTTP keep-alive processing.
+            if is_websocket_upgrade_request(&request)
+                && app.websocket_route_count() > 0
+                && app.has_websocket_route(request.path())
+            {
+                // WebSocket handshake must not have a request body.
+                if has_request_body_headers(&request) {
+                    let response = Response::with_status(StatusCode::BAD_REQUEST)
+                        .header("connection", b"close".to_vec())
+                        .body(fastapi_core::ResponseBody::Bytes(
+                            b"Bad Request: websocket handshake must not include a body".to_vec(),
+                        ));
+                    let response_write = response_writer.write(response);
+                    write_response(&mut stream, response_write).await?;
+                    return Ok(());
+                }
+
+                let Some(key) = header_str(&request, "sec-websocket-key") else {
+                    let response = Response::with_status(StatusCode::BAD_REQUEST)
+                        .header("connection", b"close".to_vec())
+                        .body(fastapi_core::ResponseBody::Bytes(
+                            b"Bad Request: missing Sec-WebSocket-Key".to_vec(),
+                        ));
+                    let response_write = response_writer.write(response);
+                    write_response(&mut stream, response_write).await?;
+                    return Ok(());
+                };
+                let accept = match fastapi_core::websocket_accept_from_key(key) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let response = Response::with_status(StatusCode::BAD_REQUEST)
+                            .header("connection", b"close".to_vec())
+                            .body(fastapi_core::ResponseBody::Bytes(
+                                b"Bad Request: invalid Sec-WebSocket-Key".to_vec(),
+                            ));
+                        let response_write = response_writer.write(response);
+                        write_response(&mut stream, response_write).await?;
+                        return Ok(());
+                    }
+                };
+
+                if header_str(&request, "sec-websocket-version") != Some("13") {
+                    let response = Response::with_status(StatusCode::BAD_REQUEST)
+                        .header("sec-websocket-version", b"13".to_vec())
+                        .header("connection", b"close".to_vec())
+                        .body(fastapi_core::ResponseBody::Bytes(
+                            b"Bad Request: unsupported Sec-WebSocket-Version".to_vec(),
+                        ));
+                    let response_write = response_writer.write(response);
+                    write_response(&mut stream, response_write).await?;
+                    return Ok(());
+                }
+
+                let response = Response::with_status(StatusCode::SWITCHING_PROTOCOLS)
+                    .header("upgrade", b"websocket".to_vec())
+                    .header("connection", b"Upgrade".to_vec())
+                    .header("sec-websocket-accept", accept.into_bytes());
+                let response_write = response_writer.write(response);
+                if let ResponseWrite::Full(ref bytes) = response_write {
+                    self.record_bytes_out(bytes.len() as u64);
+                }
+                write_response(&mut stream, response_write).await?;
+
+                // Hand off any already-read bytes to the websocket layer.
+                let buffered = parser.take_buffered();
+
+                // WebSocket connections are long-lived; do not inherit the per-request deadline.
+                let ws_root_cx = Cx::for_testing_with_budget(Budget::new());
+                let ws_ctx = RequestContext::with_overrides_and_body_limit(
+                    ws_root_cx,
+                    request_id,
+                    app.dependency_overrides(),
+                    app.config().max_body_size,
+                );
+
+                let ws = fastapi_core::WebSocket::new(stream, buffered);
+                let _ = app.handle_websocket(&ws_ctx, &mut request, ws).await;
+                return Ok(());
+            }
+
+            // Handle Expect: 100-continue
+            match ExpectHandler::check_expect(&request) {
+                ExpectResult::NoExpectation => {}
+                ExpectResult::ExpectsContinue => {
+                    ctx.trace("Sending 100 Continue for Expect: 100-continue");
+                    write_raw_response(&mut stream, CONTINUE_RESPONSE).await?;
+                }
+                ExpectResult::UnknownExpectation(value) => {
+                    ctx.trace(&format!("Rejecting unknown Expect value: {}", value));
+                    let response = ExpectHandler::expectation_failed(format!(
+                        "Unsupported Expect value: {value}"
+                    ));
+                    let response_write = response_writer.write(response);
+                    write_response(&mut stream, response_write).await?;
+                    return Ok(());
+                }
+            }
+
+            let client_wants_keep_alive = should_keep_alive(&request);
+            let server_will_keep_alive = client_wants_keep_alive
+                && (max_requests == 0 || requests_on_connection < max_requests);
+
+            let request_start = Instant::now();
+            let timeout_duration = Duration::from_nanos(self.config.request_timeout.as_nanos());
+
+            let response = app.handle(&ctx, &mut request).await;
+            let mut response = if request_start.elapsed() > timeout_duration {
+                Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
+                    fastapi_core::ResponseBody::Bytes(
+                        b"Gateway Timeout: request processing exceeded time limit".to_vec(),
+                    ),
+                )
+            } else {
+                response
+            };
+
+            response = if server_will_keep_alive {
+                response.header("connection", b"keep-alive".to_vec())
+            } else {
+                response.header("connection", b"close".to_vec())
+            };
+
+            let response_write = response_writer.write(response);
+            if let ResponseWrite::Full(ref bytes) = response_write {
+                self.record_bytes_out(bytes.len() as u64);
+            }
+            write_response(&mut stream, response_write).await?;
+
+            if let Some(tasks) = App::take_background_tasks(&mut request) {
+                tasks.execute_all().await;
+            }
+
+            if !server_will_keep_alive {
+                return Ok(());
+            }
+        }
     }
 
     /// Handles a single connection using the Handler trait.

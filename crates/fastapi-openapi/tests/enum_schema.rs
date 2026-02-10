@@ -1,7 +1,7 @@
 //! Integration tests for enum-like schema generation (manual construction).
 //!
 //! Note: `#[derive(JsonSchema)]` lives in `fastapi-macros`, which depends on this crate.
-//! Keeping macro-derive tests here would create a dependency cycle. These tests validate
+//! Keeping macro-derive tests here creates a dependency cycle. These tests validate
 //! the underlying schema types and serialization behavior instead.
 
 use fastapi_openapi::{EnumSchema, OneOfSchema, Schema, SchemaType};

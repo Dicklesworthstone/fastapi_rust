@@ -1868,12 +1868,11 @@ mod tests {
 
     #[test]
     fn security_oversized_chunk_size_rejected() {
-        // Attempt to use chunk size that would overflow usize
-        let buffer =
-            b"Host: example.com\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFFFF\r\n";
-        let headers = HeadersParser::parse(&buffer[..buffer.len() - 19]).unwrap();
-        assert!(headers.is_chunked());
-        // The actual chunked parsing would reject this
+        // Attempt to use a chunk size that overflows usize (must be rejected).
+        let mut parser = StatefulParser::new();
+        let buffer = b"GET /chunk HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFFFF\r\n";
+        let result = parser.feed(buffer);
+        assert!(matches!(result, Err(ParseError::InvalidHeader)));
     }
 
     #[test]

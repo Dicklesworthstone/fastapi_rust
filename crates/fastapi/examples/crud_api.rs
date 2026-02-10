@@ -73,7 +73,7 @@ struct UserDb {
     next_id: u64,
 }
 
-// Global in-memory store. In a real app, you would use State<T> with
+// Global in-memory store. In a real app, use State<T> with
 // a database connection pool instead.
 static STORE: Mutex<Option<UserDb>> = Mutex::new(None);
 

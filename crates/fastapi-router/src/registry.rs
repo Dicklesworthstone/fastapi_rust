@@ -102,7 +102,7 @@ unsafe fn registrations() -> &'static [RouteRegistration] {
 /// This empty registration is placed in the section to guarantee it exists
 /// even when no routes are registered via macros. Without this, the linker
 /// might not create the section at all, and the `__start_fastapi_routes` and
-/// `__stop_fastapi_routes` symbols would be undefined.
+/// `__stop_fastapi_routes` symbols are not defined.
 ///
 /// # Safety
 ///

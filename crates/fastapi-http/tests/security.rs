@@ -443,12 +443,14 @@ fn exhaustion_non_numeric_content_length() {
 /// Chunk size overflow attempt
 #[test]
 fn exhaustion_chunk_size_overflow() {
-    let buffer = b"Transfer-Encoding: chunked\r\n\r\n";
-    let parser = HeadersParser::parse(buffer).unwrap();
-    assert!(parser.is_chunked());
-
-    // Chunk size parsing should handle overflow safely
-    // Actual chunk parsing would test: "FFFFFFFFFFFFFFFF\r\n..."
+    // Oversized/overflowing chunk size line must be rejected during body parsing.
+    let mut parser = StatefulParser::new();
+    let buffer = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFFFF\r\n";
+    let result = parser.feed(buffer);
+    assert!(
+        matches!(result, Err(ParseError::InvalidHeader)),
+        "chunk size overflow must be rejected"
+    );
 }
 
 /// Request too large overall

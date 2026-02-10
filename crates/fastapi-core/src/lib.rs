@@ -60,7 +60,6 @@ mod extract;
 pub mod logging;
 pub mod middleware;
 pub mod multipart;
-pub mod websocket;
 mod password;
 mod request;
 mod response;
@@ -68,6 +67,7 @@ pub mod routing;
 pub mod shutdown;
 pub mod testing;
 pub mod validation;
+pub mod websocket;
 
 pub use context::{CancelledError, IntoOutcome, RequestContext};
 pub use dependency::{
@@ -98,10 +98,6 @@ pub use multipart::{
     DEFAULT_MAX_FIELDS, DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_TOTAL_SIZE, MultipartConfig,
     MultipartError, MultipartForm, MultipartParser, Part, UploadFile, parse_boundary,
 };
-pub use websocket::{
-    websocket_accept_from_key, Frame as WebSocketFrame, OpCode as WebSocketOpCode, WebSocket,
-    WebSocketError, WebSocketHandshakeError, WS_GUID,
-};
 pub use request::{
     BackgroundTasks, BackgroundTasksInner, Body, Headers, HttpVersion, Method, Request,
     RequestBodyStream, RequestBodyStreamError,
@@ -111,6 +107,10 @@ pub use response::{
     Redirect, Response, ResponseBody, ResponseModelAliases, ResponseModelConfig, ResponseProduces,
     SameSite, SetCookie, StatusCode, Text, ValidatedResponse, apply_conditional, check_if_match,
     check_if_none_match, exclude_fields, include_fields, mime_type_for_extension,
+};
+pub use websocket::{
+    Frame as WebSocketFrame, OpCode as WebSocketOpCode, WS_GUID, WebSocket, WebSocketError,
+    WebSocketHandshakeError, websocket_accept_from_key,
 };
 
 // Re-export interactive docs helpers.
