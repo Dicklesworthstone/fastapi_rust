@@ -249,12 +249,61 @@ impl WebSocket {
 
     /// Convenience: read a text message.
     pub async fn read_text(&mut self) -> Result<String, WebSocketError> {
-        let frame = self.read_frame().await?;
-        if frame.opcode != OpCode::Text {
-            return Err(WebSocketError::Protocol("expected text frame"));
+        self.read_text_or_close()
+            .await?
+            .ok_or(WebSocketError::Protocol("websocket closed"))
+    }
+
+    /// Convenience: read a text message, transparently handling ping/pong/close.
+    ///
+    /// Behavior:
+    /// - `Ping` frames are answered with `Pong` (same payload) and ignored.
+    /// - `Pong` frames are ignored.
+    /// - `Close` frames are replied to with a `Close` echo and return `Ok(None)`.
+    /// - Any non-text data frame returns a protocol error (fragmentation is not supported yet).
+    pub async fn read_text_or_close(&mut self) -> Result<Option<String>, WebSocketError> {
+        loop {
+            let frame = self.read_frame().await?;
+            match frame.opcode {
+                OpCode::Text => {
+                    let s = std::str::from_utf8(&frame.payload)?;
+                    return Ok(Some(s.to_string()));
+                }
+                OpCode::Ping => {
+                    self.send_pong(&frame.payload).await?;
+                }
+                OpCode::Pong => {}
+                OpCode::Close => {
+                    // Echo the close payload (if any) and let the caller exit cleanly.
+                    let close = Frame {
+                        fin: true,
+                        opcode: OpCode::Close,
+                        payload: frame.payload,
+                    };
+                    let _ = self.write_frame(&close).await;
+                    return Ok(None);
+                }
+                OpCode::Binary => return Err(WebSocketError::Protocol("expected text frame")),
+                OpCode::Continuation => {
+                    return Err(WebSocketError::Protocol(
+                        "unexpected continuation frame (fragmentation not supported)",
+                    ));
+                }
+            }
         }
-        let s = std::str::from_utf8(&frame.payload)?;
-        Ok(s.to_string())
+    }
+
+    /// Send a `Pong` control frame (server-side, unmasked).
+    pub async fn send_pong(&mut self, payload: &[u8]) -> Result<(), WebSocketError> {
+        if payload.len() > 125 {
+            return Err(WebSocketError::Protocol("pong payload too large"));
+        }
+        let frame = Frame {
+            fin: true,
+            opcode: OpCode::Pong,
+            payload: payload.to_vec(),
+        };
+        self.write_frame(&frame).await
     }
 
     /// Convenience: send a text message.

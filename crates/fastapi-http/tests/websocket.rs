@@ -22,13 +22,13 @@ fn read_until_double_crlf(stream: &mut TcpStream, limit: usize) -> Vec<u8> {
     buf
 }
 
-fn ws_masked_text_frame(payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
+fn ws_masked_frame(opcode: u8, payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
     assert!(
         payload.len() <= 125,
         "test helper only supports small payloads"
     );
     let mut out = Vec::with_capacity(2 + 4 + payload.len());
-    out.push(0x81); // FIN=1, opcode=Text
+    out.push(0x80 | (opcode & 0x0f)); // FIN=1
     let len_u8 = u8::try_from(payload.len()).expect("payload len must fit u8");
     out.push(0x80 | len_u8); // MASK=1
     out.extend_from_slice(&mask);
@@ -151,10 +151,15 @@ Sec-WebSocket-Key: {key}\r\n\
         "missing/incorrect accept header:\n{resp_str}"
     );
 
-    // Send a masked client->server text frame and expect an unmasked echo.
-    let mask = [0x01, 0x02, 0x03, 0x04];
-    let frame = ws_masked_text_frame(b"hello", mask);
-    stream.write_all(&frame).expect("write ws frame");
+    // Send a masked ping (expect pong), then a masked text frame (expect echo).
+    let ping = ws_masked_frame(0x9, b"abc", [0x01, 0x02, 0x03, 0x04]);
+    stream.write_all(&ping).expect("write ping");
+    let msg = ws_masked_frame(0x1, b"hello", [0x05, 0x06, 0x07, 0x08]);
+    stream.write_all(&msg).expect("write ws frame");
+
+    let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
+    assert_eq!(opcode, 0xA, "expected pong opcode");
+    assert_eq!(&payload, b"abc");
 
     let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
     assert_eq!(opcode, 0x1, "expected text opcode");
