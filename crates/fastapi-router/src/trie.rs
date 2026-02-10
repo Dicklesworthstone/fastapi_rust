@@ -706,10 +706,11 @@ impl Route {
         }
     }
 
-    /// Create a route intended for compile-time route discovery.
+    /// Create a route intended for generated metadata (OpenAPI/docs).
     ///
-    /// This is used by the route registration macros during compile-time route
-    /// discovery.
+    /// This is an alias for [`Route::new`]. The name is kept for compatibility
+    /// with older macro expansions and tests; a `Route` never contains an actual
+    /// handler function.
     #[must_use]
     pub fn with_placeholder_handler(method: Method, path: impl Into<String>) -> Self {
         Self::new(method, path)

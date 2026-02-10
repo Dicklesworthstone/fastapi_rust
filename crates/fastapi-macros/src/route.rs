@@ -743,7 +743,7 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
         #[doc(hidden)]
         #[allow(non_snake_case)]
         pub fn #route_fn_name() -> fastapi_router::Route {
-            fastapi_router::Route::with_placeholder_handler(
+            fastapi_router::Route::new(
                 fastapi_core::Method::#method_ident,
                 #path_str,
             )
