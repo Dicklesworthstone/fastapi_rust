@@ -5,6 +5,7 @@
 
 use crate::context::RequestContext;
 use crate::error::{HttpError, ValidationError, ValidationErrors};
+use crate::multipart;
 use crate::request::{Body, Request, RequestBodyStreamError};
 use crate::response::IntoResponse;
 use serde::de::{
@@ -115,6 +116,199 @@ pub trait FromRequest: Sized {
         ctx: &RequestContext,
         req: &mut Request,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+}
+
+// ============================================================================
+// Multipart Form Extractor
+// ============================================================================
+
+/// Error when multipart extraction fails.
+#[derive(Debug)]
+pub enum MultipartExtractError {
+    /// Wrong or missing content type.
+    UnsupportedMediaType { actual: Option<String> },
+    /// Missing/invalid boundary or invalid multipart format.
+    BadRequest { message: String },
+    /// Payload too large.
+    PayloadTooLarge { size: usize, limit: usize },
+    /// Body stream read error.
+    ReadError { message: String },
+}
+
+impl fmt::Display for MultipartExtractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedMediaType { actual } => {
+                if let Some(ct) = actual {
+                    write!(f, "Expected Content-Type: multipart/form-data, got: {ct}")
+                } else {
+                    write!(
+                        f,
+                        "Missing Content-Type header, expected multipart/form-data"
+                    )
+                }
+            }
+            Self::BadRequest { message } => write!(f, "{message}"),
+            Self::PayloadTooLarge { size, limit } => write!(
+                f,
+                "Request body too large: {size} bytes exceeds {limit} byte limit"
+            ),
+            Self::ReadError { message } => write!(f, "Failed to read request body: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for MultipartExtractError {}
+
+impl IntoResponse for MultipartExtractError {
+    fn into_response(self) -> crate::response::Response {
+        use crate::response::{Response, ResponseBody, StatusCode};
+
+        let (status, detail) = match self {
+            Self::UnsupportedMediaType { actual: _ } => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, self.to_string())
+            }
+            Self::BadRequest { message } => (StatusCode::BAD_REQUEST, message),
+            Self::PayloadTooLarge { .. } => (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()),
+            Self::ReadError { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
+        };
+
+        let body = serde_json::json!({ "detail": detail });
+        Response::with_status(status)
+            .header("content-type", b"application/json".to_vec())
+            .body(ResponseBody::Bytes(body.to_string().into_bytes()))
+    }
+}
+
+impl FromRequest for multipart::MultipartForm {
+    type Error = MultipartExtractError;
+
+    async fn from_request(ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
+        let _ = ctx.checkpoint();
+
+        let content_type = req
+            .headers()
+            .get("content-type")
+            .and_then(|v| std::str::from_utf8(v).ok());
+        let Some(ct) = content_type else {
+            return Err(MultipartExtractError::UnsupportedMediaType { actual: None });
+        };
+
+        let ct_lower = ct.to_ascii_lowercase();
+        if !ct_lower.starts_with("multipart/form-data") {
+            return Err(MultipartExtractError::UnsupportedMediaType {
+                actual: Some(ct.to_string()),
+            });
+        }
+
+        let boundary =
+            multipart::parse_boundary(ct).map_err(|e| MultipartExtractError::BadRequest {
+                message: e.to_string(),
+            })?;
+
+        let limit = multipart::DEFAULT_MAX_TOTAL_SIZE;
+        let body = collect_body_limited(ctx, req.take_body(), limit)
+            .await
+            .map_err(|e| match e {
+                RequestBodyStreamError::TooLarge { received, .. } => {
+                    MultipartExtractError::PayloadTooLarge {
+                        size: received,
+                        limit,
+                    }
+                }
+                other => MultipartExtractError::ReadError {
+                    message: other.to_string(),
+                },
+            })?;
+
+        let _ = ctx.checkpoint();
+
+        let parser =
+            multipart::MultipartParser::new(&boundary, multipart::MultipartConfig::default());
+        let parts = parser
+            .parse(&body)
+            .map_err(|e| MultipartExtractError::BadRequest {
+                message: e.to_string(),
+            })?;
+
+        Ok(multipart::MultipartForm::from_parts(parts))
+    }
+}
+
+#[cfg(test)]
+mod multipart_extractor_tests {
+    use super::*;
+    use crate::request::Method;
+
+    fn test_context() -> RequestContext {
+        let cx = asupersync::Cx::for_testing();
+        RequestContext::new(cx, 12345)
+    }
+
+    #[test]
+    fn multipart_extract_success() {
+        let ctx = test_context();
+        let boundary = "----boundary";
+        let body = concat!(
+            "------boundary\r\n",
+            "Content-Disposition: form-data; name=\"field1\"\r\n",
+            "\r\n",
+            "value1\r\n",
+            "------boundary\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "Hello\r\n",
+            "------boundary--\r\n"
+        );
+
+        let mut req = Request::new(Method::Post, "/upload");
+        req.headers_mut().insert(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}").into_bytes(),
+        );
+        req.set_body(Body::Bytes(body.as_bytes().to_vec()));
+
+        let form =
+            futures_executor::block_on(multipart::MultipartForm::from_request(&ctx, &mut req))
+                .expect("multipart parse");
+        assert_eq!(form.get_field("field1"), Some("value1"));
+        let file = form.get_file("file").expect("file");
+        assert_eq!(file.filename, "test.txt");
+        assert_eq!(file.content_type, "text/plain");
+        assert_eq!(file.data, b"Hello".to_vec());
+    }
+
+    #[test]
+    fn multipart_extract_wrong_content_type() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Post, "/upload");
+        req.headers_mut()
+            .insert("content-type", b"application/json".to_vec());
+        req.set_body(Body::Bytes(b"{}".to_vec()));
+
+        let err =
+            futures_executor::block_on(multipart::MultipartForm::from_request(&ctx, &mut req))
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            MultipartExtractError::UnsupportedMediaType { actual: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn multipart_extract_missing_boundary_is_bad_request() {
+        let ctx = test_context();
+        let mut req = Request::new(Method::Post, "/upload");
+        req.headers_mut()
+            .insert("content-type", b"multipart/form-data".to_vec());
+        req.set_body(Body::Bytes(b"".to_vec()));
+
+        let err =
+            futures_executor::block_on(multipart::MultipartForm::from_request(&ctx, &mut req))
+                .unwrap_err();
+        assert!(matches!(err, MultipartExtractError::BadRequest { .. }));
+    }
 }
 
 // Implement for Option to make extractors optional
