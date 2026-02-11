@@ -955,9 +955,13 @@ where
                             http2::FrameType::Settings
                             | http2::FrameType::Ping
                             | http2::FrameType::Goaway
-                            | http2::FrameType::WindowUpdate => {
+                            | http2::FrameType::WindowUpdate
+                            | http2::FrameType::Priority => {
                                 if f.header.frame_type() == http2::FrameType::Goaway {
                                     return Ok(());
+                                }
+                                if f.header.frame_type() == http2::FrameType::Priority {
+                                    validate_priority_payload(f.header.stream_id, &f.payload)?;
                                 }
                                 if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                     validate_window_update_payload(&f.payload)?;
@@ -2449,12 +2453,16 @@ impl TcpServer {
                                 http2::FrameType::Settings
                                 | http2::FrameType::Ping
                                 | http2::FrameType::Goaway
-                                | http2::FrameType::WindowUpdate => {
+                                | http2::FrameType::WindowUpdate
+                                | http2::FrameType::Priority => {
                                     // Re-process control frames by pushing back through the top-level loop.
                                     // For minimal correctness, handle them inline here.
                                     // SETTINGS/PING were already validated above; just dispatch quickly.
                                     if f.header.frame_type() == http2::FrameType::Goaway {
                                         return Ok(());
+                                    }
+                                    if f.header.frame_type() == http2::FrameType::Priority {
+                                        validate_priority_payload(f.header.stream_id, &f.payload)?;
                                     }
                                     if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                         validate_window_update_payload(&f.payload)?;
@@ -2852,9 +2860,13 @@ impl TcpServer {
                                 http2::FrameType::Settings
                                 | http2::FrameType::Ping
                                 | http2::FrameType::Goaway
-                                | http2::FrameType::WindowUpdate => {
+                                | http2::FrameType::WindowUpdate
+                                | http2::FrameType::Priority => {
                                     if f.header.frame_type() == http2::FrameType::Goaway {
                                         return Ok(());
+                                    }
+                                    if f.header.frame_type() == http2::FrameType::Priority {
+                                        validate_priority_payload(f.header.stream_id, &f.payload)?;
                                     }
                                     if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                         validate_window_update_payload(&f.payload)?;
@@ -3407,6 +3419,30 @@ fn validate_window_update_payload(payload: &[u8]) -> Result<(), http2::Http2Erro
     Ok(())
 }
 
+fn validate_priority_payload(stream_id: u32, payload: &[u8]) -> Result<(), http2::Http2Error> {
+    if stream_id == 0 {
+        return Err(http2::Http2Error::Protocol(
+            "PRIORITY must not be on stream 0",
+        ));
+    }
+
+    if payload.len() != 5 {
+        return Err(http2::Http2Error::Protocol(
+            "PRIORITY payload must be 5 bytes",
+        ));
+    }
+
+    let dependency_raw = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let dependency_stream_id = dependency_raw & 0x7FFF_FFFF;
+    if dependency_stream_id == stream_id {
+        return Err(http2::Http2Error::Protocol(
+            "PRIORITY stream dependency must not reference itself",
+        ));
+    }
+
+    Ok(())
+}
+
 fn extract_header_block_fragment(
     flags: u8,
     payload: &[u8],
@@ -3735,6 +3771,38 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("WINDOW_UPDATE increment must be non-zero")
+        );
+    }
+
+    #[test]
+    fn priority_payload_validation_accepts_valid_priority() {
+        let payload = [0, 0, 0, 0, 16];
+        assert!(validate_priority_payload(1, &payload).is_ok());
+    }
+
+    #[test]
+    fn priority_payload_validation_rejects_stream_zero() {
+        let payload = [0, 0, 0, 0, 16];
+        let err = validate_priority_payload(0, &payload).unwrap_err();
+        assert!(err.to_string().contains("PRIORITY must not be on stream 0"));
+    }
+
+    #[test]
+    fn priority_payload_validation_rejects_bad_length() {
+        let err = validate_priority_payload(1, &[0, 0, 0, 0]).unwrap_err();
+        assert!(err.to_string().contains("PRIORITY payload must be 5 bytes"));
+    }
+
+    #[test]
+    fn priority_payload_validation_rejects_self_dependency() {
+        let payload = 1u32.to_be_bytes();
+        let mut with_weight = [0u8; 5];
+        with_weight[..4].copy_from_slice(&payload);
+        with_weight[4] = 16;
+        let err = validate_priority_payload(1, &with_weight).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("PRIORITY stream dependency must not reference itself")
         );
     }
 
