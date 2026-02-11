@@ -19,6 +19,7 @@ use std::task::Poll;
 /// The GUID used for computing `Sec-WebSocket-Accept`.
 pub const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_TEXT_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const CLOSE_CODE_PROTOCOL_ERROR: u16 = 1002;
 
 /// WebSocket handshake error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,7 +274,20 @@ impl WebSocket {
         let mut collecting_text_fragments = false;
 
         loop {
-            let frame = self.read_frame().await?;
+            let frame = match self.read_frame().await {
+                Ok(frame) => frame,
+                Err(err @ WebSocketError::Protocol(_)) => {
+                    // Malformed frames should trigger a protocol close frame.
+                    let close = Frame {
+                        fin: true,
+                        opcode: OpCode::Close,
+                        payload: CLOSE_CODE_PROTOCOL_ERROR.to_be_bytes().to_vec(),
+                    };
+                    let _ = self.write_frame(&close).await;
+                    return Err(err);
+                }
+                Err(err) => return Err(err),
+            };
             match frame.opcode {
                 OpCode::Text => {
                     if collecting_text_fragments {
@@ -297,6 +311,16 @@ impl WebSocket {
                 }
                 OpCode::Pong => {}
                 OpCode::Close => {
+                    if !is_valid_close_payload(&frame.payload) {
+                        // RFC 6455: malformed close payload is a protocol error.
+                        let close = Frame {
+                            fin: true,
+                            opcode: OpCode::Close,
+                            payload: CLOSE_CODE_PROTOCOL_ERROR.to_be_bytes().to_vec(),
+                        };
+                        let _ = self.write_frame(&close).await;
+                        return Err(WebSocketError::Protocol("invalid close frame payload"));
+                    }
                     // Echo the close payload (if any) and let the caller exit cleanly.
                     let close = Frame {
                         fin: true,
@@ -579,6 +603,34 @@ fn decode_b64(b: u8) -> Option<u8> {
     }
 }
 
+fn is_valid_close_payload(payload: &[u8]) -> bool {
+    if payload.is_empty() {
+        return true;
+    }
+    if payload.len() < 2 {
+        return false;
+    }
+
+    let code = u16::from_be_bytes([payload[0], payload[1]]);
+    if !is_valid_close_code(code) {
+        return false;
+    }
+
+    if payload.len() == 2 {
+        return true;
+    }
+
+    std::str::from_utf8(&payload[2..]).is_ok()
+}
+
+fn is_valid_close_code(code: u16) -> bool {
+    matches!(
+        code,
+        1000 | 1001 | 1002 | 1003 | 1007 | 1008 | 1009 | 1010 | 1011 | 1012 | 1013 | 1014 | 3000
+            ..=4999
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +649,15 @@ mod tests {
         let enc = base64_encode(data);
         let dec = base64_decode(&enc).unwrap();
         assert_eq!(dec, data);
+    }
+
+    #[test]
+    fn close_payload_validation() {
+        assert!(is_valid_close_payload(&[]));
+        assert!(!is_valid_close_payload(&[0x03]));
+        assert!(!is_valid_close_payload(&[0x03, 0xEE])); // 1006 cannot be sent
+        assert!(is_valid_close_payload(&[0x03, 0xE8])); // 1000
+        assert!(is_valid_close_payload(&[0x03, 0xE8, b'o', b'k']));
+        assert!(!is_valid_close_payload(&[0x03, 0xE8, 0xFF])); // invalid utf-8 reason
     }
 }

@@ -371,13 +371,272 @@ Sec-WebSocket-Key: {key}\r\n\
     let invalid = ws_masked_frame_with_first_byte(0xC1, b"boom", [0x0A, 0x0B, 0x0C, 0x0D]);
     stream.write_all(&invalid).expect("write invalid frame");
 
-    // The server must not echo this payload as a text frame.
-    let mut header = [0u8; 2];
-    let read_result = stream.read_exact(&mut header);
-    if read_result.is_ok() {
-        let opcode = header[0] & 0x0F;
-        assert_ne!(opcode, 0x1, "server incorrectly accepted RSV frame as text");
-    }
+    // The server should answer malformed protocol frames with CLOSE 1002.
+    let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
+    assert_eq!(opcode, 0x8, "expected close opcode");
+    assert_eq!(
+        payload,
+        1002u16.to_be_bytes().to_vec(),
+        "expected protocol-error close code (1002)"
+    );
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn websocket_echoes_empty_close_frame_payload() {
+    let app = App::builder()
+        .websocket(
+            "/ws",
+            |_ctx: &RequestContext, _req: &mut Request, mut ws: WebSocket| async move {
+                let _ = ws.read_text_or_close().await?;
+                Ok::<(), WebSocketError>(())
+            },
+        )
+        .build();
+
+    let server = Arc::new(TcpServer::new(ServerConfig::new("127.0.0.1:0")));
+    let app = Arc::new(app);
+    let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+
+    let server_thread = {
+        let server = Arc::clone(&server);
+        let app = Arc::clone(&app);
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::current_thread()
+                .build()
+                .expect("test runtime must build");
+            rt.block_on(async move {
+                let cx = asupersync::Cx::for_testing();
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind must succeed");
+                let local_addr = listener.local_addr().expect("local_addr must work");
+                addr_tx.send(local_addr).expect("addr send must succeed");
+
+                let _ = server.serve_on_app(&cx, listener, app).await;
+            });
+        })
+    };
+
+    let addr = addr_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server must report addr");
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    let key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let req = format!(
+        "GET /ws HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: {key}\r\n\
+\r\n"
+    );
+    stream.write_all(req.as_bytes()).expect("write handshake");
+
+    let resp = read_until_double_crlf(&mut stream, 16 * 1024);
+    let resp_str = std::str::from_utf8(&resp).expect("utf8 response");
+    assert!(
+        resp_str.starts_with("HTTP/1.1 101"),
+        "expected 101 switching protocols, got:\n{resp_str}"
+    );
+
+    // Send masked CLOSE with empty payload. Server should echo CLOSE with empty payload.
+    let close = ws_masked_frame(0x8, b"", [0x09, 0x08, 0x07, 0x06]);
+    stream.write_all(&close).expect("write close frame");
+
+    let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
+    assert_eq!(opcode, 0x8, "expected close opcode");
+    assert!(
+        payload.is_empty(),
+        "expected echoed close payload to be empty"
+    );
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn websocket_invalid_close_payload_len_one_gets_protocol_error_close() {
+    let app = App::builder()
+        .websocket(
+            "/ws",
+            |_ctx: &RequestContext, _req: &mut Request, mut ws: WebSocket| async move {
+                let _ = ws.read_text_or_close().await?;
+                Ok::<(), WebSocketError>(())
+            },
+        )
+        .build();
+
+    let server = Arc::new(TcpServer::new(ServerConfig::new("127.0.0.1:0")));
+    let app = Arc::new(app);
+    let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+
+    let server_thread = {
+        let server = Arc::clone(&server);
+        let app = Arc::clone(&app);
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::current_thread()
+                .build()
+                .expect("test runtime must build");
+            rt.block_on(async move {
+                let cx = asupersync::Cx::for_testing();
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind must succeed");
+                let local_addr = listener.local_addr().expect("local_addr must work");
+                addr_tx.send(local_addr).expect("addr send must succeed");
+
+                let _ = server.serve_on_app(&cx, listener, app).await;
+            });
+        })
+    };
+
+    let addr = addr_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server must report addr");
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    let key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let req = format!(
+        "GET /ws HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: {key}\r\n\
+\r\n"
+    );
+    stream.write_all(req.as_bytes()).expect("write handshake");
+
+    let resp = read_until_double_crlf(&mut stream, 16 * 1024);
+    let resp_str = std::str::from_utf8(&resp).expect("utf8 response");
+    assert!(
+        resp_str.starts_with("HTTP/1.1 101"),
+        "expected 101 switching protocols, got:\n{resp_str}"
+    );
+
+    // Invalid CLOSE payload length (=1 byte) must trigger protocol close (1002).
+    let invalid_close = ws_masked_frame(0x8, &[0x03], [0x04, 0x03, 0x02, 0x01]);
+    stream
+        .write_all(&invalid_close)
+        .expect("write invalid close frame");
+
+    let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
+    assert_eq!(opcode, 0x8, "expected close opcode");
+    assert_eq!(
+        payload,
+        1002u16.to_be_bytes().to_vec(),
+        "expected protocol-error close code (1002)"
+    );
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn websocket_invalid_close_code_gets_protocol_error_close() {
+    let app = App::builder()
+        .websocket(
+            "/ws",
+            |_ctx: &RequestContext, _req: &mut Request, mut ws: WebSocket| async move {
+                let _ = ws.read_text_or_close().await?;
+                Ok::<(), WebSocketError>(())
+            },
+        )
+        .build();
+
+    let server = Arc::new(TcpServer::new(ServerConfig::new("127.0.0.1:0")));
+    let app = Arc::new(app);
+    let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+
+    let server_thread = {
+        let server = Arc::clone(&server);
+        let app = Arc::clone(&app);
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::current_thread()
+                .build()
+                .expect("test runtime must build");
+            rt.block_on(async move {
+                let cx = asupersync::Cx::for_testing();
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind must succeed");
+                let local_addr = listener.local_addr().expect("local_addr must work");
+                addr_tx.send(local_addr).expect("addr send must succeed");
+
+                let _ = server.serve_on_app(&cx, listener, app).await;
+            });
+        })
+    };
+
+    let addr = addr_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server must report addr");
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    let key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let req = format!(
+        "GET /ws HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: {key}\r\n\
+\r\n"
+    );
+    stream.write_all(req.as_bytes()).expect("write handshake");
+
+    let resp = read_until_double_crlf(&mut stream, 16 * 1024);
+    let resp_str = std::str::from_utf8(&resp).expect("utf8 response");
+    assert!(
+        resp_str.starts_with("HTTP/1.1 101"),
+        "expected 101 switching protocols, got:\n{resp_str}"
+    );
+
+    // Invalid CLOSE code 1006 must trigger protocol close (1002).
+    let invalid_close = ws_masked_frame(0x8, &1006u16.to_be_bytes(), [0x0E, 0x0D, 0x0C, 0x0B]);
+    stream
+        .write_all(&invalid_close)
+        .expect("write invalid close frame");
+
+    let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
+    assert_eq!(opcode, 0x8, "expected close opcode");
+    assert_eq!(
+        payload,
+        1002u16.to_be_bytes().to_vec(),
+        "expected protocol-error close code (1002)"
+    );
 
     let _ = stream.shutdown(Shutdown::Both);
     server.shutdown();
