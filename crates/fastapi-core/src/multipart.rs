@@ -179,6 +179,8 @@ pub struct Part {
     pub data: Vec<u8>,
     /// Additional headers.
     pub headers: HashMap<String, String>,
+    spooled_path: Option<PathBuf>,
+    spooled_len: Option<usize>,
 }
 
 impl Part {
@@ -205,7 +207,28 @@ impl Part {
     /// Get the size of the data in bytes.
     #[must_use]
     pub fn size(&self) -> usize {
-        self.data.len()
+        self.spooled_len.unwrap_or(self.data.len())
+    }
+
+    /// Returns true when this part's data is backed by a spooled temp file.
+    #[must_use]
+    pub fn is_spooled(&self) -> bool {
+        self.spooled_path.is_some()
+    }
+
+    /// Path to the spooled temporary file, if this part is backed by disk.
+    #[must_use]
+    pub fn spooled_path(&self) -> Option<&Path> {
+        self.spooled_path.as_deref()
+    }
+
+    /// Read part bytes regardless of in-memory or spooled backing.
+    pub fn bytes(&self) -> std::io::Result<Vec<u8>> {
+        if let Some(path) = &self.spooled_path {
+            std::fs::read(path)
+        } else {
+            Ok(self.data.clone())
+        }
     }
 }
 
@@ -249,10 +272,17 @@ impl UploadFile {
             content_type,
             data,
             headers: _,
+            spooled_path,
+            spooled_len,
         } = part;
         let filename = filename?;
 
-        let storage = if data.len() > spool_threshold {
+        let storage = if let Some(path) = spooled_path {
+            UploadStorage::SpooledTempFile {
+                path,
+                len: u64::try_from(spooled_len.unwrap_or(data.len())).unwrap_or(u64::MAX),
+            }
+        } else if data.len() > spool_threshold {
             match spool_to_tempfile(&data) {
                 Ok(path) => UploadStorage::SpooledTempFile {
                     path,
@@ -655,31 +685,30 @@ impl StreamingPartState {
         Ok(())
     }
 
-    fn into_part(mut self) -> Result<Part, MultipartError> {
+    fn into_part(mut self) -> Part {
         let storage = std::mem::replace(
             &mut self.storage,
             PartStreamingStorage::InMemory(Vec::new()),
         );
-        let data = match storage {
-            PartStreamingStorage::InMemory(data) => data,
-            PartStreamingStorage::SpooledTempFile { path, .. } => {
-                let bytes = std::fs::read(&path).map_err(|e| MultipartError::Io {
-                    detail: format!("failed to read spooled tempfile: {e}"),
-                })?;
-                std::fs::remove_file(&path).map_err(|e| MultipartError::Io {
-                    detail: format!("failed to remove spooled tempfile: {e}"),
-                })?;
-                bytes
+        let (data, spooled_path, spooled_len) = match storage {
+            PartStreamingStorage::InMemory(data) => {
+                let len = data.len();
+                (data, None, Some(len))
+            }
+            PartStreamingStorage::SpooledTempFile { path, len } => {
+                (Vec::new(), Some(path), Some(len))
             }
         };
 
-        Ok(Part {
+        Part {
             name: std::mem::take(&mut self.name),
             filename: std::mem::take(&mut self.filename),
             content_type: std::mem::take(&mut self.content_type),
             data,
             headers: std::mem::take(&mut self.headers),
-        })
+            spooled_path,
+            spooled_len,
+        }
     }
 }
 
@@ -779,6 +808,8 @@ impl MultipartParser {
                 content_type,
                 data: data.to_vec(),
                 headers,
+                spooled_path: None,
+                spooled_len: None,
             });
 
             pos = data_end;
@@ -940,7 +971,7 @@ impl MultipartParser {
                         detail: "missing current multipart part state",
                     });
                 };
-                parsed.push(part_state.into_part()?);
+                parsed.push(part_state.into_part());
 
                 // Keep the next boundary in-buffer for the next iteration.
                 buffer.drain(..data_end);
@@ -1135,7 +1166,7 @@ fn unquote(s: &str) -> String {
 }
 
 /// Parsed multipart form data.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MultipartForm {
     parts: Vec<Part>,
     spool_threshold: usize,
@@ -1183,8 +1214,8 @@ impl MultipartForm {
 
     /// Consume the form and return all parsed parts.
     #[must_use]
-    pub fn into_parts(self) -> Vec<Part> {
-        self.parts
+    pub fn into_parts(mut self) -> Vec<Part> {
+        std::mem::take(&mut self.parts)
     }
 
     /// Get a form field value by name.
@@ -1202,8 +1233,7 @@ impl MultipartForm {
         self.parts
             .iter()
             .find(|p| p.name == name && p.filename.is_some())
-            .cloned()
-            .and_then(|part| UploadFile::from_part_with_spool_threshold(part, self.spool_threshold))
+            .and_then(|part| Self::upload_from_borrowed_part(part, self.spool_threshold))
     }
 
     /// Remove and return a file by field name without cloning part data.
@@ -1222,18 +1252,15 @@ impl MultipartForm {
         self.parts
             .iter()
             .filter(|p| p.filename.is_some())
-            .cloned()
-            .filter_map(|part| {
-                UploadFile::from_part_with_spool_threshold(part, self.spool_threshold)
-            })
+            .filter_map(|part| Self::upload_from_borrowed_part(part, self.spool_threshold))
             .collect()
     }
 
     /// Consume the form and return all file uploads without cloning part data.
     #[must_use]
-    pub fn into_files(self) -> Vec<UploadFile> {
+    pub fn into_files(mut self) -> Vec<UploadFile> {
         let spool_threshold = self.spool_threshold;
-        self.parts
+        std::mem::take(&mut self.parts)
             .into_iter()
             .filter_map(|part| UploadFile::from_part_with_spool_threshold(part, spool_threshold))
             .collect()
@@ -1255,10 +1282,7 @@ impl MultipartForm {
         self.parts
             .iter()
             .filter(|p| p.name == name && p.filename.is_some())
-            .cloned()
-            .filter_map(|part| {
-                UploadFile::from_part_with_spool_threshold(part, self.spool_threshold)
-            })
+            .filter_map(|part| Self::upload_from_borrowed_part(part, self.spool_threshold))
             .collect()
     }
 
@@ -1278,6 +1302,30 @@ impl MultipartForm {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.parts.is_empty()
+    }
+
+    fn upload_from_borrowed_part(part: &Part, spool_threshold: usize) -> Option<UploadFile> {
+        let data = part.bytes().ok()?;
+        let owned_part = Part {
+            name: part.name.clone(),
+            filename: part.filename.clone(),
+            content_type: part.content_type.clone(),
+            data,
+            headers: part.headers.clone(),
+            spooled_path: None,
+            spooled_len: None,
+        };
+        UploadFile::from_part_with_spool_threshold(owned_part, spool_threshold)
+    }
+}
+
+impl Drop for MultipartForm {
+    fn drop(&mut self) {
+        for part in &self.parts {
+            if let Some(path) = part.spooled_path() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 }
 
@@ -1437,6 +1485,8 @@ mod tests {
                 content_type: None,
                 data: b"hi".to_vec(),
                 headers: HashMap::new(),
+                spooled_path: None,
+                spooled_len: None,
             },
             Part {
                 name: "avatar".to_string(),
@@ -1444,6 +1494,8 @@ mod tests {
                 content_type: Some("application/octet-stream".to_string()),
                 data: vec![1, 2, 3, 4],
                 headers: HashMap::new(),
+                spooled_path: None,
+                spooled_len: None,
             },
             Part {
                 name: "avatar".to_string(),
@@ -1451,6 +1503,8 @@ mod tests {
                 content_type: Some("application/octet-stream".to_string()),
                 data: vec![9; 32],
                 headers: HashMap::new(),
+                spooled_path: None,
+                spooled_len: None,
             },
         ];
 
@@ -1477,6 +1531,8 @@ mod tests {
             content_type: Some("image/jpeg".to_string()),
             data: vec![0xAB; 64],
             headers: HashMap::new(),
+            spooled_path: None,
+            spooled_len: None,
         };
 
         let form = MultipartForm::from_parts_with_spool_threshold(vec![part], 1);
@@ -1525,6 +1581,8 @@ mod tests {
             content_type: Some("text/plain".to_string()),
             data: b"hello".to_vec(),
             headers: HashMap::new(),
+            spooled_path: None,
+            spooled_len: None,
         };
 
         let mut file = UploadFile::from_part(part).expect("expected file");
@@ -1553,6 +1611,8 @@ mod tests {
             content_type: Some("application/octet-stream".to_string()),
             data: payload.clone(),
             headers: HashMap::new(),
+            spooled_path: None,
+            spooled_len: None,
         };
 
         let mut file = UploadFile::from_part(part).expect("expected file");
@@ -1584,6 +1644,8 @@ mod tests {
             content_type: Some("text/plain".to_string()),
             data: b"hello".to_vec(),
             headers: HashMap::new(),
+            spooled_path: None,
+            spooled_len: None,
         };
 
         let mut file = UploadFile::from_part(part).expect("expected file");
@@ -1678,13 +1740,63 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].name, "file");
         assert_eq!(parts[0].filename.as_deref(), Some("large.bin"));
-        assert_eq!(parts[0].data, payload);
+        assert!(parts[0].is_spooled());
+        let spooled_path = parts[0].spooled_path().expect("spooled path").to_path_buf();
+        assert!(parts[0].data.is_empty());
+        assert_eq!(parts[0].bytes().expect("read spooled bytes"), payload);
+        std::fs::remove_file(spooled_path).expect("cleanup spooled test file");
 
         // During streamed parsing, parser buffer should stay bounded rather than
         // growing with the whole payload size.
         assert!(
             max_buffer_len < 8 * 1024,
             "incremental parser buffer grew too large: {max_buffer_len}"
+        );
+    }
+
+    #[test]
+    fn test_multipart_form_drop_cleans_spooled_parts() {
+        let boundary = "----boundary";
+        let payload = vec![b'z'; 32 * 1024];
+
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"drop.bin\"\r\n",
+        );
+        body.extend_from_slice(b"Content-Type: application/octet-stream\r\n");
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(&payload);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let parser =
+            MultipartParser::new(boundary, MultipartConfig::default().spool_threshold(1024));
+        let mut state = MultipartStreamState::default();
+        let mut buffer = Vec::new();
+        let mut parts = Vec::new();
+        for chunk in body.chunks(257) {
+            buffer.extend_from_slice(chunk);
+            let mut parsed = parser
+                .parse_incremental(&mut buffer, &mut state, false)
+                .expect("incremental parse");
+            parts.append(&mut parsed);
+        }
+        let mut tail = parser
+            .parse_incremental(&mut buffer, &mut state, true)
+            .expect("final parse");
+        parts.append(&mut tail);
+
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].is_spooled());
+        let spooled_path = parts[0].spooled_path().expect("spooled path").to_path_buf();
+        assert!(spooled_path.exists());
+
+        let form = MultipartForm::from_parts_with_spool_threshold(parts, 1024);
+        drop(form);
+
+        assert!(
+            !spooled_path.exists(),
+            "dropping multipart form should clean spooled part file"
         );
     }
 }
