@@ -59,6 +59,14 @@ fn ws_masked_frame_with_first_byte(first_byte: u8, payload: &[u8], mask: [u8; 4]
     out
 }
 
+fn ws_masked_oversized_text_header_only(payload_len: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(10);
+    out.push(0x81); // FIN + text
+    out.push(0x80 | 127); // MASK + 64-bit extended payload length
+    out.extend_from_slice(&payload_len.to_be_bytes());
+    out
+}
+
 fn ws_read_unmasked_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
     let mut header = [0u8; 2];
     stream.read_exact(&mut header).expect("read header");
@@ -726,6 +734,85 @@ Sec-WebSocket-Key: {key}\r\n\
     let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
     assert_eq!(opcode, 0x1, "expected text opcode");
     assert_eq!(&payload, b"token-list-ok");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn websocket_rejects_oversized_declared_frame_len_before_payload_read() {
+    let app = App::builder()
+        .websocket(
+            "/ws",
+            |_ctx: &RequestContext, _req: &mut Request, mut ws: WebSocket| async move {
+                let _ = ws.read_text_or_close().await?;
+                Ok::<(), WebSocketError>(())
+            },
+        )
+        .build();
+
+    let server = Arc::new(TcpServer::new(ServerConfig::new("127.0.0.1:0")));
+    let app = Arc::new(app);
+    let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+
+    let server_thread = {
+        let server = Arc::clone(&server);
+        let app = Arc::clone(&app);
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::current_thread()
+                .build()
+                .expect("test runtime must build");
+            rt.block_on(async move {
+                let cx = asupersync::Cx::for_testing();
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind must succeed");
+                let local_addr = listener.local_addr().expect("local_addr must work");
+                addr_tx.send(local_addr).expect("addr send must succeed");
+
+                let _ = server.serve_on_app(&cx, listener, app).await;
+            });
+        })
+    };
+
+    let addr = addr_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server must report addr");
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    let key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let req = format!(
+        "GET /ws HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: {key}\r\n\
+\r\n"
+    );
+    stream.write_all(req.as_bytes()).expect("write handshake");
+    let _ = read_until_double_crlf(&mut stream, 16 * 1024);
+
+    // Declare a text payload just above the server's 64 MiB limit, but send only the header.
+    // Correct behavior is an immediate close(1009), without waiting for mask/payload bytes.
+    let oversized_len = (64u64 * 1024 * 1024) + 1;
+    let oversized_header_only = ws_masked_oversized_text_header_only(oversized_len);
+    stream
+        .write_all(&oversized_header_only)
+        .expect("write oversized frame header");
+
+    let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
+    assert_eq!(opcode, 0x8, "expected close opcode");
+    assert_eq!(payload, 1009u16.to_be_bytes(), "expected close code 1009");
 
     let _ = stream.shutdown(Shutdown::Both);
     server.shutdown();

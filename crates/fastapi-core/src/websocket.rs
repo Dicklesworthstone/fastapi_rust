@@ -118,6 +118,7 @@ pub enum WebSocketError {
     Io(io::Error),
     Protocol(&'static str),
     Utf8(std::str::Utf8Error),
+    MessageTooLarge { size: usize, limit: usize },
 }
 
 impl std::fmt::Display for WebSocketError {
@@ -126,6 +127,12 @@ impl std::fmt::Display for WebSocketError {
             Self::Io(e) => write!(f, "websocket I/O error: {e}"),
             Self::Protocol(msg) => write!(f, "websocket protocol error: {msg}"),
             Self::Utf8(e) => write!(f, "invalid utf-8 in websocket text frame: {e}"),
+            Self::MessageTooLarge { size, limit } => {
+                write!(
+                    f,
+                    "websocket message too large: {size} bytes (limit {limit})"
+                )
+            }
         }
     }
 }
@@ -135,7 +142,7 @@ impl std::error::Error for WebSocketError {
         match self {
             Self::Io(e) => Some(e),
             Self::Utf8(e) => Some(e),
-            Self::Protocol(_) => None,
+            Self::Protocol(_) | Self::MessageTooLarge { .. } => None,
         }
     }
 }
@@ -214,13 +221,22 @@ impl WebSocket {
                 "client->server frames must be masked",
             ));
         }
-        let mask = self.read_exact_buf(4).await?;
-        let payload_len =
-            usize::try_from(len7).map_err(|_| WebSocketError::Protocol("len too large"))?;
+        let payload_len = usize::try_from(len7).map_err(|_| WebSocketError::MessageTooLarge {
+            size: usize::MAX,
+            limit: MAX_TEXT_MESSAGE_BYTES,
+        })?;
 
         if opcode.is_control() && payload_len > 125 {
             return Err(WebSocketError::Protocol("control frame too large"));
         }
+        if payload_len > MAX_TEXT_MESSAGE_BYTES {
+            return Err(WebSocketError::MessageTooLarge {
+                size: payload_len,
+                limit: MAX_TEXT_MESSAGE_BYTES,
+            });
+        }
+
+        let mask = self.read_exact_buf(4).await?;
 
         let mut payload = self.read_exact_buf(payload_len).await?;
         for (i, b) in payload.iter_mut().enumerate() {
@@ -279,6 +295,10 @@ impl WebSocket {
         loop {
             let frame = match self.read_frame().await {
                 Ok(frame) => frame,
+                Err(err @ WebSocketError::MessageTooLarge { .. }) => {
+                    let _ = self.send_close_code(CLOSE_CODE_MESSAGE_TOO_BIG).await;
+                    return Err(err);
+                }
                 Err(err @ WebSocketError::Protocol(_)) => {
                     // Malformed frames should trigger a protocol close frame.
                     let _ = self.send_close_code(CLOSE_CODE_PROTOCOL_ERROR).await;
