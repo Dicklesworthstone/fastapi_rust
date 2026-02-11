@@ -73,6 +73,86 @@ async fn collect_body_limited(
     }
 }
 
+async fn parse_multipart_limited(
+    ctx: &RequestContext,
+    body: Body,
+    limit: usize,
+    parser: &multipart::MultipartParser,
+) -> Result<Vec<multipart::Part>, RequestBodyStreamError> {
+    match body {
+        Body::Empty => parser
+            .parse(&[])
+            .map_err(|e| RequestBodyStreamError::Io(e.to_string())),
+        Body::Bytes(bytes) => {
+            if bytes.len() > limit {
+                return Err(RequestBodyStreamError::TooLarge {
+                    received: bytes.len(),
+                    max: limit,
+                });
+            }
+            parser
+                .parse(&bytes)
+                .map_err(|e| RequestBodyStreamError::Io(e.to_string()))
+        }
+        Body::Stream {
+            stream,
+            content_length,
+        } => {
+            let mut stream = stream.into_inner().unwrap_or_else(|e| e.into_inner());
+
+            if let Some(n) = content_length {
+                if n > limit {
+                    return Err(RequestBodyStreamError::TooLarge {
+                        received: n,
+                        max: limit,
+                    });
+                }
+            }
+
+            let mut state = multipart::MultipartStreamState::default();
+            let mut buffer = Vec::new();
+            let mut parts = Vec::new();
+            let mut seen = 0usize;
+
+            loop {
+                let next =
+                    std::future::poll_fn(|cx: &mut Context<'_>| stream.as_mut().poll_next(cx))
+                        .await;
+                let Some(chunk) = next else {
+                    break;
+                };
+                let chunk = chunk?;
+
+                seen = seen.saturating_add(chunk.len());
+                if seen > limit {
+                    return Err(RequestBodyStreamError::TooLarge {
+                        received: seen,
+                        max: limit,
+                    });
+                }
+
+                buffer.extend_from_slice(&chunk);
+                let mut newly_parsed = parser
+                    .parse_incremental(&mut buffer, &mut state, false)
+                    .map_err(|e| RequestBodyStreamError::Io(e.to_string()))?;
+                parts.append(&mut newly_parsed);
+                let _ = ctx.checkpoint();
+            }
+
+            let mut tail = parser
+                .parse_incremental(&mut buffer, &mut state, true)
+                .map_err(|e| RequestBodyStreamError::Io(e.to_string()))?;
+            parts.append(&mut tail);
+
+            if !state.is_done() {
+                return Err(RequestBodyStreamError::ConnectionClosed);
+            }
+
+            Ok(parts)
+        }
+    }
+}
+
 /// Trait for types that can be extracted from a request.
 ///
 /// This is the core abstraction for request handlers. Each parameter
@@ -207,8 +287,11 @@ impl FromRequest for multipart::MultipartForm {
                 message: e.to_string(),
             })?;
 
-        let limit = multipart::DEFAULT_MAX_TOTAL_SIZE;
-        let body = collect_body_limited(ctx, req.take_body(), limit)
+        let multipart_config = multipart::MultipartConfig::default();
+        let limit = multipart_config.get_max_total_size();
+        let spool_threshold = multipart_config.get_spool_threshold();
+        let parser = multipart::MultipartParser::new(&boundary, multipart_config);
+        let parts = parse_multipart_limited(ctx, req.take_body(), limit, &parser)
             .await
             .map_err(|e| match e {
                 RequestBodyStreamError::TooLarge { received, .. } => {
@@ -222,17 +305,10 @@ impl FromRequest for multipart::MultipartForm {
                 },
             })?;
 
-        let _ = ctx.checkpoint();
-
-        let parser =
-            multipart::MultipartParser::new(&boundary, multipart::MultipartConfig::default());
-        let parts = parser
-            .parse(&body)
-            .map_err(|e| MultipartExtractError::BadRequest {
-                message: e.to_string(),
-            })?;
-
-        Ok(multipart::MultipartForm::from_parts(parts))
+        Ok(multipart::MultipartForm::from_parts_with_spool_threshold(
+            parts,
+            spool_threshold,
+        ))
     }
 }
 
@@ -277,7 +353,7 @@ mod multipart_extractor_tests {
         let file = form.get_file("file").expect("file");
         assert_eq!(file.filename, "test.txt");
         assert_eq!(file.content_type, "text/plain");
-        assert_eq!(file.data, b"Hello".to_vec());
+        assert_eq!(file.bytes().expect("read upload bytes"), b"Hello".to_vec());
     }
 
     #[test]
@@ -309,6 +385,49 @@ mod multipart_extractor_tests {
             futures_executor::block_on(multipart::MultipartForm::from_request(&ctx, &mut req))
                 .unwrap_err();
         assert!(matches!(err, MultipartExtractError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn multipart_extract_streaming_body() {
+        use asupersync::stream;
+
+        let ctx = test_context();
+        let boundary = "----boundary";
+        let body = concat!(
+            "------boundary\r\n",
+            "Content-Disposition: form-data; name=\"field1\"\r\n",
+            "\r\n",
+            "value1\r\n",
+            "------boundary\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "Hello stream\r\n",
+            "------boundary--\r\n"
+        )
+        .as_bytes()
+        .to_vec();
+
+        let chunks: Vec<Result<Vec<u8>, RequestBodyStreamError>> =
+            body.chunks(7).map(|chunk| Ok(chunk.to_vec())).collect();
+        let stream = stream::iter(chunks);
+
+        let mut req = Request::new(Method::Post, "/upload");
+        req.headers_mut().insert(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}").into_bytes(),
+        );
+        req.set_body(Body::streaming(stream));
+
+        let form =
+            futures_executor::block_on(multipart::MultipartForm::from_request(&ctx, &mut req))
+                .expect("multipart parse");
+        assert_eq!(form.get_field("field1"), Some("value1"));
+        let file = form.get_file("file").expect("file");
+        assert_eq!(
+            file.bytes().expect("read upload bytes"),
+            b"Hello stream".to_vec()
+        );
     }
 }
 
