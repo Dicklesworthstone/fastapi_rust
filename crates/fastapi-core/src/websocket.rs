@@ -20,6 +20,9 @@ use std::task::Poll;
 pub const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_TEXT_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const CLOSE_CODE_PROTOCOL_ERROR: u16 = 1002;
+const CLOSE_CODE_UNSUPPORTED_DATA: u16 = 1003;
+const CLOSE_CODE_INVALID_PAYLOAD: u16 = 1007;
+const CLOSE_CODE_MESSAGE_TOO_BIG: u16 = 1009;
 
 /// WebSocket handshake error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,12 +281,7 @@ impl WebSocket {
                 Ok(frame) => frame,
                 Err(err @ WebSocketError::Protocol(_)) => {
                     // Malformed frames should trigger a protocol close frame.
-                    let close = Frame {
-                        fin: true,
-                        opcode: OpCode::Close,
-                        payload: CLOSE_CODE_PROTOCOL_ERROR.to_be_bytes().to_vec(),
-                    };
-                    let _ = self.write_frame(&close).await;
+                    let _ = self.send_close_code(CLOSE_CODE_PROTOCOL_ERROR).await;
                     return Err(err);
                 }
                 Err(err) => return Err(err),
@@ -291,16 +289,23 @@ impl WebSocket {
             match frame.opcode {
                 OpCode::Text => {
                     if collecting_text_fragments {
+                        let _ = self.send_close_code(CLOSE_CODE_PROTOCOL_ERROR).await;
                         return Err(WebSocketError::Protocol(
                             "new text frame before fragmented text completed",
                         ));
                     }
                     if frame.fin {
-                        let s = std::str::from_utf8(&frame.payload)?;
-                        return Ok(Some(s.to_string()));
+                        match std::str::from_utf8(&frame.payload) {
+                            Ok(s) => return Ok(Some(s.to_string())),
+                            Err(err) => {
+                                let _ = self.send_close_code(CLOSE_CODE_INVALID_PAYLOAD).await;
+                                return Err(WebSocketError::Utf8(err));
+                            }
+                        }
                     }
 
                     if frame.payload.len() > MAX_TEXT_MESSAGE_BYTES {
+                        let _ = self.send_close_code(CLOSE_CODE_MESSAGE_TOO_BIG).await;
                         return Err(WebSocketError::Protocol("text message too large"));
                     }
                     text_fragments.extend_from_slice(&frame.payload);
@@ -313,12 +318,7 @@ impl WebSocket {
                 OpCode::Close => {
                     if !is_valid_close_payload(&frame.payload) {
                         // RFC 6455: malformed close payload is a protocol error.
-                        let close = Frame {
-                            fin: true,
-                            opcode: OpCode::Close,
-                            payload: CLOSE_CODE_PROTOCOL_ERROR.to_be_bytes().to_vec(),
-                        };
-                        let _ = self.write_frame(&close).await;
+                        let _ = self.send_close_code(CLOSE_CODE_PROTOCOL_ERROR).await;
                         return Err(WebSocketError::Protocol("invalid close frame payload"));
                     }
                     // Echo the close payload (if any) and let the caller exit cleanly.
@@ -331,24 +331,32 @@ impl WebSocket {
                     return Ok(None);
                 }
                 OpCode::Binary => {
+                    let _ = self.send_close_code(CLOSE_CODE_UNSUPPORTED_DATA).await;
                     return Err(WebSocketError::Protocol(
                         "expected text frame, got binary frame",
                     ));
                 }
                 OpCode::Continuation => {
                     if !collecting_text_fragments {
+                        let _ = self.send_close_code(CLOSE_CODE_PROTOCOL_ERROR).await;
                         return Err(WebSocketError::Protocol("unexpected continuation frame"));
                     }
 
                     let next_size = text_fragments.len().saturating_add(frame.payload.len());
                     if next_size > MAX_TEXT_MESSAGE_BYTES {
+                        let _ = self.send_close_code(CLOSE_CODE_MESSAGE_TOO_BIG).await;
                         return Err(WebSocketError::Protocol("text message too large"));
                     }
                     text_fragments.extend_from_slice(&frame.payload);
 
                     if frame.fin {
-                        let s = std::str::from_utf8(&text_fragments)?;
-                        return Ok(Some(s.to_string()));
+                        match std::str::from_utf8(&text_fragments) {
+                            Ok(s) => return Ok(Some(s.to_string())),
+                            Err(err) => {
+                                let _ = self.send_close_code(CLOSE_CODE_INVALID_PAYLOAD).await;
+                                return Err(WebSocketError::Utf8(err));
+                            }
+                        }
                     }
                 }
             }
@@ -374,6 +382,15 @@ impl WebSocket {
             fin: true,
             opcode: OpCode::Text,
             payload: text.as_bytes().to_vec(),
+        };
+        self.write_frame(&frame).await
+    }
+
+    async fn send_close_code(&mut self, close_code: u16) -> Result<(), WebSocketError> {
+        let frame = Frame {
+            fin: true,
+            opcode: OpCode::Close,
+            payload: close_code.to_be_bytes().to_vec(),
         };
         self.write_frame(&frame).await
     }
