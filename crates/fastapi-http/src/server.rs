@@ -878,10 +878,12 @@ where
         let frame = framed.read_frame(max_frame_size).await?;
         match frame.header.frame_type() {
             http2::FrameType::Settings => {
-                if frame.header.stream_id != 0 {
-                    return Err(http2::Http2Error::Protocol("SETTINGS must be on stream 0").into());
-                }
-                if (frame.header.flags & FLAG_ACK) != 0 {
+                let is_ack = validate_settings_frame(
+                    frame.header.stream_id,
+                    frame.header.flags,
+                    &frame.payload,
+                )?;
+                if is_ack {
                     continue;
                 }
                 apply_http2_settings(&mut hpack, &mut max_frame_size, &frame.payload)?;
@@ -993,13 +995,12 @@ where
                                     }
                                 }
                                 if f.header.frame_type() == http2::FrameType::Settings {
-                                    if f.header.stream_id != 0 {
-                                        return Err(http2::Http2Error::Protocol(
-                                            "SETTINGS must be on stream 0",
-                                        )
-                                        .into());
-                                    }
-                                    if (f.header.flags & FLAG_ACK) == 0 {
+                                    let is_ack = validate_settings_frame(
+                                        f.header.stream_id,
+                                        f.header.flags,
+                                        &f.payload,
+                                    )?;
+                                    if !is_ack {
                                         apply_http2_settings(
                                             &mut hpack,
                                             &mut max_frame_size,
@@ -2369,12 +2370,12 @@ impl TcpServer {
 
             match frame.header.frame_type() {
                 http2::FrameType::Settings => {
-                    if frame.header.stream_id != 0 {
-                        return Err(
-                            http2::Http2Error::Protocol("SETTINGS must be on stream 0").into()
-                        );
-                    }
-                    if (frame.header.flags & FLAG_ACK) != 0 {
+                    let is_ack = validate_settings_frame(
+                        frame.header.stream_id,
+                        frame.header.flags,
+                        &frame.payload,
+                    )?;
+                    if is_ack {
                         // ACK for our SETTINGS.
                         continue;
                     }
@@ -2508,13 +2509,12 @@ impl TcpServer {
                                         }
                                     }
                                     if f.header.frame_type() == http2::FrameType::Settings {
-                                        if f.header.stream_id != 0 {
-                                            return Err(http2::Http2Error::Protocol(
-                                                "SETTINGS must be on stream 0",
-                                            )
-                                            .into());
-                                        }
-                                        if (f.header.flags & FLAG_ACK) == 0 {
+                                        let is_ack = validate_settings_frame(
+                                            f.header.stream_id,
+                                            f.header.flags,
+                                            &f.payload,
+                                        )?;
+                                        if !is_ack {
                                             apply_http2_settings(
                                                 &mut hpack,
                                                 &mut max_frame_size,
@@ -2794,12 +2794,12 @@ impl TcpServer {
 
             match frame.header.frame_type() {
                 http2::FrameType::Settings => {
-                    if frame.header.stream_id != 0 {
-                        return Err(
-                            http2::Http2Error::Protocol("SETTINGS must be on stream 0").into()
-                        );
-                    }
-                    if (frame.header.flags & FLAG_ACK) != 0 {
+                    let is_ack = validate_settings_frame(
+                        frame.header.stream_id,
+                        frame.header.flags,
+                        &frame.payload,
+                    )?;
+                    if is_ack {
                         continue;
                     }
                     apply_http2_settings(&mut hpack, &mut max_frame_size, &frame.payload)?;
@@ -2923,13 +2923,12 @@ impl TcpServer {
                                         }
                                     }
                                     if f.header.frame_type() == http2::FrameType::Settings {
-                                        if f.header.stream_id != 0 {
-                                            return Err(http2::Http2Error::Protocol(
-                                                "SETTINGS must be on stream 0",
-                                            )
-                                            .into());
-                                        }
-                                        if (f.header.flags & FLAG_ACK) == 0 {
+                                        let is_ack = validate_settings_frame(
+                                            f.header.stream_id,
+                                            f.header.flags,
+                                            &f.payload,
+                                        )?;
+                                        if !is_ack {
                                             apply_http2_settings(
                                                 &mut hpack,
                                                 &mut max_frame_size,
@@ -3434,6 +3433,26 @@ fn apply_http2_settings(
     Ok(())
 }
 
+fn validate_settings_frame(
+    stream_id: u32,
+    flags: u8,
+    payload: &[u8],
+) -> Result<bool, http2::Http2Error> {
+    const FLAG_ACK: u8 = 0x1;
+    if stream_id != 0 {
+        return Err(http2::Http2Error::Protocol("SETTINGS must be on stream 0"));
+    }
+
+    let is_ack = (flags & FLAG_ACK) != 0;
+    if is_ack && !payload.is_empty() {
+        return Err(http2::Http2Error::Protocol(
+            "SETTINGS ACK frame must have empty payload",
+        ));
+    }
+
+    Ok(is_ack)
+}
+
 fn validate_window_update_payload(payload: &[u8]) -> Result<(), http2::Http2Error> {
     if payload.len() != 4 {
         return Err(http2::Http2Error::Protocol(
@@ -3818,6 +3837,34 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("WINDOW_UPDATE increment must be non-zero")
+        );
+    }
+
+    #[test]
+    fn settings_frame_validation_accepts_non_ack_payload() {
+        let payload = [0u8; 6];
+        let is_ack = validate_settings_frame(0, 0, &payload).unwrap();
+        assert!(!is_ack);
+    }
+
+    #[test]
+    fn settings_frame_validation_accepts_empty_ack_payload() {
+        let is_ack = validate_settings_frame(0, 0x1, &[]).unwrap();
+        assert!(is_ack);
+    }
+
+    #[test]
+    fn settings_frame_validation_rejects_non_zero_stream() {
+        let err = validate_settings_frame(1, 0, &[]).unwrap_err();
+        assert!(err.to_string().contains("SETTINGS must be on stream 0"));
+    }
+
+    #[test]
+    fn settings_frame_validation_rejects_non_empty_ack_payload() {
+        let err = validate_settings_frame(0, 0x1, &[0, 0, 0, 0, 0, 0]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("SETTINGS ACK frame must have empty payload")
         );
     }
 

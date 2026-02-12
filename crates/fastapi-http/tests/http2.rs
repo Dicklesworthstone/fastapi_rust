@@ -223,6 +223,14 @@ fn priority_payload(dependency_stream_id: u32, weight: u8) -> [u8; 5] {
     payload
 }
 
+fn assert_connection_closed(stream: &mut TcpStream) {
+    let mut probe = [0u8; 1];
+    let n = stream
+        .read(&mut probe)
+        .expect("read after protocol violation");
+    assert_eq!(n, 0, "expected peer connection close");
+}
+
 #[test]
 fn http2_h2c_prior_knowledge_get_root() {
     let app = App::builder()
@@ -722,6 +730,121 @@ fn http2_closure_path_allows_interleaved_priority_while_reading_body() {
 
     let body = read_data_body(&mut stream, 1);
     assert_eq!(body, b"closure-path-ok");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn http2_app_path_rejects_non_empty_settings_ack_while_reading_body() {
+    let app = App::builder()
+        .post(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"app-path-ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    let post_header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &post_header_block); // HEADERS | END_HEADERS
+    write_frame(&mut stream, 0x4, 0x1, 0, &[0, 0, 0, 0, 0, 0]); // invalid SETTINGS ACK payload
+
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn http2_handler_path_rejects_non_empty_settings_ack_while_reading_body() {
+    let app = App::builder()
+        .post(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"handler-path-ok".to_vec()))
+            },
+        )
+        .build();
+
+    let handler: Arc<dyn fastapi_core::Handler> = Arc::new(app);
+    let (server, addr, server_thread) = spawn_server_handler(&handler);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    let post_header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &post_header_block); // HEADERS | END_HEADERS
+    write_frame(&mut stream, 0x4, 0x1, 0, &[0, 0, 0, 0, 0, 0]); // invalid SETTINGS ACK payload
+
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn http2_closure_path_rejects_non_empty_settings_ack_while_reading_body() {
+    let (server, addr, server_thread) = spawn_server_closure();
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    let post_header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &post_header_block); // HEADERS | END_HEADERS
+    write_frame(&mut stream, 0x4, 0x1, 0, &[0, 0, 0, 0, 0, 0]); // invalid SETTINGS ACK payload
+
+    assert_connection_closed(&mut stream);
 
     let _ = stream.shutdown(Shutdown::Both);
     server.shutdown();
