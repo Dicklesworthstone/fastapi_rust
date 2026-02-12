@@ -935,6 +935,7 @@ where
 
                 if !end_stream {
                     let mut body = Vec::new();
+                    let mut stream_reset = false;
                     loop {
                         let f = framed.read_frame(max_frame_size).await?;
                         match f.header.frame_type() {
@@ -949,6 +950,13 @@ where
                                 }
                                 body.extend_from_slice(data);
                                 if data_end_stream {
+                                    break;
+                                }
+                            }
+                            http2::FrameType::RstStream => {
+                                validate_rst_stream_payload(f.header.stream_id, &f.payload)?;
+                                if f.header.stream_id == stream_id {
+                                    stream_reset = true;
                                     break;
                                 }
                             }
@@ -1015,6 +1023,9 @@ where
                                 .into());
                             }
                         }
+                    }
+                    if stream_reset {
+                        continue;
                     }
                     request.set_body(fastapi_core::Body::Bytes(body));
                 }
@@ -2430,6 +2441,7 @@ impl TcpServer {
                     if !end_stream {
                         let max = app.config().max_body_size;
                         let mut body = Vec::new();
+                        let mut stream_reset = false;
                         loop {
                             let f = framed.read_frame(max_frame_size).await?;
                             self.record_bytes_in(
@@ -2447,6 +2459,13 @@ impl TcpServer {
                                     }
                                     body.extend_from_slice(data);
                                     if data_end_stream {
+                                        break;
+                                    }
+                                }
+                                http2::FrameType::RstStream => {
+                                    validate_rst_stream_payload(f.header.stream_id, &f.payload)?;
+                                    if f.header.stream_id == stream_id {
+                                        stream_reset = true;
                                         break;
                                     }
                                 }
@@ -2520,6 +2539,9 @@ impl TcpServer {
                                     .into());
                                 }
                             }
+                        }
+                        if stream_reset {
+                            continue;
                         }
                         request.set_body(fastapi_core::Body::Bytes(body));
                     }
@@ -2837,6 +2859,7 @@ impl TcpServer {
 
                     if !end_stream {
                         let mut body = Vec::new();
+                        let mut stream_reset = false;
                         loop {
                             let f = framed.read_frame(max_frame_size).await?;
                             self.record_bytes_in(
@@ -2854,6 +2877,13 @@ impl TcpServer {
                                     }
                                     body.extend_from_slice(data);
                                     if data_end_stream {
+                                        break;
+                                    }
+                                }
+                                http2::FrameType::RstStream => {
+                                    validate_rst_stream_payload(f.header.stream_id, &f.payload)?;
+                                    if f.header.stream_id == stream_id {
+                                        stream_reset = true;
                                         break;
                                     }
                                 }
@@ -2924,6 +2954,9 @@ impl TcpServer {
                                     .into());
                                 }
                             }
+                        }
+                        if stream_reset {
+                            continue;
                         }
                         request.set_body(fastapi_core::Body::Bytes(body));
                     }
@@ -3419,6 +3452,20 @@ fn validate_window_update_payload(payload: &[u8]) -> Result<(), http2::Http2Erro
     Ok(())
 }
 
+fn validate_rst_stream_payload(stream_id: u32, payload: &[u8]) -> Result<(), http2::Http2Error> {
+    if stream_id == 0 {
+        return Err(http2::Http2Error::Protocol(
+            "RST_STREAM must not be on stream 0",
+        ));
+    }
+    if payload.len() != 4 {
+        return Err(http2::Http2Error::Protocol(
+            "RST_STREAM payload must be 4 bytes",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_priority_payload(stream_id: u32, payload: &[u8]) -> Result<(), http2::Http2Error> {
     if stream_id == 0 {
         return Err(http2::Http2Error::Protocol(
@@ -3771,6 +3818,31 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("WINDOW_UPDATE increment must be non-zero")
+        );
+    }
+
+    #[test]
+    fn rst_stream_payload_validation_accepts_valid_payload() {
+        let payload = 8u32.to_be_bytes();
+        assert!(validate_rst_stream_payload(1, &payload).is_ok());
+    }
+
+    #[test]
+    fn rst_stream_payload_validation_rejects_stream_zero() {
+        let payload = 8u32.to_be_bytes();
+        let err = validate_rst_stream_payload(0, &payload).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("RST_STREAM must not be on stream 0")
+        );
+    }
+
+    #[test]
+    fn rst_stream_payload_validation_rejects_bad_length() {
+        let err = validate_rst_stream_payload(1, &[0, 0, 0]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("RST_STREAM payload must be 4 bytes")
         );
     }
 
