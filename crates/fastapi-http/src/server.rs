@@ -914,7 +914,15 @@ where
                         .await?;
                 }
             }
-            http2::FrameType::Goaway => return Ok(()),
+            http2::FrameType::Goaway => {
+                validate_goaway_payload(&frame.payload)?;
+                return Ok(());
+            }
+            http2::FrameType::PushPromise => {
+                return Err(
+                    http2::Http2Error::Protocol("PUSH_PROMISE not supported by server").into(),
+                );
+            }
             http2::FrameType::Headers => {
                 if frame.header.stream_id == 0 {
                     return Err(
@@ -956,6 +964,12 @@ where
                     loop {
                         let f = framed.read_frame(max_frame_size).await?;
                         match f.header.frame_type() {
+                            http2::FrameType::Data if f.header.stream_id == 0 => {
+                                return Err(http2::Http2Error::Protocol(
+                                    "DATA must not be on stream 0",
+                                )
+                                .into());
+                            }
                             http2::FrameType::Data if f.header.stream_id == stream_id => {
                                 let (data, data_end_stream) =
                                     extract_data_payload(f.header.flags, &f.payload)?;
@@ -990,6 +1004,12 @@ where
                                     break;
                                 }
                             }
+                            http2::FrameType::PushPromise => {
+                                return Err(http2::Http2Error::Protocol(
+                                    "PUSH_PROMISE not supported by server",
+                                )
+                                .into());
+                            }
                             http2::FrameType::Settings
                             | http2::FrameType::Ping
                             | http2::FrameType::Goaway
@@ -997,6 +1017,7 @@ where
                             | http2::FrameType::Priority
                             | http2::FrameType::Unknown => {
                                 if f.header.frame_type() == http2::FrameType::Goaway {
+                                    validate_goaway_payload(&f.payload)?;
                                     return Ok(());
                                 }
                                 if f.header.frame_type() == http2::FrameType::Priority {
@@ -1321,7 +1342,12 @@ async fn h2_fc_clamp_send(
                 )?;
             }
             http2::FrameType::Ping => {
-                if frame.header.flags & 0x1 == 0 && frame.payload.len() == 8 {
+                if frame.header.stream_id != 0 || frame.payload.len() != 8 {
+                    return Err(ServerError::Http2(http2::Http2Error::Protocol(
+                        "invalid PING frame",
+                    )));
+                }
+                if frame.header.flags & 0x1 == 0 {
                     framed
                         .write_frame(http2::FrameType::Ping, 0x1, 0, &frame.payload)
                         .await?;
@@ -1342,6 +1368,7 @@ async fn h2_fc_clamp_send(
                 }
             }
             http2::FrameType::Goaway => {
+                validate_goaway_payload(&frame.payload)?;
                 return Err(ServerError::Http2(http2::Http2Error::Protocol(
                     "received GOAWAY while writing response",
                 )));
@@ -2557,7 +2584,16 @@ impl TcpServer {
                         self.record_bytes_out((http2::FrameHeader::LEN + 8) as u64);
                     }
                 }
-                http2::FrameType::Goaway => return Ok(()),
+                http2::FrameType::Goaway => {
+                    validate_goaway_payload(&frame.payload)?;
+                    return Ok(());
+                }
+                http2::FrameType::PushPromise => {
+                    return Err(http2::Http2Error::Protocol(
+                        "PUSH_PROMISE not supported by server",
+                    )
+                    .into());
+                }
                 http2::FrameType::Headers => {
                     if frame.header.stream_id == 0 {
                         return Err(
@@ -2610,6 +2646,12 @@ impl TcpServer {
                                 (http2::FrameHeader::LEN + f.payload.len()) as u64,
                             );
                             match f.header.frame_type() {
+                                http2::FrameType::Data if f.header.stream_id == 0 => {
+                                    return Err(http2::Http2Error::Protocol(
+                                        "DATA must not be on stream 0",
+                                    )
+                                    .into());
+                                }
                                 http2::FrameType::Data if f.header.stream_id == stream_id => {
                                     let (data, data_end_stream) =
                                         extract_data_payload(f.header.flags, &f.payload)?;
@@ -2650,6 +2692,12 @@ impl TcpServer {
                                         break;
                                     }
                                 }
+                                http2::FrameType::PushPromise => {
+                                    return Err(http2::Http2Error::Protocol(
+                                        "PUSH_PROMISE not supported by server",
+                                    )
+                                    .into());
+                                }
                                 http2::FrameType::Settings
                                 | http2::FrameType::Ping
                                 | http2::FrameType::Goaway
@@ -2657,6 +2705,7 @@ impl TcpServer {
                                 | http2::FrameType::Priority
                                 | http2::FrameType::Unknown => {
                                     if f.header.frame_type() == http2::FrameType::Goaway {
+                                        validate_goaway_payload(&f.payload)?;
                                         return Ok(());
                                     }
                                     if f.header.frame_type() == http2::FrameType::Priority {
@@ -3070,7 +3119,16 @@ impl TcpServer {
                         self.record_bytes_out((http2::FrameHeader::LEN + 8) as u64);
                     }
                 }
-                http2::FrameType::Goaway => return Ok(()),
+                http2::FrameType::Goaway => {
+                    validate_goaway_payload(&frame.payload)?;
+                    return Ok(());
+                }
+                http2::FrameType::PushPromise => {
+                    return Err(http2::Http2Error::Protocol(
+                        "PUSH_PROMISE not supported by server",
+                    )
+                    .into());
+                }
                 http2::FrameType::Headers => {
                     if frame.header.stream_id == 0 {
                         return Err(
@@ -3119,6 +3177,12 @@ impl TcpServer {
                                 (http2::FrameHeader::LEN + f.payload.len()) as u64,
                             );
                             match f.header.frame_type() {
+                                http2::FrameType::Data if f.header.stream_id == 0 => {
+                                    return Err(http2::Http2Error::Protocol(
+                                        "DATA must not be on stream 0",
+                                    )
+                                    .into());
+                                }
                                 http2::FrameType::Data if f.header.stream_id == stream_id => {
                                     let (data, data_end_stream) =
                                         extract_data_payload(f.header.flags, &f.payload)?;
@@ -3159,6 +3223,12 @@ impl TcpServer {
                                         break;
                                     }
                                 }
+                                http2::FrameType::PushPromise => {
+                                    return Err(http2::Http2Error::Protocol(
+                                        "PUSH_PROMISE not supported by server",
+                                    )
+                                    .into());
+                                }
                                 http2::FrameType::Settings
                                 | http2::FrameType::Ping
                                 | http2::FrameType::Goaway
@@ -3166,6 +3236,7 @@ impl TcpServer {
                                 | http2::FrameType::Priority
                                 | http2::FrameType::Unknown => {
                                     if f.header.frame_type() == http2::FrameType::Goaway {
+                                        validate_goaway_payload(&f.payload)?;
                                         return Ok(());
                                     }
                                     if f.header.frame_type() == http2::FrameType::Priority {
@@ -3950,6 +4021,16 @@ mod h2_error_code {
     pub const ENHANCE_YOUR_CALM: u32 = 0xb;
 }
 
+/// Validate an incoming GOAWAY frame: payload must be at least 8 bytes (RFC 7540 §6.8).
+fn validate_goaway_payload(payload: &[u8]) -> Result<(), http2::Http2Error> {
+    if payload.len() < 8 {
+        return Err(http2::Http2Error::Protocol(
+            "GOAWAY payload must be at least 8 bytes",
+        ));
+    }
+    Ok(())
+}
+
 /// Build the GOAWAY frame payload: last-stream-id (4 bytes) + error-code (4 bytes).
 fn goaway_payload(last_stream_id: u32, error_code: u32) -> [u8; 8] {
     let mut buf = [0u8; 8];
@@ -4478,6 +4559,37 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("PRIORITY stream dependency must not reference itself")
+        );
+    }
+
+    #[test]
+    fn goaway_payload_validation_accepts_valid_payload() {
+        let payload = goaway_payload(0, 0);
+        assert!(validate_goaway_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn goaway_payload_validation_accepts_payload_with_debug_data() {
+        let mut payload = Vec::from(goaway_payload(1, 0).as_slice());
+        payload.extend_from_slice(b"debug info");
+        assert!(validate_goaway_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn goaway_payload_validation_rejects_short_payload() {
+        let err = validate_goaway_payload(&[0, 0, 0]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("GOAWAY payload must be at least 8 bytes")
+        );
+    }
+
+    #[test]
+    fn goaway_payload_validation_rejects_empty() {
+        let err = validate_goaway_payload(&[]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("GOAWAY payload must be at least 8 bytes")
         );
     }
 
