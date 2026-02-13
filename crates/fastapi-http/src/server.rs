@@ -1309,19 +1309,13 @@ async fn h2_fc_clamp_send(
         let frame = framed.read_frame(max_frame_size).await?;
         match frame.header.frame_type() {
             http2::FrameType::WindowUpdate => {
-                if frame.payload.len() >= 4 {
-                    let increment = u32::from_be_bytes([
-                        frame.payload[0],
-                        frame.payload[1],
-                        frame.payload[2],
-                        frame.payload[3],
-                    ]) & 0x7FFF_FFFF;
-                    if frame.header.stream_id == 0 {
-                        fc.peer_window_update_connection(increment);
-                    } else {
-                        *stream_send_window += i64::from(increment);
-                    }
-                }
+                apply_peer_window_update_for_send(
+                    fc,
+                    stream_send_window,
+                    stream_id,
+                    frame.header.stream_id,
+                    &frame.payload,
+                )?;
             }
             http2::FrameType::Ping => {
                 if frame.header.flags & 0x1 == 0 && frame.payload.len() == 8 {
@@ -1331,7 +1325,13 @@ async fn h2_fc_clamp_send(
                 }
             }
             http2::FrameType::Settings => {
-                if frame.header.flags & 0x1 == 0 {
+                let is_ack = validate_settings_frame(
+                    frame.header.stream_id,
+                    frame.header.flags,
+                    &frame.payload,
+                )?;
+                if !is_ack {
+                    apply_peer_settings_for_send(fc, stream_send_window, &frame.payload)?;
                     // ACK the peer's SETTINGS.
                     framed
                         .write_frame(http2::FrameType::Settings, 0x1, 0, &[])
@@ -3760,12 +3760,25 @@ fn apply_http2_settings_with_fc(
                 }
                 *max_frame_size = value;
             }
+            0x2 => {
+                // SETTINGS_ENABLE_PUSH (RFC 7540 §6.5.2): must be 0 or 1.
+                if value > 1 {
+                    return Err(http2::Http2Error::Protocol(
+                        "SETTINGS_ENABLE_PUSH must be 0 or 1",
+                    ));
+                }
+                // We don't implement server push, so just validate.
+            }
+            0x4 => {
+                // SETTINGS_MAX_CONCURRENT_STREAMS: informational for now.
+                // We don't multiplex streams yet, so just accept the value.
+            }
             0x6 => {
                 // SETTINGS_MAX_HEADER_LIST_SIZE
                 hpack.set_max_header_list_size(value as usize);
             }
             _ => {
-                // Ignore unsupported settings.
+                // Ignore unknown/unsupported settings (RFC 7540 §6.5.2).
             }
         }
     }
@@ -3805,6 +3818,59 @@ fn validate_window_update_payload(payload: &[u8]) -> Result<(), http2::Http2Erro
         return Err(http2::Http2Error::Protocol(
             "WINDOW_UPDATE increment must be non-zero",
         ));
+    }
+
+    Ok(())
+}
+
+fn apply_peer_window_update_for_send(
+    flow_control: &mut http2::H2FlowControl,
+    stream_send_window: &mut i64,
+    current_stream_id: u32,
+    frame_stream_id: u32,
+    payload: &[u8],
+) -> Result<(), http2::Http2Error> {
+    validate_window_update_payload(payload)?;
+
+    let increment =
+        u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) & 0x7FFF_FFFF;
+    if frame_stream_id == 0 {
+        flow_control.peer_window_update_connection(increment);
+    } else if frame_stream_id == current_stream_id {
+        *stream_send_window = stream_send_window.saturating_add(i64::from(increment));
+    }
+
+    Ok(())
+}
+
+fn apply_peer_settings_for_send(
+    flow_control: &mut http2::H2FlowControl,
+    stream_send_window: &mut i64,
+    payload: &[u8],
+) -> Result<(), http2::Http2Error> {
+    if payload.len() % 6 != 0 {
+        return Err(http2::Http2Error::Protocol(
+            "SETTINGS length must be a multiple of 6",
+        ));
+    }
+
+    for chunk in payload.chunks_exact(6) {
+        let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+        let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+
+        if id == 0x3 {
+            // SETTINGS_INITIAL_WINDOW_SIZE applies to all existing stream send windows.
+            if value > 0x7FFF_FFFF {
+                return Err(http2::Http2Error::Protocol(
+                    "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum",
+                ));
+            }
+            let old = i64::from(flow_control.peer_initial_window_size());
+            let new = i64::from(value);
+            let delta = new - old;
+            flow_control.set_peer_initial_window_size(value);
+            *stream_send_window = stream_send_window.saturating_add(delta);
+        }
     }
 
     Ok(())
@@ -3982,24 +4048,52 @@ fn request_from_h2_headers(headers: http2::HeaderList) -> Result<Request, http2:
     let mut method: Option<fastapi_core::Method> = None;
     let mut path: Option<String> = None;
     let mut authority: Option<Vec<u8>> = None;
+    let mut saw_regular_headers = false;
 
     let mut req_headers: Vec<(String, Vec<u8>)> = Vec::new();
 
     for (name, value) in headers {
         if name.starts_with(b":") {
+            if saw_regular_headers {
+                return Err(http2::Http2Error::Protocol(
+                    "pseudo-headers must appear before regular headers",
+                ));
+            }
             match name.as_slice() {
-                b":method" => method = fastapi_core::Method::from_bytes(&value),
+                b":method" => {
+                    if method.is_some() {
+                        return Err(http2::Http2Error::Protocol(
+                            "duplicate :method pseudo-header",
+                        ));
+                    }
+                    method = Some(
+                        fastapi_core::Method::from_bytes(&value)
+                            .ok_or(http2::Http2Error::Protocol("invalid :method"))?,
+                    );
+                }
                 b":path" => {
+                    if path.is_some() {
+                        return Err(http2::Http2Error::Protocol("duplicate :path pseudo-header"));
+                    }
                     let s = std::str::from_utf8(&value)
                         .map_err(|_| http2::Http2Error::Protocol("non-utf8 :path"))?;
                     path = Some(s.to_string());
                 }
-                b":authority" => authority = Some(value),
-                _ => {}
+                b":authority" => {
+                    if authority.is_some() {
+                        return Err(http2::Http2Error::Protocol(
+                            "duplicate :authority pseudo-header",
+                        ));
+                    }
+                    authority = Some(value);
+                }
+                b":scheme" => {}
+                _ => return Err(http2::Http2Error::Protocol("unknown pseudo-header")),
             }
             continue;
         }
 
+        saw_regular_headers = true;
         let n = std::str::from_utf8(&name)
             .map_err(|_| http2::Http2Error::Protocol("non-utf8 header name"))?;
         req_headers.push((n.to_string(), value));
@@ -4270,6 +4364,35 @@ mod tests {
     }
 
     #[test]
+    fn settings_enable_push_accepts_zero() {
+        // SETTINGS_ENABLE_PUSH (id=0x2), value=0.
+        let payload = [0x00, 0x02, 0x00, 0x00, 0x00, 0x00];
+        let mut hpack = http2::HpackDecoder::new();
+        let mut max_frame_size = 16384u32;
+        assert!(apply_http2_settings(&mut hpack, &mut max_frame_size, &payload).is_ok());
+    }
+
+    #[test]
+    fn settings_enable_push_accepts_one() {
+        let payload = [0x00, 0x02, 0x00, 0x00, 0x00, 0x01];
+        let mut hpack = http2::HpackDecoder::new();
+        let mut max_frame_size = 16384u32;
+        assert!(apply_http2_settings(&mut hpack, &mut max_frame_size, &payload).is_ok());
+    }
+
+    #[test]
+    fn settings_enable_push_rejects_invalid_value() {
+        let payload = [0x00, 0x02, 0x00, 0x00, 0x00, 0x02];
+        let mut hpack = http2::HpackDecoder::new();
+        let mut max_frame_size = 16384u32;
+        let err = apply_http2_settings(&mut hpack, &mut max_frame_size, &payload).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("SETTINGS_ENABLE_PUSH must be 0 or 1")
+        );
+    }
+
+    #[test]
     fn rst_stream_payload_validation_accepts_valid_payload() {
         let payload = 8u32.to_be_bytes();
         assert!(validate_rst_stream_payload(1, &payload).is_ok());
@@ -4323,6 +4446,112 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("PRIORITY stream dependency must not reference itself")
+        );
+    }
+
+    #[test]
+    fn h2_send_window_update_ignores_other_streams() {
+        let mut flow_control = http2::H2FlowControl::new();
+        let mut stream_window = 123i64;
+        let payload = 7u32.to_be_bytes();
+
+        apply_peer_window_update_for_send(&mut flow_control, &mut stream_window, 3, 5, &payload)
+            .expect("window update on different stream should be ignored");
+
+        assert_eq!(stream_window, 123);
+    }
+
+    #[test]
+    fn h2_send_window_update_applies_connection_and_current_stream() {
+        let mut flow_control = http2::H2FlowControl::new();
+        let mut stream_window = 10i64;
+
+        let conn_before = flow_control.send_conn_window();
+        let conn_payload = 11u32.to_be_bytes();
+        apply_peer_window_update_for_send(
+            &mut flow_control,
+            &mut stream_window,
+            9,
+            0,
+            &conn_payload,
+        )
+        .expect("connection window update should be applied");
+        assert_eq!(flow_control.send_conn_window(), conn_before + 11);
+        assert_eq!(stream_window, 10);
+
+        let stream_payload = 13u32.to_be_bytes();
+        apply_peer_window_update_for_send(
+            &mut flow_control,
+            &mut stream_window,
+            9,
+            9,
+            &stream_payload,
+        )
+        .expect("stream window update should be applied to current stream");
+        assert_eq!(stream_window, 23);
+    }
+
+    #[test]
+    fn h2_send_settings_updates_current_stream_window_delta() {
+        let mut flow_control = http2::H2FlowControl::new();
+        let mut stream_window = 50i64;
+
+        let payload = [0x00, 0x03, 0x00, 0x01, 0x11, 0x70]; // id=3, value=70000
+        apply_peer_settings_for_send(&mut flow_control, &mut stream_window, &payload)
+            .expect("valid SETTINGS_INITIAL_WINDOW_SIZE should apply");
+
+        assert_eq!(flow_control.peer_initial_window_size(), 70_000);
+        assert_eq!(stream_window, 4_515); // 50 + (70000 - 65535)
+    }
+
+    #[test]
+    fn h2_send_settings_rejects_invalid_payload_len() {
+        let mut flow_control = http2::H2FlowControl::new();
+        let mut stream_window = 0i64;
+        let err = apply_peer_settings_for_send(&mut flow_control, &mut stream_window, &[0, 1, 2])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("SETTINGS length must be a multiple of 6")
+        );
+    }
+
+    #[test]
+    fn h2_send_settings_rejects_initial_window_too_large() {
+        let mut flow_control = http2::H2FlowControl::new();
+        let mut stream_window = 0i64;
+        let payload = [0x00, 0x03, 0x80, 0x00, 0x00, 0x00]; // id=3, value=2^31
+        let err = apply_peer_settings_for_send(&mut flow_control, &mut stream_window, &payload)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum")
+        );
+    }
+
+    #[test]
+    fn request_from_h2_headers_rejects_unknown_pseudo_header() {
+        let headers: http2::HeaderList = vec![
+            (b":method".to_vec(), b"GET".to_vec()),
+            (b":path".to_vec(), b"/".to_vec()),
+            (b":weird".to_vec(), b"value".to_vec()),
+        ];
+        let err = request_from_h2_headers(headers).unwrap_err();
+        assert!(err.to_string().contains("unknown pseudo-header"));
+    }
+
+    #[test]
+    fn request_from_h2_headers_rejects_pseudo_after_regular_header() {
+        let headers: http2::HeaderList = vec![
+            (b":method".to_vec(), b"GET".to_vec()),
+            (b":path".to_vec(), b"/".to_vec()),
+            (b"x-test".to_vec(), b"ok".to_vec()),
+            (b":authority".to_vec(), b"example.com".to_vec()),
+        ];
+        let err = request_from_h2_headers(headers).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("pseudo-headers must appear before regular headers")
         );
     }
 
