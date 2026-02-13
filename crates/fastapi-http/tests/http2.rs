@@ -1480,6 +1480,28 @@ fn h2_handshake_with_window(stream: &mut TcpStream, initial_window_size: u32) {
     write_frame(stream, 0x4, 0x1, 0, &[]);
 }
 
+/// Helper: perform H2C handshake with custom INITIAL_WINDOW_SIZE and
+/// MAX_FRAME_SIZE settings.
+fn h2_handshake_with_window_and_max_frame(
+    stream: &mut TcpStream,
+    initial_window_size: u32,
+    max_frame_size: u32,
+) {
+    stream.write_all(PREFACE).expect("write preface");
+    // Client SETTINGS with INITIAL_WINDOW_SIZE (id=0x3) and
+    // MAX_FRAME_SIZE (id=0x5).
+    let mut settings_payload = Vec::with_capacity(12);
+    settings_payload.extend_from_slice(&0x0003u16.to_be_bytes());
+    settings_payload.extend_from_slice(&initial_window_size.to_be_bytes());
+    settings_payload.extend_from_slice(&0x0005u16.to_be_bytes());
+    settings_payload.extend_from_slice(&max_frame_size.to_be_bytes());
+    write_frame(stream, 0x4, 0x0, 0, &settings_payload);
+
+    read_settings_handshake(stream);
+    // ACK server SETTINGS.
+    write_frame(stream, 0x4, 0x1, 0, &[]);
+}
+
 /// Helper: read DATA frames from the server on a given stream, sending
 /// WINDOW_UPDATE for the stream after each DATA frame to unblock the server.
 /// Returns the reassembled response body.
@@ -1609,6 +1631,93 @@ fn http2_closure_path_send_side_flow_control_small_window() {
     // Closure path returns fixed "closure-path-ok" (15 bytes) -- fits in 4096 window
     // so this validates the handshake works with custom SETTINGS_INITIAL_WINDOW_SIZE.
     assert_eq!(resp_body, b"closure-path-ok");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn http2_app_path_applies_reduced_peer_max_frame_size_during_send_wait() {
+    let body_data: Vec<u8> = (0u8..=255).cycle().take(70_000).collect();
+    let app = App::builder()
+        .get("/", move |_ctx: &RequestContext, _req: &mut Request| {
+            let body = body_data.clone();
+            async move { Response::ok().body(ResponseBody::Bytes(body)) }
+        })
+        .build();
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+
+    // Start with a large peer max-frame-size and tiny stream window so the
+    // server blocks in send-side flow control after the first byte.
+    h2_handshake_with_window_and_max_frame(&mut stream, 1, 65_535);
+
+    let header_block: [u8; 17] = [
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x5, 1, &header_block);
+    let _resp_headers = read_header_block(&mut stream, 1);
+
+    // First DATA frame must be 1 byte due to INITIAL_WINDOW_SIZE=1.
+    let first_len = loop {
+        let (ty, flags, sid, payload) = read_frame(&mut stream);
+        if ty == 0x0 && sid == 1 {
+            assert_eq!(payload.len(), 1, "expected first DATA to honor tiny window");
+            assert_eq!(
+                flags & 0x1,
+                0,
+                "response should not end after first byte for large body"
+            );
+            break payload.len();
+        }
+    };
+    assert_eq!(first_len, 1);
+
+    // While the server is stalled on flow control, lower MAX_FRAME_SIZE back to
+    // RFC minimum (16384). Server should apply it before resuming DATA.
+    let mut reduce_max = [0u8; 6];
+    reduce_max[0..2].copy_from_slice(&0x0005u16.to_be_bytes());
+    reduce_max[2..6].copy_from_slice(&16_384u32.to_be_bytes());
+    write_frame(&mut stream, 0x4, 0x0, 0, &reduce_max);
+
+    // Unblock stream send window.
+    let stream_inc = window_update_payload(60_000);
+    write_frame(&mut stream, 0x8, 0x0, 1, &stream_inc);
+
+    let mut saw_settings_ack = false;
+    let mut saw_data_after_update = false;
+    for _ in 0..32 {
+        let (ty, flags, sid, payload) = read_frame(&mut stream);
+        if ty == 0x4 && sid == 0 && (flags & 0x1) != 0 {
+            saw_settings_ack = true;
+            continue;
+        }
+        if ty == 0x0 && sid == 1 {
+            saw_data_after_update = true;
+            assert!(
+                payload.len() <= 16_384,
+                "DATA frame exceeds updated peer max frame size: {}",
+                payload.len()
+            );
+            break;
+        }
+    }
+
+    assert!(
+        saw_settings_ack,
+        "expected SETTINGS ACK after lowering max frame size"
+    );
+    assert!(
+        saw_data_after_update,
+        "expected DATA frame after stream WINDOW_UPDATE"
+    );
 
     let _ = stream.shutdown(Shutdown::Both);
     server.shutdown();

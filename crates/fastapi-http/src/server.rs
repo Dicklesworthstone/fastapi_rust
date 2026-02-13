@@ -1026,20 +1026,17 @@ where
                                 }
                                 if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                     validate_window_update_payload(&f.payload)?;
-                                    // Track send-side window updates from peer.
-                                    if f.payload.len() >= 4 {
-                                        let increment = u32::from_be_bytes([
-                                            f.payload[0],
-                                            f.payload[1],
-                                            f.payload[2],
-                                            f.payload[3],
-                                        ]) & 0x7FFF_FFFF;
-                                        if f.header.stream_id == 0 {
-                                            apply_send_conn_window_update(
-                                                &mut flow_control,
-                                                increment,
-                                            )?;
-                                        }
+                                    let increment = u32::from_be_bytes([
+                                        f.payload[0],
+                                        f.payload[1],
+                                        f.payload[2],
+                                        f.payload[3],
+                                    ]) & 0x7FFF_FFFF;
+                                    if f.header.stream_id == 0 {
+                                        apply_send_conn_window_update(
+                                            &mut flow_control,
+                                            increment,
+                                        )?;
                                     }
                                 }
                                 if f.header.frame_type() == http2::FrameType::Ping {
@@ -1145,6 +1142,18 @@ where
                     tasks.execute_all().await;
                 }
             }
+            http2::FrameType::WindowUpdate => {
+                validate_window_update_payload(&frame.payload)?;
+                let increment = u32::from_be_bytes([
+                    frame.payload[0],
+                    frame.payload[1],
+                    frame.payload[2],
+                    frame.payload[3],
+                ]) & 0x7FFF_FFFF;
+                if frame.header.stream_id == 0 {
+                    apply_send_conn_window_update(&mut flow_control, increment)?;
+                }
+            }
             _ => {}
         }
     }
@@ -1154,7 +1163,7 @@ async fn process_connection_http2_write_response(
     framed: &mut http2::FramedH2,
     response: Response,
     stream_id: u32,
-    peer_max_frame_size: u32,
+    mut peer_max_frame_size: u32,
     recv_max_frame_size: u32,
     mut flow_control: Option<&mut http2::H2FlowControl>,
 ) -> Result<(), ServerError> {
@@ -1244,6 +1253,7 @@ async fn process_connection_http2_write_response(
             }
             let mut remaining = bytes.as_slice();
             while !remaining.is_empty() {
+                let max = usize::try_from(peer_max_frame_size).unwrap_or(16 * 1024);
                 let is_last = remaining.len() <= max;
                 let flags = if is_last { FLAG_END_STREAM } else { 0 };
                 let send_len = remaining.len().min(max);
@@ -1254,6 +1264,7 @@ async fn process_connection_http2_write_response(
                     &mut stream_send_window,
                     stream_id,
                     send_len,
+                    &mut peer_max_frame_size,
                     recv_max_frame_size,
                 )
                 .await?;
@@ -1274,6 +1285,7 @@ async fn process_connection_http2_write_response(
                     Some(chunk) => {
                         let mut remaining = chunk.as_slice();
                         while !remaining.is_empty() {
+                            let max = usize::try_from(peer_max_frame_size).unwrap_or(16 * 1024);
                             let send_len = remaining.len().min(max);
                             let send_len = h2_fc_clamp_send(
                                 framed,
@@ -1281,6 +1293,7 @@ async fn process_connection_http2_write_response(
                                 &mut stream_send_window,
                                 stream_id,
                                 send_len,
+                                &mut peer_max_frame_size,
                                 recv_max_frame_size,
                             )
                             .await?;
@@ -1315,6 +1328,7 @@ async fn h2_fc_clamp_send(
     stream_send_window: &mut i64,
     stream_id: u32,
     desired: usize,
+    peer_max_frame_size: &mut u32,
     recv_max_frame_size: u32,
 ) -> Result<usize, ServerError> {
     let fc = match flow_control.as_mut() {
@@ -1325,7 +1339,8 @@ async fn h2_fc_clamp_send(
     loop {
         let conn_avail = usize::try_from(fc.send_conn_window().max(0)).unwrap_or(0);
         let stream_avail = usize::try_from((*stream_send_window).max(0)).unwrap_or(0);
-        let allowed = desired.min(conn_avail).min(stream_avail);
+        let peer_max = usize::try_from(*peer_max_frame_size).unwrap_or(16 * 1024);
+        let allowed = desired.min(conn_avail).min(stream_avail).min(peer_max);
 
         if allowed > 0 {
             let send = allowed;
@@ -1365,7 +1380,12 @@ async fn h2_fc_clamp_send(
                     &frame.payload,
                 )?;
                 if !is_ack {
-                    apply_peer_settings_for_send(fc, stream_send_window, &frame.payload)?;
+                    apply_peer_settings_for_send(
+                        fc,
+                        stream_send_window,
+                        peer_max_frame_size,
+                        &frame.payload,
+                    )?;
                     // ACK the peer's SETTINGS.
                     framed
                         .write_frame(http2::FrameType::Settings, 0x1, 0, &[])
@@ -2720,20 +2740,17 @@ impl TcpServer {
                                     }
                                     if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                         validate_window_update_payload(&f.payload)?;
-                                        // Track send-side window updates from peer.
-                                        if f.payload.len() >= 4 {
-                                            let increment = u32::from_be_bytes([
-                                                f.payload[0],
-                                                f.payload[1],
-                                                f.payload[2],
-                                                f.payload[3],
-                                            ]) & 0x7FFF_FFFF;
-                                            if f.header.stream_id == 0 {
-                                                apply_send_conn_window_update(
-                                                    &mut flow_control,
-                                                    increment,
-                                                )?;
-                                            }
+                                        let increment = u32::from_be_bytes([
+                                            f.payload[0],
+                                            f.payload[1],
+                                            f.payload[2],
+                                            f.payload[3],
+                                        ]) & 0x7FFF_FFFF;
+                                        if f.header.stream_id == 0 {
+                                            apply_send_conn_window_update(
+                                                &mut flow_control,
+                                                increment,
+                                            )?;
                                         }
                                     }
                                     if f.header.frame_type() == http2::FrameType::Ping {
@@ -2857,16 +2874,14 @@ impl TcpServer {
                 }
                 http2::FrameType::WindowUpdate => {
                     validate_window_update_payload(&frame.payload)?;
-                    if frame.payload.len() >= 4 {
-                        let increment = u32::from_be_bytes([
-                            frame.payload[0],
-                            frame.payload[1],
-                            frame.payload[2],
-                            frame.payload[3],
-                        ]) & 0x7FFF_FFFF;
-                        if frame.header.stream_id == 0 {
-                            apply_send_conn_window_update(&mut flow_control, increment)?;
-                        }
+                    let increment = u32::from_be_bytes([
+                        frame.payload[0],
+                        frame.payload[1],
+                        frame.payload[2],
+                        frame.payload[3],
+                    ]) & 0x7FFF_FFFF;
+                    if frame.header.stream_id == 0 {
+                        apply_send_conn_window_update(&mut flow_control, increment)?;
                     }
                 }
                 _ => {
@@ -2881,7 +2896,7 @@ impl TcpServer {
         framed: &mut http2::FramedH2,
         response: Response,
         stream_id: u32,
-        peer_max_frame_size: u32,
+        mut peer_max_frame_size: u32,
         recv_max_frame_size: u32,
         mut flow_control: Option<&mut http2::H2FlowControl>,
     ) -> Result<(), ServerError> {
@@ -2977,6 +2992,7 @@ impl TcpServer {
                 }
                 let mut remaining = bytes.as_slice();
                 while !remaining.is_empty() {
+                    let max = usize::try_from(peer_max_frame_size).unwrap_or(16 * 1024);
                     let send_len = remaining.len().min(max);
                     let send_len = h2_fc_clamp_send(
                         framed,
@@ -2984,6 +3000,7 @@ impl TcpServer {
                         &mut stream_send_window,
                         stream_id,
                         send_len,
+                        &mut peer_max_frame_size,
                         recv_max_frame_size,
                     )
                     .await?;
@@ -3005,6 +3022,7 @@ impl TcpServer {
                         Some(chunk) => {
                             let mut remaining = chunk.as_slice();
                             while !remaining.is_empty() {
+                                let max = usize::try_from(peer_max_frame_size).unwrap_or(16 * 1024);
                                 let send_len = remaining.len().min(max);
                                 let send_len = h2_fc_clamp_send(
                                     framed,
@@ -3012,6 +3030,7 @@ impl TcpServer {
                                     &mut stream_send_window,
                                     stream_id,
                                     send_len,
+                                    &mut peer_max_frame_size,
                                     recv_max_frame_size,
                                 )
                                 .await?;
@@ -3256,20 +3275,17 @@ impl TcpServer {
                                     }
                                     if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                         validate_window_update_payload(&f.payload)?;
-                                        // Track send-side window updates from peer.
-                                        if f.payload.len() >= 4 {
-                                            let increment = u32::from_be_bytes([
-                                                f.payload[0],
-                                                f.payload[1],
-                                                f.payload[2],
-                                                f.payload[3],
-                                            ]) & 0x7FFF_FFFF;
-                                            if f.header.stream_id == 0 {
-                                                apply_send_conn_window_update(
-                                                    &mut flow_control,
-                                                    increment,
-                                                )?;
-                                            }
+                                        let increment = u32::from_be_bytes([
+                                            f.payload[0],
+                                            f.payload[1],
+                                            f.payload[2],
+                                            f.payload[3],
+                                        ]) & 0x7FFF_FFFF;
+                                        if f.header.stream_id == 0 {
+                                            apply_send_conn_window_update(
+                                                &mut flow_control,
+                                                increment,
+                                            )?;
                                         }
                                     }
                                     if f.header.frame_type() == http2::FrameType::Ping {
@@ -3386,16 +3402,14 @@ impl TcpServer {
                 }
                 http2::FrameType::WindowUpdate => {
                     validate_window_update_payload(&frame.payload)?;
-                    if frame.payload.len() >= 4 {
-                        let increment = u32::from_be_bytes([
-                            frame.payload[0],
-                            frame.payload[1],
-                            frame.payload[2],
-                            frame.payload[3],
-                        ]) & 0x7FFF_FFFF;
-                        if frame.header.stream_id == 0 {
-                            apply_send_conn_window_update(&mut flow_control, increment)?;
-                        }
+                    let increment = u32::from_be_bytes([
+                        frame.payload[0],
+                        frame.payload[1],
+                        frame.payload[2],
+                        frame.payload[3],
+                    ]) & 0x7FFF_FFFF;
+                    if frame.header.stream_id == 0 {
+                        apply_send_conn_window_update(&mut flow_control, increment)?;
                     }
                 }
                 _ => {}
@@ -3964,6 +3978,7 @@ fn apply_peer_window_update_for_send(
 fn apply_peer_settings_for_send(
     flow_control: &mut http2::H2FlowControl,
     stream_send_window: &mut i64,
+    peer_max_frame_size: &mut u32,
     payload: &[u8],
 ) -> Result<(), http2::Http2Error> {
     if payload.len() % 6 != 0 {
@@ -3986,14 +4001,22 @@ fn apply_peer_settings_for_send(
             let old = i64::from(flow_control.peer_initial_window_size());
             let new = i64::from(value);
             let delta = new - old;
-            flow_control.set_peer_initial_window_size(value);
             let updated = *stream_send_window + delta;
             if updated > MAX_FLOW_CONTROL_WINDOW {
                 return Err(http2::Http2Error::Protocol(
                     "SETTINGS_INITIAL_WINDOW_SIZE change causes stream window to exceed 2^31-1",
                 ));
             }
+            flow_control.set_peer_initial_window_size(value);
             *stream_send_window = updated;
+        } else if id == 0x5 {
+            // SETTINGS_MAX_FRAME_SIZE (RFC 7540 §6.5.2): 16384..=16777215.
+            if !(16_384..=16_777_215).contains(&value) {
+                return Err(http2::Http2Error::Protocol(
+                    "invalid SETTINGS_MAX_FRAME_SIZE",
+                ));
+            }
+            *peer_max_frame_size = value;
         }
     }
 
@@ -4660,21 +4683,34 @@ mod tests {
     fn h2_send_settings_updates_current_stream_window_delta() {
         let mut flow_control = http2::H2FlowControl::new();
         let mut stream_window = 50i64;
+        let mut peer_max_frame_size = 16_384u32;
 
         let payload = [0x00, 0x03, 0x00, 0x01, 0x11, 0x70]; // id=3, value=70000
-        apply_peer_settings_for_send(&mut flow_control, &mut stream_window, &payload)
-            .expect("valid SETTINGS_INITIAL_WINDOW_SIZE should apply");
+        apply_peer_settings_for_send(
+            &mut flow_control,
+            &mut stream_window,
+            &mut peer_max_frame_size,
+            &payload,
+        )
+        .expect("valid SETTINGS_INITIAL_WINDOW_SIZE should apply");
 
         assert_eq!(flow_control.peer_initial_window_size(), 70_000);
         assert_eq!(stream_window, 4_515); // 50 + (70000 - 65535)
+        assert_eq!(peer_max_frame_size, 16_384);
     }
 
     #[test]
     fn h2_send_settings_rejects_invalid_payload_len() {
         let mut flow_control = http2::H2FlowControl::new();
         let mut stream_window = 0i64;
-        let err = apply_peer_settings_for_send(&mut flow_control, &mut stream_window, &[0, 1, 2])
-            .unwrap_err();
+        let mut peer_max_frame_size = 16_384u32;
+        let err = apply_peer_settings_for_send(
+            &mut flow_control,
+            &mut stream_window,
+            &mut peer_max_frame_size,
+            &[0, 1, 2],
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("SETTINGS length must be a multiple of 6")
@@ -4685,9 +4721,15 @@ mod tests {
     fn h2_send_settings_rejects_initial_window_too_large() {
         let mut flow_control = http2::H2FlowControl::new();
         let mut stream_window = 0i64;
+        let mut peer_max_frame_size = 16_384u32;
         let payload = [0x00, 0x03, 0x80, 0x00, 0x00, 0x00]; // id=3, value=2^31
-        let err = apply_peer_settings_for_send(&mut flow_control, &mut stream_window, &payload)
-            .unwrap_err();
+        let err = apply_peer_settings_for_send(
+            &mut flow_control,
+            &mut stream_window,
+            &mut peer_max_frame_size,
+            &payload,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum")
@@ -4697,6 +4739,7 @@ mod tests {
     #[test]
     fn h2_send_settings_window_delta_overflow_is_flow_control_error() {
         let mut flow_control = http2::H2FlowControl::new();
+        let mut peer_max_frame_size = 16_384u32;
         // Start with a stream window near the maximum.
         let mut stream_window: i64 = 0x7FFF_FFFF - 10;
         // Increase INITIAL_WINDOW_SIZE by more than 10 from default (65535).
@@ -4711,9 +4754,49 @@ mod tests {
             new_initial.to_be_bytes()[2],
             new_initial.to_be_bytes()[3],
         ];
-        let err = apply_peer_settings_for_send(&mut flow_control, &mut stream_window, &payload)
-            .unwrap_err();
+        let err = apply_peer_settings_for_send(
+            &mut flow_control,
+            &mut stream_window,
+            &mut peer_max_frame_size,
+            &payload,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("stream window to exceed 2^31-1"));
+    }
+
+    #[test]
+    fn h2_send_settings_updates_peer_max_frame_size() {
+        let mut flow_control = http2::H2FlowControl::new();
+        let mut stream_window = 0i64;
+        let mut peer_max_frame_size = 65_535u32;
+        let payload = [0x00, 0x05, 0x00, 0x00, 0x40, 0x00]; // id=5, value=16384
+
+        apply_peer_settings_for_send(
+            &mut flow_control,
+            &mut stream_window,
+            &mut peer_max_frame_size,
+            &payload,
+        )
+        .expect("valid SETTINGS_MAX_FRAME_SIZE should apply");
+
+        assert_eq!(peer_max_frame_size, 16_384);
+    }
+
+    #[test]
+    fn h2_send_settings_rejects_invalid_max_frame_size() {
+        let mut flow_control = http2::H2FlowControl::new();
+        let mut stream_window = 0i64;
+        let mut peer_max_frame_size = 16_384u32;
+        let payload = [0x00, 0x05, 0x00, 0x00, 0x3F, 0xFF]; // id=5, value=16383
+
+        let err = apply_peer_settings_for_send(
+            &mut flow_control,
+            &mut stream_window,
+            &mut peer_max_frame_size,
+            &payload,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid SETTINGS_MAX_FRAME_SIZE"));
     }
 
     #[test]
