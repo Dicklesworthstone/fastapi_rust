@@ -1124,26 +1124,24 @@ fn parse_content_disposition(value: &str) -> Result<(String, Option<String>), Mu
             continue;
         }
 
-        if let Some(n) = part
-            .strip_prefix("name=")
-            .or_else(|| part.strip_prefix("NAME="))
-        {
-            name = Some(unquote(n));
-        } else if let Some(f) = part
-            .strip_prefix("filename=")
-            .or_else(|| part.strip_prefix("FILENAME="))
-        {
-            let unquoted = unquote(f);
-            if unquoted.contains("..")
-                || unquoted.contains('/')
-                || unquoted.contains('\\')
-                || unquoted.contains('\0')
-            {
-                return Err(MultipartError::InvalidContentDisposition {
-                    detail: "filename contains path traversal characters".to_string(),
-                });
+        if let Some((key, raw_value)) = part.split_once('=') {
+            let key = key.trim();
+            let value = raw_value.trim();
+            if key.eq_ignore_ascii_case("name") {
+                name = Some(unquote(value));
+            } else if key.eq_ignore_ascii_case("filename") {
+                let unquoted = unquote(value);
+                if unquoted.contains("..")
+                    || unquoted.contains('/')
+                    || unquoted.contains('\\')
+                    || unquoted.contains('\0')
+                {
+                    return Err(MultipartError::InvalidContentDisposition {
+                        detail: "filename contains path traversal characters".to_string(),
+                    });
+                }
+                filename = Some(unquoted);
             }
-            filename = Some(unquoted);
         }
     }
 
@@ -1369,6 +1367,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_content_disposition_case_insensitive_params() {
+        let (name, filename) =
+            parse_content_disposition("form-data; Name=\"field\"; FileName=\"upload.txt\"")
+                .expect("content disposition should parse");
+        assert_eq!(name, "field");
+        assert_eq!(filename.as_deref(), Some("upload.txt"));
+    }
+
+    #[test]
     fn test_parse_simple_form() {
         let boundary = "----boundary";
         let body = concat!(
@@ -1393,6 +1400,33 @@ mod tests {
 
         assert_eq!(parts[1].name, "field2");
         assert_eq!(parts[1].text(), Some("value2"));
+    }
+
+    #[test]
+    fn test_parse_simple_form_with_mixed_case_disposition_params() {
+        let boundary = "----boundary";
+        let body = concat!(
+            "------boundary\r\n",
+            "Content-Disposition: form-data; Name=\"field1\"\r\n",
+            "\r\n",
+            "value1\r\n",
+            "------boundary\r\n",
+            "Content-Disposition: form-data; Name=\"file\"; FileName=\"note.txt\"\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "hello\r\n",
+            "------boundary--\r\n"
+        );
+
+        let parser = MultipartParser::new(boundary, MultipartConfig::default());
+        let parts = parser.parse(body.as_bytes()).expect("multipart parse");
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "field1");
+        assert_eq!(parts[0].text(), Some("value1"));
+        assert_eq!(parts[1].name, "file");
+        assert_eq!(parts[1].filename.as_deref(), Some("note.txt"));
+        assert_eq!(parts[1].text(), Some("hello"));
     }
 
     #[test]

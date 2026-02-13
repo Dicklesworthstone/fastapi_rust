@@ -430,6 +430,7 @@ fn parse_kv_list(input: &str) -> Result<std::collections::HashMap<String, String
         let value = if bytes[i] == b'"' {
             i += 1;
             let mut buf = String::new();
+            let mut closed = false;
             while i < bytes.len() {
                 let b = bytes[i];
                 i += 1;
@@ -442,9 +443,15 @@ fn parse_kv_list(input: &str) -> Result<std::collections::HashMap<String, String
                         i += 1;
                         buf.push(esc as char);
                     }
-                    b'"' => break,
+                    b'"' => {
+                        closed = true;
+                        break;
+                    }
                     _ => buf.push(b as char),
                 }
+            }
+            if !closed {
+                return Err("unterminated quoted value");
             }
             buf
         } else {
@@ -742,5 +749,12 @@ mod tests {
         let err = futures_executor::block_on(DigestAuth::from_request(&ctx, &mut req)).unwrap_err();
         assert_eq!(err.kind, DigestAuthErrorKind::MissingHeader);
         assert_eq!(err.into_response().status().as_u16(), 401);
+    }
+
+    #[test]
+    fn parse_rejects_unterminated_quoted_value() {
+        let hdr = "Digest username=\"Mufasa, nonce=\"abc\", uri=\"/\", response=\"0123456789abcdef0123456789abcdef\"";
+        let err = DigestAuth::parse(hdr).expect_err("unterminated quoted values must be rejected");
+        assert!(matches!(err.kind, DigestAuthErrorKind::InvalidFormat(_)));
     }
 }
