@@ -850,10 +850,11 @@ where
 
     let mut framed = http2::FramedH2::new(stream, Vec::new());
     let mut hpack = http2::HpackDecoder::new();
-    let mut max_frame_size: u32 = 16 * 1024;
+    let recv_max_frame_size: u32 = 16 * 1024;
+    let mut peer_max_frame_size: u32 = 16 * 1024;
     let mut flow_control = http2::H2FlowControl::new();
 
-    let first = framed.read_frame(max_frame_size).await?;
+    let first = framed.read_frame(recv_max_frame_size).await?;
     if first.header.frame_type() != http2::FrameType::Settings
         || first.header.stream_id != 0
         || (first.header.flags & FLAG_ACK) != 0
@@ -862,7 +863,7 @@ where
     }
     apply_http2_settings_with_fc(
         &mut hpack,
-        &mut max_frame_size,
+        &mut peer_max_frame_size,
         Some(&mut flow_control),
         &first.payload,
     )?;
@@ -883,7 +884,7 @@ where
             return Ok(());
         }
 
-        let frame = framed.read_frame(max_frame_size).await?;
+        let frame = framed.read_frame(recv_max_frame_size).await?;
         match frame.header.frame_type() {
             http2::FrameType::Settings => {
                 let is_ack = validate_settings_frame(
@@ -896,7 +897,7 @@ where
                 }
                 apply_http2_settings_with_fc(
                     &mut hpack,
-                    &mut max_frame_size,
+                    &mut peer_max_frame_size,
                     Some(&mut flow_control),
                     &frame.payload,
                 )?;
@@ -936,7 +937,7 @@ where
 
                 if (frame.header.flags & FLAG_END_HEADERS) == 0 {
                     loop {
-                        let cont = framed.read_frame(max_frame_size).await?;
+                        let cont = framed.read_frame(recv_max_frame_size).await?;
                         if cont.header.frame_type() != http2::FrameType::Continuation
                             || cont.header.stream_id != stream_id
                         {
@@ -962,7 +963,7 @@ where
                     let mut stream_reset = false;
                     let mut stream_received: u32 = 0;
                     loop {
-                        let f = framed.read_frame(max_frame_size).await?;
+                        let f = framed.read_frame(recv_max_frame_size).await?;
                         match f.header.frame_type() {
                             http2::FrameType::Data if f.header.stream_id == 0 => {
                                 return Err(http2::Http2Error::Protocol(
@@ -1068,7 +1069,7 @@ where
                                     if !is_ack {
                                         apply_http2_settings_with_fc(
                                             &mut hpack,
-                                            &mut max_frame_size,
+                                            &mut peer_max_frame_size,
                                             Some(&mut flow_control),
                                             &f.payload,
                                         )?;
@@ -1108,7 +1109,8 @@ where
                         &mut framed,
                         response,
                         stream_id,
-                        max_frame_size,
+                        peer_max_frame_size,
+                        recv_max_frame_size,
                         Some(&mut flow_control),
                     )
                     .await?;
@@ -1120,7 +1122,8 @@ where
                         &mut framed,
                         response,
                         stream_id,
-                        max_frame_size,
+                        peer_max_frame_size,
+                        recv_max_frame_size,
                         Some(&mut flow_control),
                     )
                     .await?;
@@ -1132,7 +1135,8 @@ where
                     &mut framed,
                     response,
                     stream_id,
-                    max_frame_size,
+                    peer_max_frame_size,
+                    recv_max_frame_size,
                     Some(&mut flow_control),
                 )
                 .await?;
@@ -1150,7 +1154,8 @@ async fn process_connection_http2_write_response(
     framed: &mut http2::FramedH2,
     response: Response,
     stream_id: u32,
-    max_frame_size: u32,
+    peer_max_frame_size: u32,
+    recv_max_frame_size: u32,
     mut flow_control: Option<&mut http2::H2FlowControl>,
 ) -> Result<(), ServerError> {
     use std::future::poll_fn;
@@ -1188,7 +1193,7 @@ async fn process_connection_http2_write_response(
         http2::hpack_encode_literal_without_indexing(&mut block, n.as_bytes(), value);
     }
 
-    let max = usize::try_from(max_frame_size).unwrap_or(16 * 1024);
+    let max = usize::try_from(peer_max_frame_size).unwrap_or(16 * 1024);
     let mut headers_flags = FLAG_END_HEADERS;
     if body.is_empty() {
         headers_flags |= FLAG_END_STREAM;
@@ -1249,7 +1254,7 @@ async fn process_connection_http2_write_response(
                     &mut stream_send_window,
                     stream_id,
                     send_len,
-                    max_frame_size,
+                    recv_max_frame_size,
                 )
                 .await?;
 
@@ -1276,7 +1281,7 @@ async fn process_connection_http2_write_response(
                                 &mut stream_send_window,
                                 stream_id,
                                 send_len,
-                                max_frame_size,
+                                recv_max_frame_size,
                             )
                             .await?;
 
@@ -1310,7 +1315,7 @@ async fn h2_fc_clamp_send(
     stream_send_window: &mut i64,
     stream_id: u32,
     desired: usize,
-    max_frame_size: u32,
+    recv_max_frame_size: u32,
 ) -> Result<usize, ServerError> {
     let fc = match flow_control.as_mut() {
         Some(fc) => fc,
@@ -1330,7 +1335,7 @@ async fn h2_fc_clamp_send(
         }
 
         // Window exhausted -- read peer frames until we get a WINDOW_UPDATE.
-        let frame = framed.read_frame(max_frame_size).await?;
+        let frame = framed.read_frame(recv_max_frame_size).await?;
         match frame.header.frame_type() {
             http2::FrameType::WindowUpdate => {
                 apply_peer_window_update_for_send(
@@ -2507,10 +2512,11 @@ impl TcpServer {
 
         let mut framed = http2::FramedH2::new(stream, Vec::new());
         let mut hpack = http2::HpackDecoder::new();
-        let mut max_frame_size: u32 = 16 * 1024; // RFC 7540 default.
+        let recv_max_frame_size: u32 = 16 * 1024; // RFC 7540 default receive limit.
+        let mut peer_max_frame_size: u32 = 16 * 1024;
         let mut flow_control = http2::H2FlowControl::new();
 
-        let first = framed.read_frame(max_frame_size).await?;
+        let first = framed.read_frame(recv_max_frame_size).await?;
         self.record_bytes_in((http2::FrameHeader::LEN + first.payload.len()) as u64);
 
         if first.header.frame_type() != http2::FrameType::Settings
@@ -2524,7 +2530,7 @@ impl TcpServer {
 
         apply_http2_settings_with_fc(
             &mut hpack,
-            &mut max_frame_size,
+            &mut peer_max_frame_size,
             Some(&mut flow_control),
             &first.payload,
         )?;
@@ -2547,7 +2553,7 @@ impl TcpServer {
                 return Ok(());
             }
 
-            let frame = framed.read_frame(max_frame_size).await?;
+            let frame = framed.read_frame(recv_max_frame_size).await?;
             self.record_bytes_in((http2::FrameHeader::LEN + frame.payload.len()) as u64);
 
             match frame.header.frame_type() {
@@ -2563,7 +2569,7 @@ impl TcpServer {
                     }
                     apply_http2_settings_with_fc(
                         &mut hpack,
-                        &mut max_frame_size,
+                        &mut peer_max_frame_size,
                         Some(&mut flow_control),
                         &frame.payload,
                     )?;
@@ -2610,7 +2616,7 @@ impl TcpServer {
                     // CONTINUATION frames until END_HEADERS.
                     if (frame.header.flags & FLAG_END_HEADERS) == 0 {
                         loop {
-                            let cont = framed.read_frame(max_frame_size).await?;
+                            let cont = framed.read_frame(recv_max_frame_size).await?;
                             self.record_bytes_in(
                                 (http2::FrameHeader::LEN + cont.payload.len()) as u64,
                             );
@@ -2642,7 +2648,7 @@ impl TcpServer {
                         let mut stream_reset = false;
                         let mut stream_received: u32 = 0;
                         loop {
-                            let f = framed.read_frame(max_frame_size).await?;
+                            let f = framed.read_frame(recv_max_frame_size).await?;
                             self.record_bytes_in(
                                 (http2::FrameHeader::LEN + f.payload.len()) as u64,
                             );
@@ -2760,7 +2766,7 @@ impl TcpServer {
                                         if !is_ack {
                                             apply_http2_settings_with_fc(
                                                 &mut hpack,
-                                                &mut max_frame_size,
+                                                &mut peer_max_frame_size,
                                                 Some(&mut flow_control),
                                                 &f.payload,
                                             )?;
@@ -2808,7 +2814,8 @@ impl TcpServer {
                             &mut framed,
                             response,
                             stream_id,
-                            max_frame_size,
+                            peer_max_frame_size,
+                            recv_max_frame_size,
                             Some(&mut flow_control),
                         )
                         .await?;
@@ -2820,7 +2827,8 @@ impl TcpServer {
                             &mut framed,
                             response,
                             stream_id,
-                            max_frame_size,
+                            peer_max_frame_size,
+                            recv_max_frame_size,
                             Some(&mut flow_control),
                         )
                         .await?;
@@ -2834,7 +2842,8 @@ impl TcpServer {
                         &mut framed,
                         response,
                         stream_id,
-                        max_frame_size,
+                        peer_max_frame_size,
+                        recv_max_frame_size,
                         Some(&mut flow_control),
                     )
                     .await?;
@@ -2872,7 +2881,8 @@ impl TcpServer {
         framed: &mut http2::FramedH2,
         response: Response,
         stream_id: u32,
-        max_frame_size: u32,
+        peer_max_frame_size: u32,
+        recv_max_frame_size: u32,
         mut flow_control: Option<&mut http2::H2FlowControl>,
     ) -> Result<(), ServerError> {
         use std::future::poll_fn;
@@ -2912,7 +2922,7 @@ impl TcpServer {
         }
 
         // Write HEADERS + CONTINUATION if needed.
-        let max = usize::try_from(max_frame_size).unwrap_or(16 * 1024);
+        let max = usize::try_from(peer_max_frame_size).unwrap_or(16 * 1024);
         if block.len() <= max {
             let mut flags = FLAG_END_HEADERS;
             if body.is_empty() {
@@ -2974,7 +2984,7 @@ impl TcpServer {
                         &mut stream_send_window,
                         stream_id,
                         send_len,
-                        max_frame_size,
+                        recv_max_frame_size,
                     )
                     .await?;
 
@@ -3002,7 +3012,7 @@ impl TcpServer {
                                     &mut stream_send_window,
                                     stream_id,
                                     send_len,
-                                    max_frame_size,
+                                    recv_max_frame_size,
                                 )
                                 .await?;
 
@@ -3044,10 +3054,11 @@ impl TcpServer {
 
         let mut framed = http2::FramedH2::new(stream, Vec::new());
         let mut hpack = http2::HpackDecoder::new();
-        let mut max_frame_size: u32 = 16 * 1024;
+        let recv_max_frame_size: u32 = 16 * 1024;
+        let mut peer_max_frame_size: u32 = 16 * 1024;
         let mut flow_control = http2::H2FlowControl::new();
 
-        let first = framed.read_frame(max_frame_size).await?;
+        let first = framed.read_frame(recv_max_frame_size).await?;
         self.record_bytes_in((http2::FrameHeader::LEN + first.payload.len()) as u64);
 
         if first.header.frame_type() != http2::FrameType::Settings
@@ -3061,7 +3072,7 @@ impl TcpServer {
 
         apply_http2_settings_with_fc(
             &mut hpack,
-            &mut max_frame_size,
+            &mut peer_max_frame_size,
             Some(&mut flow_control),
             &first.payload,
         )?;
@@ -3085,7 +3096,7 @@ impl TcpServer {
                 return Ok(());
             }
 
-            let frame = framed.read_frame(max_frame_size).await?;
+            let frame = framed.read_frame(recv_max_frame_size).await?;
             self.record_bytes_in((http2::FrameHeader::LEN + frame.payload.len()) as u64);
 
             match frame.header.frame_type() {
@@ -3100,7 +3111,7 @@ impl TcpServer {
                     }
                     apply_http2_settings_with_fc(
                         &mut hpack,
-                        &mut max_frame_size,
+                        &mut peer_max_frame_size,
                         Some(&mut flow_control),
                         &frame.payload,
                     )?;
@@ -3144,7 +3155,7 @@ impl TcpServer {
 
                     if (frame.header.flags & FLAG_END_HEADERS) == 0 {
                         loop {
-                            let cont = framed.read_frame(max_frame_size).await?;
+                            let cont = framed.read_frame(recv_max_frame_size).await?;
                             self.record_bytes_in(
                                 (http2::FrameHeader::LEN + cont.payload.len()) as u64,
                             );
@@ -3173,7 +3184,7 @@ impl TcpServer {
                         let mut stream_reset = false;
                         let mut stream_received: u32 = 0;
                         loop {
-                            let f = framed.read_frame(max_frame_size).await?;
+                            let f = framed.read_frame(recv_max_frame_size).await?;
                             self.record_bytes_in(
                                 (http2::FrameHeader::LEN + f.payload.len()) as u64,
                             );
@@ -3291,7 +3302,7 @@ impl TcpServer {
                                         if !is_ack {
                                             apply_http2_settings_with_fc(
                                                 &mut hpack,
-                                                &mut max_frame_size,
+                                                &mut peer_max_frame_size,
                                                 Some(&mut flow_control),
                                                 &f.payload,
                                             )?;
@@ -3342,7 +3353,8 @@ impl TcpServer {
                             &mut framed,
                             response,
                             stream_id,
-                            max_frame_size,
+                            peer_max_frame_size,
+                            recv_max_frame_size,
                             Some(&mut flow_control),
                         )
                         .await?;
@@ -3353,7 +3365,8 @@ impl TcpServer {
                             &mut framed,
                             response,
                             stream_id,
-                            max_frame_size,
+                            peer_max_frame_size,
+                            recv_max_frame_size,
                             Some(&mut flow_control),
                         )
                         .await?;
@@ -3365,7 +3378,8 @@ impl TcpServer {
                         &mut framed,
                         response,
                         stream_id,
-                        max_frame_size,
+                        peer_max_frame_size,
+                        recv_max_frame_size,
                         Some(&mut flow_control),
                     )
                     .await?;
