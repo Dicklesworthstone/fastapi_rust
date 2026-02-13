@@ -47,6 +47,7 @@
 //! ```
 
 use parking_lot::Mutex;
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
@@ -385,56 +386,39 @@ impl CoverageReport {
     /// Generate JSON representation.
     #[must_use]
     pub fn to_json(&self) -> String {
-        let mut json = String::from("{\n");
-        json.push_str("  \"summary\": {\n");
-        json.push_str(&format!(
-            "    \"endpoint_coverage\": {:.4},\n",
-            self.endpoint_coverage()
-        ));
-        json.push_str(&format!(
-            "    \"branch_coverage\": {:.4},\n",
-            self.branch_coverage()
-        ));
-        json.push_str(&format!(
-            "    \"total_endpoints\": {},\n",
-            self.endpoints.len()
-        ));
-        json.push_str(&format!(
-            "    \"tested_endpoints\": {}\n",
-            self.endpoints
-                .values()
-                .filter(|h| h.total_calls > 0)
-                .count()
-        ));
-        json.push_str("  },\n");
+        let tested_endpoints = self
+            .endpoints
+            .values()
+            .filter(|h| h.total_calls > 0)
+            .count();
 
-        json.push_str("  \"endpoints\": [\n");
-        let endpoint_entries: Vec<_> = self
+        let endpoints: Vec<_> = self
             .endpoints
             .iter()
             .map(|((method, path), hits)| {
-                format!(
-                    "    {{\n\
-                     \"method\": \"{method}\",\n\
-                     \"path\": \"{path}\",\n\
-                     \"calls\": {},\n\
-                     \"success\": {},\n\
-                     \"client_errors\": {},\n\
-                     \"server_errors\": {}\n\
-                     }}",
-                    hits.total_calls,
-                    hits.success_count,
-                    hits.client_error_count,
-                    hits.server_error_count
-                )
-                .replace('\n', "\n    ")
+                json!({
+                    "method": method,
+                    "path": path,
+                    "calls": hits.total_calls,
+                    "success": hits.success_count,
+                    "client_errors": hits.client_error_count,
+                    "server_errors": hits.server_error_count,
+                })
             })
             .collect();
-        json.push_str(&endpoint_entries.join(",\n"));
-        json.push_str("\n  ]\n");
-        json.push('}');
 
-        json
+        let doc = json!({
+            "summary": {
+                "endpoint_coverage": self.endpoint_coverage(),
+                "branch_coverage": self.branch_coverage(),
+                "total_endpoints": self.endpoints.len(),
+                "tested_endpoints": tested_endpoints,
+            },
+            "endpoints": endpoints,
+        });
+
+        serde_json::to_string_pretty(&doc)
+            .expect("serializing coverage report to JSON should never fail")
     }
 
     /// Write coverage report as HTML.
@@ -782,6 +766,21 @@ mod tests {
 
         assert!(json.contains("\"endpoint_coverage\""));
         assert!(json.contains("\"/test\""));
+    }
+
+    #[test]
+    fn test_report_json_escapes_special_characters() {
+        let tracker = CoverageTracker::new();
+        let path = "/te\"st\\path";
+        tracker.register_endpoint(Method::Get, path);
+        tracker.record_hit(Method::Get, path, 200);
+
+        let report = tracker.report();
+        let json = report.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("generated JSON must be valid");
+
+        assert_eq!(parsed["endpoints"][0]["path"], path);
     }
 
     #[test]

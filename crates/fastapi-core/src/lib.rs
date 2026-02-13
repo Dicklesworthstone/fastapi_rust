@@ -53,6 +53,7 @@
 
 pub mod app;
 mod context;
+pub mod coverage;
 mod dependency;
 pub mod digest;
 pub mod docs;
