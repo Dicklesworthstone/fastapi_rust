@@ -875,9 +875,11 @@ where
         .await?;
 
     let default_body_limit = config.parse_limits.max_request_size;
+    let mut last_stream_id: u32 = 0;
 
     loop {
         if cx.is_cancel_requested() {
+            let _ = send_goaway(&mut framed, last_stream_id, h2_error_code::NO_ERROR).await;
             return Ok(());
         }
 
@@ -920,6 +922,7 @@ where
                     );
                 }
                 let stream_id = frame.header.stream_id;
+                last_stream_id = stream_id;
                 let (end_stream, mut header_block) =
                     extract_header_block_fragment(frame.header.flags, &frame.payload)?;
 
@@ -1001,6 +1004,18 @@ where
                                 }
                                 if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                     validate_window_update_payload(&f.payload)?;
+                                    // Track send-side window updates from peer.
+                                    if f.payload.len() >= 4 {
+                                        let increment = u32::from_be_bytes([
+                                            f.payload[0],
+                                            f.payload[1],
+                                            f.payload[2],
+                                            f.payload[3],
+                                        ]) & 0x7FFF_FFFF;
+                                        if f.header.stream_id == 0 {
+                                            flow_control.peer_window_update_connection(increment);
+                                        }
+                                    }
                                 }
                                 if f.header.frame_type() == http2::FrameType::Ping {
                                     if f.header.stream_id != 0 || f.payload.len() != 8 {
@@ -1070,6 +1085,7 @@ where
                         response,
                         stream_id,
                         max_frame_size,
+                        Some(&mut flow_control),
                     )
                     .await?;
                     continue;
@@ -1081,6 +1097,7 @@ where
                         response,
                         stream_id,
                         max_frame_size,
+                        Some(&mut flow_control),
                     )
                     .await?;
                     continue;
@@ -1092,6 +1109,7 @@ where
                     response,
                     stream_id,
                     max_frame_size,
+                    Some(&mut flow_control),
                 )
                 .await?;
 
@@ -1109,6 +1127,7 @@ async fn process_connection_http2_write_response(
     response: Response,
     stream_id: u32,
     max_frame_size: u32,
+    mut flow_control: Option<&mut http2::H2FlowControl>,
 ) -> Result<(), ServerError> {
     use std::future::poll_fn;
 
@@ -1183,6 +1202,11 @@ async fn process_connection_http2_write_response(
             .await?;
     }
 
+    // Track per-stream send window (peer's receive window for this stream).
+    let mut stream_send_window: i64 = flow_control
+        .as_ref()
+        .map_or(i64::MAX, |fc| i64::from(fc.peer_initial_window_size()));
+
     match body {
         fastapi_core::ResponseBody::Empty => Ok(()),
         fastapi_core::ResponseBody::Bytes(bytes) => {
@@ -1190,21 +1214,28 @@ async fn process_connection_http2_write_response(
                 return Ok(());
             }
             let mut remaining = bytes.as_slice();
-            while remaining.len() > max {
-                let (chunk, r) = remaining.split_at(max);
+            while !remaining.is_empty() {
+                let is_last = remaining.len() <= max;
+                let flags = if is_last { FLAG_END_STREAM } else { 0 };
+                let send_len = remaining.len().min(max);
+
+                let send_len = h2_fc_clamp_send(
+                    framed,
+                    &mut flow_control,
+                    &mut stream_send_window,
+                    stream_id,
+                    send_len,
+                    max_frame_size,
+                )
+                .await?;
+
+                let (chunk, r) = remaining.split_at(send_len);
+                let flags = if r.is_empty() { FLAG_END_STREAM } else { flags };
                 framed
-                    .write_frame(http2::FrameType::Data, 0, stream_id, chunk)
+                    .write_frame(http2::FrameType::Data, flags, stream_id, chunk)
                     .await?;
                 remaining = r;
             }
-            framed
-                .write_frame(
-                    http2::FrameType::Data,
-                    FLAG_END_STREAM,
-                    stream_id,
-                    remaining,
-                )
-                .await?;
             Ok(())
         }
         fastapi_core::ResponseBody::Stream(mut s) => {
@@ -1213,17 +1244,23 @@ async fn process_connection_http2_write_response(
                 match next {
                     Some(chunk) => {
                         let mut remaining = chunk.as_slice();
-                        while remaining.len() > max {
-                            let (c, r) = remaining.split_at(max);
+                        while !remaining.is_empty() {
+                            let send_len = remaining.len().min(max);
+                            let send_len = h2_fc_clamp_send(
+                                framed,
+                                &mut flow_control,
+                                &mut stream_send_window,
+                                stream_id,
+                                send_len,
+                                max_frame_size,
+                            )
+                            .await?;
+
+                            let (c, r) = remaining.split_at(send_len);
                             framed
                                 .write_frame(http2::FrameType::Data, 0, stream_id, c)
                                 .await?;
                             remaining = r;
-                        }
-                        if !remaining.is_empty() {
-                            framed
-                                .write_frame(http2::FrameType::Data, 0, stream_id, remaining)
-                                .await?;
                         }
                     }
                     None => {
@@ -1235,6 +1272,85 @@ async fn process_connection_http2_write_response(
                 }
             }
             Ok(())
+        }
+    }
+}
+
+/// Clamp `desired` bytes against the send-side flow control windows. If windows
+/// are exhausted, reads frames from the peer (draining WINDOW_UPDATEs, handling
+/// PING/SETTINGS) until enough window is available. Returns the number of bytes
+/// that can be sent now (always > 0 on success).
+async fn h2_fc_clamp_send(
+    framed: &mut http2::FramedH2,
+    flow_control: &mut Option<&mut http2::H2FlowControl>,
+    stream_send_window: &mut i64,
+    stream_id: u32,
+    desired: usize,
+    max_frame_size: u32,
+) -> Result<usize, ServerError> {
+    let fc = match flow_control.as_mut() {
+        Some(fc) => fc,
+        None => return Ok(desired),
+    };
+
+    loop {
+        let conn_avail = usize::try_from(fc.send_conn_window().max(0)).unwrap_or(0);
+        let stream_avail = usize::try_from((*stream_send_window).max(0)).unwrap_or(0);
+        let allowed = desired.min(conn_avail).min(stream_avail);
+
+        if allowed > 0 {
+            let send = allowed;
+            fc.consume_send_conn_window(u32::try_from(send).unwrap_or(u32::MAX));
+            *stream_send_window -= i64::try_from(send).unwrap_or(i64::MAX);
+            return Ok(send);
+        }
+
+        // Window exhausted -- read peer frames until we get a WINDOW_UPDATE.
+        let frame = framed.read_frame(max_frame_size).await?;
+        match frame.header.frame_type() {
+            http2::FrameType::WindowUpdate => {
+                if frame.payload.len() >= 4 {
+                    let increment = u32::from_be_bytes([
+                        frame.payload[0],
+                        frame.payload[1],
+                        frame.payload[2],
+                        frame.payload[3],
+                    ]) & 0x7FFF_FFFF;
+                    if frame.header.stream_id == 0 {
+                        fc.peer_window_update_connection(increment);
+                    } else {
+                        *stream_send_window += i64::from(increment);
+                    }
+                }
+            }
+            http2::FrameType::Ping => {
+                if frame.header.flags & 0x1 == 0 && frame.payload.len() == 8 {
+                    framed
+                        .write_frame(http2::FrameType::Ping, 0x1, 0, &frame.payload)
+                        .await?;
+                }
+            }
+            http2::FrameType::Settings => {
+                if frame.header.flags & 0x1 == 0 {
+                    // ACK the peer's SETTINGS.
+                    framed
+                        .write_frame(http2::FrameType::Settings, 0x1, 0, &[])
+                        .await?;
+                }
+            }
+            http2::FrameType::Goaway => {
+                return Err(ServerError::Http2(http2::Http2Error::Protocol(
+                    "received GOAWAY while writing response",
+                )));
+            }
+            http2::FrameType::RstStream => {
+                if frame.header.stream_id == stream_id {
+                    return Err(ServerError::Http2(http2::Http2Error::Protocol(
+                        "stream reset by peer during response",
+                    )));
+                }
+            }
+            _ => { /* ignore unknown/irrelevant frames */ }
         }
     }
 }
@@ -2392,9 +2508,11 @@ impl TcpServer {
             .write_frame(http2::FrameType::Settings, FLAG_ACK, 0, &[])
             .await?;
         self.record_bytes_out(http2::FrameHeader::LEN as u64);
+        let mut last_stream_id: u32 = 0;
 
         loop {
             if cx.is_cancel_requested() {
+                let _ = send_goaway(&mut framed, last_stream_id, h2_error_code::NO_ERROR).await;
                 return Ok(());
             }
 
@@ -2445,6 +2563,7 @@ impl TcpServer {
                     }
 
                     let stream_id = frame.header.stream_id;
+                    last_stream_id = stream_id;
                     let (end_stream, mut header_block) =
                         extract_header_block_fragment(frame.header.flags, &frame.payload)?;
 
@@ -2846,9 +2965,11 @@ impl TcpServer {
         self.record_bytes_out(http2::FrameHeader::LEN as u64);
 
         let default_body_limit = self.config.parse_limits.max_request_size;
+        let mut last_stream_id: u32 = 0;
 
         loop {
             if cx.is_cancel_requested() {
+                let _ = send_goaway(&mut framed, last_stream_id, h2_error_code::NO_ERROR).await;
                 return Ok(());
             }
 
@@ -2896,6 +3017,7 @@ impl TcpServer {
                     }
 
                     let stream_id = frame.header.stream_id;
+                    last_stream_id = stream_id;
                     let (end_stream, mut header_block) =
                         extract_header_block_fragment(frame.header.flags, &frame.payload)?;
 
@@ -3521,6 +3643,10 @@ fn apply_http2_settings_with_fc(
                 }
                 if let Some(ref mut fc) = flow_control {
                     fc.set_initial_window_size(value);
+                    // The peer's INITIAL_WINDOW_SIZE also controls the send
+                    // window for streams the peer will receive data on (our
+                    // response streams).
+                    fc.set_peer_initial_window_size(value);
                 }
             }
             0x5 => {
@@ -3608,6 +3734,40 @@ async fn send_window_updates(
             .await?;
     }
     Ok(())
+}
+
+/// HTTP/2 error codes (RFC 7540 §7).
+#[allow(dead_code)]
+mod h2_error_code {
+    pub const NO_ERROR: u32 = 0x0;
+    pub const PROTOCOL_ERROR: u32 = 0x1;
+    pub const FLOW_CONTROL_ERROR: u32 = 0x3;
+    pub const SETTINGS_TIMEOUT: u32 = 0x4;
+    pub const STREAM_CLOSED: u32 = 0x5;
+    pub const FRAME_SIZE_ERROR: u32 = 0x6;
+    pub const REFUSED_STREAM: u32 = 0x7;
+    pub const CANCEL: u32 = 0x8;
+    pub const ENHANCE_YOUR_CALM: u32 = 0xb;
+}
+
+/// Build the GOAWAY frame payload: last-stream-id (4 bytes) + error-code (4 bytes).
+fn goaway_payload(last_stream_id: u32, error_code: u32) -> [u8; 8] {
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&(last_stream_id & 0x7FFF_FFFF).to_be_bytes());
+    buf[4..].copy_from_slice(&error_code.to_be_bytes());
+    buf
+}
+
+/// Send a GOAWAY frame on the connection. GOAWAY is always sent on stream 0.
+async fn send_goaway(
+    framed: &mut http2::FramedH2,
+    last_stream_id: u32,
+    error_code: u32,
+) -> Result<(), http2::Http2Error> {
+    let payload = goaway_payload(last_stream_id, error_code);
+    framed
+        .write_frame(http2::FrameType::Goaway, 0, 0, &payload)
+        .await
 }
 
 fn validate_rst_stream_payload(stream_id: u32, payload: &[u8]) -> Result<(), http2::Http2Error> {

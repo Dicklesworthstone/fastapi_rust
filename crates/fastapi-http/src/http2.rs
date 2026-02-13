@@ -779,6 +779,10 @@ pub struct H2FlowControl {
     /// The initial window size advertised (or default). Used to compute the
     /// threshold at which a WINDOW_UPDATE should be emitted.
     initial_window_size: u32,
+    /// Connection-level send window remaining (peer's receive window).
+    send_conn_window: i64,
+    /// Per-stream initial send window (from peer's SETTINGS_INITIAL_WINDOW_SIZE).
+    peer_initial_window_size: u32,
 }
 
 impl H2FlowControl {
@@ -789,6 +793,8 @@ impl H2FlowControl {
             conn_window: i64::from(DEFAULT_INITIAL_WINDOW_SIZE),
             conn_consumed: 0,
             initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            send_conn_window: i64::from(DEFAULT_INITIAL_WINDOW_SIZE),
+            peer_initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
         }
     }
 
@@ -838,6 +844,37 @@ impl H2FlowControl {
     #[must_use]
     pub fn initial_window_size(&self) -> u32 {
         self.initial_window_size
+    }
+
+    // --- Send-side flow control ---
+
+    /// Set the peer's initial window size (from peer's SETTINGS_INITIAL_WINDOW_SIZE).
+    /// This determines the send window for new streams.
+    pub fn set_peer_initial_window_size(&mut self, size: u32) {
+        self.peer_initial_window_size = size;
+    }
+
+    /// The peer's initial window size for new streams (send window).
+    #[must_use]
+    pub fn peer_initial_window_size(&self) -> u32 {
+        self.peer_initial_window_size
+    }
+
+    /// The maximum number of bytes we can send on the connection right now.
+    #[must_use]
+    pub fn send_conn_window(&self) -> i64 {
+        self.send_conn_window
+    }
+
+    /// Record a WINDOW_UPDATE received from the peer for the connection
+    /// (stream_id == 0). Increases the connection-level send window.
+    pub fn peer_window_update_connection(&mut self, increment: u32) {
+        self.send_conn_window += i64::from(increment);
+    }
+
+    /// Consume `n` bytes of the connection-level send window.
+    pub fn consume_send_conn_window(&mut self, n: u32) {
+        self.send_conn_window -= i64::from(n);
     }
 }
 
