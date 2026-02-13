@@ -1013,7 +1013,10 @@ where
                                             f.payload[3],
                                         ]) & 0x7FFF_FFFF;
                                         if f.header.stream_id == 0 {
-                                            flow_control.peer_window_update_connection(increment);
+                                            apply_send_conn_window_update(
+                                                &mut flow_control,
+                                                increment,
+                                            )?;
                                         }
                                     }
                                 }
@@ -2670,8 +2673,10 @@ impl TcpServer {
                                                 f.payload[3],
                                             ]) & 0x7FFF_FFFF;
                                             if f.header.stream_id == 0 {
-                                                flow_control
-                                                    .peer_window_update_connection(increment);
+                                                apply_send_conn_window_update(
+                                                    &mut flow_control,
+                                                    increment,
+                                                )?;
                                             }
                                         }
                                     }
@@ -2801,7 +2806,7 @@ impl TcpServer {
                             frame.payload[3],
                         ]) & 0x7FFF_FFFF;
                         if frame.header.stream_id == 0 {
-                            flow_control.peer_window_update_connection(increment);
+                            apply_send_conn_window_update(&mut flow_control, increment)?;
                         }
                     }
                 }
@@ -3177,8 +3182,10 @@ impl TcpServer {
                                                 f.payload[3],
                                             ]) & 0x7FFF_FFFF;
                                             if f.header.stream_id == 0 {
-                                                flow_control
-                                                    .peer_window_update_connection(increment);
+                                                apply_send_conn_window_update(
+                                                    &mut flow_control,
+                                                    increment,
+                                                )?;
                                             }
                                         }
                                     }
@@ -3301,7 +3308,7 @@ impl TcpServer {
                             frame.payload[3],
                         ]) & 0x7FFF_FFFF;
                         if frame.header.stream_id == 0 {
-                            flow_control.peer_window_update_connection(increment);
+                            apply_send_conn_window_update(&mut flow_control, increment)?;
                         }
                     }
                 }
@@ -3823,6 +3830,25 @@ fn validate_window_update_payload(payload: &[u8]) -> Result<(), http2::Http2Erro
     Ok(())
 }
 
+/// Maximum flow-control window size (2^31 - 1) per RFC 7540 §6.9.1.
+const MAX_FLOW_CONTROL_WINDOW: i64 = 0x7FFF_FFFF;
+
+/// Apply a connection-level WINDOW_UPDATE from the peer with overflow detection.
+/// Returns `Err(FLOW_CONTROL_ERROR)` if the window would exceed 2^31-1.
+fn apply_send_conn_window_update(
+    fc: &mut http2::H2FlowControl,
+    increment: u32,
+) -> Result<(), http2::Http2Error> {
+    let new_window = fc.send_conn_window() + i64::from(increment);
+    if new_window > MAX_FLOW_CONTROL_WINDOW {
+        return Err(http2::Http2Error::Protocol(
+            "WINDOW_UPDATE causes flow-control window to exceed 2^31-1",
+        ));
+    }
+    fc.peer_window_update_connection(increment);
+    Ok(())
+}
+
 fn apply_peer_window_update_for_send(
     flow_control: &mut http2::H2FlowControl,
     stream_send_window: &mut i64,
@@ -3835,9 +3861,15 @@ fn apply_peer_window_update_for_send(
     let increment =
         u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) & 0x7FFF_FFFF;
     if frame_stream_id == 0 {
-        flow_control.peer_window_update_connection(increment);
+        apply_send_conn_window_update(flow_control, increment)?;
     } else if frame_stream_id == current_stream_id {
-        *stream_send_window = stream_send_window.saturating_add(i64::from(increment));
+        let new_window = *stream_send_window + i64::from(increment);
+        if new_window > MAX_FLOW_CONTROL_WINDOW {
+            return Err(http2::Http2Error::Protocol(
+                "WINDOW_UPDATE causes flow-control window to exceed 2^31-1",
+            ));
+        }
+        *stream_send_window = new_window;
     }
 
     Ok(())

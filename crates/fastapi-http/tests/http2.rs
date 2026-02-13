@@ -1552,9 +1552,7 @@ fn http2_app_path_send_side_flow_control_small_window() {
 
 #[test]
 fn http2_handler_path_send_side_flow_control_small_window() {
-    let body_data: Vec<u8> = (0..32768u32)
-        .map(|i| u8::try_from(i % 256).unwrap())
-        .collect();
+    let body_data: Vec<u8> = (0u8..=255).cycle().take(32_768).collect();
     let expected = body_data.clone();
     let app = App::builder()
         .get("/", move |_ctx: &RequestContext, _req: &mut Request| {
