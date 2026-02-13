@@ -1254,8 +1254,6 @@ async fn process_connection_http2_write_response(
             let mut remaining = bytes.as_slice();
             while !remaining.is_empty() {
                 let max = usize::try_from(peer_max_frame_size).unwrap_or(16 * 1024);
-                let is_last = remaining.len() <= max;
-                let flags = if is_last { FLAG_END_STREAM } else { 0 };
                 let send_len = remaining.len().min(max);
 
                 let send_len = h2_fc_clamp_send(
@@ -1270,7 +1268,7 @@ async fn process_connection_http2_write_response(
                 .await?;
 
                 let (chunk, r) = remaining.split_at(send_len);
-                let flags = if r.is_empty() { FLAG_END_STREAM } else { flags };
+                let flags = if r.is_empty() { FLAG_END_STREAM } else { 0 };
                 framed
                     .write_frame(http2::FrameType::Data, flags, stream_id, chunk)
                     .await?;
