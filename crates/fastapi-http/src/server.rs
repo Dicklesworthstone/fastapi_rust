@@ -966,7 +966,8 @@ where
                             | http2::FrameType::Ping
                             | http2::FrameType::Goaway
                             | http2::FrameType::WindowUpdate
-                            | http2::FrameType::Priority => {
+                            | http2::FrameType::Priority
+                            | http2::FrameType::Unknown => {
                                 if f.header.frame_type() == http2::FrameType::Goaway {
                                     return Ok(());
                                 }
@@ -2474,7 +2475,8 @@ impl TcpServer {
                                 | http2::FrameType::Ping
                                 | http2::FrameType::Goaway
                                 | http2::FrameType::WindowUpdate
-                                | http2::FrameType::Priority => {
+                                | http2::FrameType::Priority
+                                | http2::FrameType::Unknown => {
                                     // Re-process control frames by pushing back through the top-level loop.
                                     // For minimal correctness, handle them inline here.
                                     // SETTINGS/PING were already validated above; just dispatch quickly.
@@ -2891,7 +2893,8 @@ impl TcpServer {
                                 | http2::FrameType::Ping
                                 | http2::FrameType::Goaway
                                 | http2::FrameType::WindowUpdate
-                                | http2::FrameType::Priority => {
+                                | http2::FrameType::Priority
+                                | http2::FrameType::Unknown => {
                                     if f.header.frame_type() == http2::FrameType::Goaway {
                                         return Ok(());
                                     }

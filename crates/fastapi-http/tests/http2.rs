@@ -738,6 +738,166 @@ fn http2_closure_path_allows_interleaved_priority_while_reading_body() {
 }
 
 #[test]
+fn http2_app_path_allows_interleaved_unknown_extension_while_reading_body() {
+    let app = App::builder()
+        .post(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"app-path-ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // :method=POST, :scheme=http, :path=/, :authority=www.example.com
+    let header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &header_block); // HEADERS | END_HEADERS (no END_STREAM)
+
+    write_frame(&mut stream, 0xA, 0x0, 1, b"ext"); // unknown extension frame
+    write_frame(&mut stream, 0x0, 0x1, 1, b"abc"); // DATA | END_STREAM
+
+    let resp_header_block = read_header_block(&mut stream, 1);
+    let mut dec = fastapi_http::http2::HpackDecoder::new();
+    let decoded = dec
+        .decode(&resp_header_block)
+        .expect("decode response headers");
+    assert!(
+        decoded.contains(&(b":status".to_vec(), b"200".to_vec())),
+        "expected :status 200, got: {decoded:?}"
+    );
+
+    let body = read_data_body(&mut stream, 1);
+    assert_eq!(body, b"app-path-ok");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn http2_handler_path_allows_interleaved_unknown_extension_while_reading_body() {
+    let app = App::builder()
+        .post(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"handler-path-ok".to_vec()))
+            },
+        )
+        .build();
+
+    let handler: Arc<dyn fastapi_core::Handler> = Arc::new(app);
+    let (server, addr, server_thread) = spawn_server_handler(&handler);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // :method=POST, :scheme=http, :path=/, :authority=www.example.com
+    let header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &header_block); // HEADERS | END_HEADERS (no END_STREAM)
+
+    write_frame(&mut stream, 0xA, 0x0, 1, b"ext"); // unknown extension frame
+    write_frame(&mut stream, 0x0, 0x1, 1, b"abc"); // DATA | END_STREAM
+
+    let resp_header_block = read_header_block(&mut stream, 1);
+    let mut dec = fastapi_http::http2::HpackDecoder::new();
+    let decoded = dec
+        .decode(&resp_header_block)
+        .expect("decode response headers");
+    assert!(
+        decoded.contains(&(b":status".to_vec(), b"200".to_vec())),
+        "expected :status 200, got: {decoded:?}"
+    );
+
+    let body = read_data_body(&mut stream, 1);
+    assert_eq!(body, b"handler-path-ok");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn http2_closure_path_allows_interleaved_unknown_extension_while_reading_body() {
+    let (server, addr, server_thread) = spawn_server_closure();
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // :method=POST, :scheme=http, :path=/, :authority=www.example.com
+    let header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &header_block); // HEADERS | END_HEADERS (no END_STREAM)
+
+    write_frame(&mut stream, 0xA, 0x0, 1, b"ext"); // unknown extension frame
+    write_frame(&mut stream, 0x0, 0x1, 1, b"abc"); // DATA | END_STREAM
+
+    let resp_header_block = read_header_block(&mut stream, 1);
+    let mut dec = fastapi_http::http2::HpackDecoder::new();
+    let decoded = dec
+        .decode(&resp_header_block)
+        .expect("decode response headers");
+    assert!(
+        decoded.contains(&(b":status".to_vec(), b"200".to_vec())),
+        "expected :status 200, got: {decoded:?}"
+    );
+
+    let body = read_data_body(&mut stream, 1);
+    assert_eq!(body, b"closure-path-ok");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
 fn http2_app_path_rejects_non_empty_settings_ack_while_reading_body() {
     let app = App::builder()
         .post(
