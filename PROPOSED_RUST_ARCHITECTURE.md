@@ -54,7 +54,7 @@ This section is a living, high-level parity view against the legacy FastAPI beha
 | Docs endpoints wiring (routes) | `crates/fastapi-core/src/app.rs` (`enable_docs`) | Implemented | `.enable_docs(DocsConfig)` mounts `/docs`, `/redoc`, and `/docs/oauth2-redirect` (paths configurable). |
 | Testing harness | `crates/fastapi-core/src/testing.rs` | Implemented | In-process TestClient + assertions. |
 | WebSockets | `crates/fastapi-core/src/websocket.rs`, `crates/fastapi-http/tests/websocket.rs` | Partial | Upgrade + frame parsing + ping/pong + close-handshake hardening are implemented with E2E coverage. Remaining parity tracked in `bd-z09e` (full FastAPI/Starlette surface and edge-case semantics). |
-| HTTP/2 | N/A | Missing | Tracked as `bd-2c9t`. |
+| HTTP/2 | `crates/fastapi-http/src/http2.rs`, `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/http2.rs` | Partial | H2C prior-knowledge, HPACK encoding/decoding, bidirectional flow control (WINDOW_UPDATE), GOAWAY, RST_STREAM, SETTINGS negotiation, interleaved control frames during body reads. 21 E2E tests. Remaining: concurrent streams (multiplexing), stream state machine. Tracked as `bd-2c9t`. |
 
 **Highest-leverage gaps (parity):**
 

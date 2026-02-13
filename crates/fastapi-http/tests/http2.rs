@@ -1459,3 +1459,161 @@ fn http2_closure_path_emits_window_updates_for_large_body() {
     drop(TcpStream::connect(addr));
     server_thread.join().expect("server thread join");
 }
+
+// -------------------------------------------------------------------
+// Send-side flow control tests: verify the server respects the peer's
+// receive window (set via SETTINGS_INITIAL_WINDOW_SIZE) and pauses
+// DATA emission until the client sends WINDOW_UPDATE.
+// -------------------------------------------------------------------
+
+/// Helper: perform H2C handshake with a custom SETTINGS_INITIAL_WINDOW_SIZE.
+fn h2_handshake_with_window(stream: &mut TcpStream, initial_window_size: u32) {
+    stream.write_all(PREFACE).expect("write preface");
+    // Client SETTINGS with INITIAL_WINDOW_SIZE (id=0x3).
+    let mut settings_payload = [0u8; 6];
+    settings_payload[0..2].copy_from_slice(&0x0003u16.to_be_bytes());
+    settings_payload[2..6].copy_from_slice(&initial_window_size.to_be_bytes());
+    write_frame(stream, 0x4, 0x0, 0, &settings_payload);
+
+    read_settings_handshake(stream);
+    // ACK server SETTINGS.
+    write_frame(stream, 0x4, 0x1, 0, &[]);
+}
+
+/// Helper: read DATA frames from the server on a given stream, sending
+/// WINDOW_UPDATE for the stream after each DATA frame to unblock the server.
+/// Returns the reassembled response body.
+fn read_data_with_window_updates(stream: &mut TcpStream, stream_id: u32) -> Vec<u8> {
+    let mut body = Vec::new();
+    loop {
+        let (ty, flags, sid, payload) = read_frame(stream);
+        match ty {
+            0x0 if sid == stream_id => {
+                // DATA frame.
+                body.extend_from_slice(&payload);
+                // Send WINDOW_UPDATE for stream so server can continue.
+                if !payload.is_empty() {
+                    let inc =
+                        window_update_payload(u32::try_from(payload.len()).unwrap_or(u32::MAX));
+                    write_frame(stream, 0x8, 0, stream_id, &inc);
+                }
+                if (flags & 0x1) != 0 {
+                    break; // END_STREAM
+                }
+            }
+            _ => {
+                // Ignore other frames (e.g., WINDOW_UPDATE from server).
+            }
+        }
+    }
+    body
+}
+
+#[test]
+fn http2_app_path_send_side_flow_control_small_window() {
+    let body_data: Vec<u8> = (0u8..=255).cycle().take(32_768).collect();
+    let expected = body_data.clone();
+    let app = App::builder()
+        .get("/", move |_ctx: &RequestContext, _req: &mut Request| {
+            let body = body_data.clone();
+            async move { Response::ok().body(ResponseBody::Bytes(body)) }
+        })
+        .build();
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+
+    // Handshake with small initial window (4096 bytes per stream).
+    h2_handshake_with_window(&mut stream, 4096);
+
+    // GET / on stream 1.
+    let header_block: [u8; 17] = [
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x5, 1, &header_block);
+
+    // Read response HEADERS.
+    let _resp_headers = read_header_block(&mut stream, 1);
+
+    // Read DATA with incremental WINDOW_UPDATE after each frame.
+    let resp_body = read_data_with_window_updates(&mut stream, 1);
+    assert_eq!(resp_body.len(), expected.len(), "body length mismatch");
+    assert_eq!(resp_body, expected, "body content mismatch");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn http2_handler_path_send_side_flow_control_small_window() {
+    let body_data: Vec<u8> = (0..32768u32)
+        .map(|i| u8::try_from(i % 256).unwrap())
+        .collect();
+    let expected = body_data.clone();
+    let app = App::builder()
+        .get("/", move |_ctx: &RequestContext, _req: &mut Request| {
+            let body = body_data.clone();
+            async move { Response::ok().body(ResponseBody::Bytes(body)) }
+        })
+        .build();
+    let handler: Arc<dyn fastapi_core::Handler> = Arc::new(app);
+    let (server, addr, server_thread) = spawn_server_handler(&handler);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+
+    h2_handshake_with_window(&mut stream, 4096);
+
+    let header_block: [u8; 17] = [
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x5, 1, &header_block);
+
+    let _resp_headers = read_header_block(&mut stream, 1);
+    let resp_body = read_data_with_window_updates(&mut stream, 1);
+    assert_eq!(resp_body.len(), expected.len(), "body length mismatch");
+    assert_eq!(resp_body, expected, "body content mismatch");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+#[test]
+fn http2_closure_path_send_side_flow_control_small_window() {
+    let (server, addr, server_thread) = spawn_server_closure();
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+
+    h2_handshake_with_window(&mut stream, 4096);
+
+    let header_block: [u8; 17] = [
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x5, 1, &header_block);
+
+    let _resp_headers = read_header_block(&mut stream, 1);
+    let resp_body = read_data_with_window_updates(&mut stream, 1);
+    // Closure path returns fixed "closure-path-ok" (15 bytes) -- fits in 4096 window
+    // so this validates the handshake works with custom SETTINGS_INITIAL_WINDOW_SIZE.
+    assert_eq!(resp_body, b"closure-path-ok");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
