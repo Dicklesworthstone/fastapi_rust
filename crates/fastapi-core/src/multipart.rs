@@ -21,6 +21,8 @@ pub const DEFAULT_MAX_FIELDS: usize = 100;
 
 /// Default threshold for spooling uploads to a temporary file (1MB).
 pub const DEFAULT_SPOOL_THRESHOLD: usize = 1024 * 1024;
+/// RFC 2046 recommends multipart boundary length <= 70 characters.
+const MAX_BOUNDARY_LEN: usize = 70;
 
 /// Configuration for multipart parsing.
 #[derive(Debug, Clone)]
@@ -558,7 +560,7 @@ pub fn parse_boundary(content_type: &str) -> Result<String, MultipartError> {
         if k.trim().eq_ignore_ascii_case("boundary") {
             let boundary = v.trim();
             let boundary = boundary.trim_matches('"').trim_matches('\'');
-            if boundary.is_empty() {
+            if boundary.is_empty() || boundary.len() > MAX_BOUNDARY_LEN {
                 return Err(MultipartError::InvalidBoundary);
             }
             return Ok(boundary.to_string());
@@ -1357,6 +1359,14 @@ mod tests {
         let ct = "multipart/form-data";
         let result = parse_boundary(ct);
         assert!(matches!(result, Err(MultipartError::MissingBoundary)));
+    }
+
+    #[test]
+    fn test_parse_boundary_rejects_too_long_value() {
+        let too_long = "a".repeat(MAX_BOUNDARY_LEN + 1);
+        let ct = format!("multipart/form-data; boundary={too_long}");
+        let result = parse_boundary(&ct);
+        assert!(matches!(result, Err(MultipartError::InvalidBoundary)));
     }
 
     #[test]
