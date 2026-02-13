@@ -3973,7 +3973,13 @@ fn apply_peer_settings_for_send(
             let new = i64::from(value);
             let delta = new - old;
             flow_control.set_peer_initial_window_size(value);
-            *stream_send_window = stream_send_window.saturating_add(delta);
+            let updated = *stream_send_window + delta;
+            if updated > MAX_FLOW_CONTROL_WINDOW {
+                return Err(http2::Http2Error::Protocol(
+                    "SETTINGS_INITIAL_WINDOW_SIZE change causes stream window to exceed 2^31-1",
+                ));
+            }
+            *stream_send_window = updated;
         }
     }
 
@@ -4672,6 +4678,28 @@ mod tests {
             err.to_string()
                 .contains("SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum")
         );
+    }
+
+    #[test]
+    fn h2_send_settings_window_delta_overflow_is_flow_control_error() {
+        let mut flow_control = http2::H2FlowControl::new();
+        // Start with a stream window near the maximum.
+        let mut stream_window: i64 = 0x7FFF_FFFF - 10;
+        // Increase INITIAL_WINDOW_SIZE by more than 10 from default (65535).
+        // Delta = new - old = 0x7FFF_FFFF - 65535 = 2147418112
+        // New stream_window = (2^31-1 - 10) + 2147418112 > 2^31-1
+        let new_initial: u32 = 0x7FFF_FFFF;
+        let payload = [
+            0x00,
+            0x03,
+            new_initial.to_be_bytes()[0],
+            new_initial.to_be_bytes()[1],
+            new_initial.to_be_bytes()[2],
+            new_initial.to_be_bytes()[3],
+        ];
+        let err = apply_peer_settings_for_send(&mut flow_control, &mut stream_window, &payload)
+            .unwrap_err();
+        assert!(err.to_string().contains("stream window to exceed 2^31-1"));
     }
 
     #[test]
