@@ -752,6 +752,101 @@ const HUFFMAN_BITS: [u8; 257] = [
     30,
 ];
 
+// =============================================================================
+// HTTP/2 Flow Control (RFC 7540 §6.9)
+// =============================================================================
+
+/// RFC 7540 default initial window size (65,535 bytes).
+pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65_535;
+
+/// When the consumed (unreported) bytes exceed this fraction of the initial
+/// window size, a WINDOW_UPDATE is sent. Using half the window keeps the
+/// sender from stalling while avoiding excessive WINDOW_UPDATE traffic.
+const WINDOW_UPDATE_THRESHOLD_DIVISOR: u32 = 2;
+
+/// Tracks HTTP/2 flow-control receive windows at connection and stream level.
+///
+/// The receiver (server) decrements windows when DATA frames arrive and sends
+/// WINDOW_UPDATE frames when enough data has been consumed to keep the sender
+/// from stalling.
+#[derive(Debug)]
+pub struct H2FlowControl {
+    /// Connection-level receive window remaining.
+    conn_window: i64,
+    /// How many bytes have been consumed at connection level since the last
+    /// WINDOW_UPDATE was sent.
+    conn_consumed: u32,
+    /// The initial window size advertised (or default). Used to compute the
+    /// threshold at which a WINDOW_UPDATE should be emitted.
+    initial_window_size: u32,
+}
+
+impl H2FlowControl {
+    /// Create a new flow-control tracker with the RFC default initial window.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            conn_window: i64::from(DEFAULT_INITIAL_WINDOW_SIZE),
+            conn_consumed: 0,
+            initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+        }
+    }
+
+    /// Update the initial window size (from SETTINGS_INITIAL_WINDOW_SIZE).
+    /// This only affects future streams; the connection-level window is
+    /// independent of this setting per RFC 7540 §6.9.2.
+    pub fn set_initial_window_size(&mut self, size: u32) {
+        self.initial_window_size = size;
+    }
+
+    /// Record that `n` bytes of DATA payload were received on the connection.
+    /// Returns the connection-level WINDOW_UPDATE increment to send, or 0 if
+    /// no update is needed yet.
+    pub fn data_received_connection(&mut self, n: u32) -> u32 {
+        self.conn_window -= i64::from(n);
+        self.conn_consumed += n;
+
+        let threshold = self.initial_window_size / WINDOW_UPDATE_THRESHOLD_DIVISOR;
+        if self.conn_consumed >= threshold {
+            let increment = self.conn_consumed;
+            self.conn_window += i64::from(increment);
+            self.conn_consumed = 0;
+            increment
+        } else {
+            0
+        }
+    }
+
+    /// Compute a stream-level WINDOW_UPDATE increment after `total_received`
+    /// bytes have been received for a stream. Returns the increment to send,
+    /// or 0 if no update is needed.
+    ///
+    /// For simplicity, the server sends a stream-level WINDOW_UPDATE when the
+    /// consumed bytes exceed the threshold. Since streams are short-lived
+    /// request bodies, we track this per-call rather than storing per-stream
+    /// state.
+    pub fn stream_window_update(&self, total_received: u32) -> u32 {
+        let threshold = self.initial_window_size / WINDOW_UPDATE_THRESHOLD_DIVISOR;
+        if total_received >= threshold {
+            total_received
+        } else {
+            0
+        }
+    }
+
+    /// The initial window size for new streams.
+    #[must_use]
+    pub fn initial_window_size(&self) -> u32 {
+        self.initial_window_size
+    }
+}
+
+impl Default for H2FlowControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,5 +882,58 @@ mod tests {
     fn preface_constant_matches_rfc() {
         assert_eq!(PREFACE, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
         assert_eq!(PREFACE.len(), 24);
+    }
+
+    #[test]
+    fn flow_control_no_update_below_threshold() {
+        let mut fc = H2FlowControl::new();
+        // Receive 1000 bytes — well below half of 65535.
+        let increment = fc.data_received_connection(1000);
+        assert_eq!(increment, 0);
+    }
+
+    #[test]
+    fn flow_control_emits_update_at_threshold() {
+        let mut fc = H2FlowControl::new();
+        // Threshold is 65535 / 2 = 32767. Receive exactly that amount.
+        let increment = fc.data_received_connection(32_767);
+        assert_eq!(increment, 32_767);
+    }
+
+    #[test]
+    fn flow_control_accumulates_across_calls() {
+        let mut fc = H2FlowControl::new();
+        // Two small receives that together exceed threshold.
+        assert_eq!(fc.data_received_connection(20_000), 0);
+        assert_eq!(fc.data_received_connection(20_000), 40_000);
+    }
+
+    #[test]
+    fn flow_control_resets_consumed_after_update() {
+        let mut fc = H2FlowControl::new();
+        assert_eq!(fc.data_received_connection(40_000), 40_000);
+        // After reset, small amounts should not trigger again.
+        assert_eq!(fc.data_received_connection(1_000), 0);
+    }
+
+    #[test]
+    fn flow_control_stream_below_threshold() {
+        let fc = H2FlowControl::new();
+        assert_eq!(fc.stream_window_update(1_000), 0);
+    }
+
+    #[test]
+    fn flow_control_stream_at_threshold() {
+        let fc = H2FlowControl::new();
+        assert_eq!(fc.stream_window_update(32_767), 32_767);
+    }
+
+    #[test]
+    fn flow_control_custom_initial_window() {
+        let mut fc = H2FlowControl::new();
+        fc.set_initial_window_size(100_000);
+        // Threshold is now 50_000.
+        assert_eq!(fc.data_received_connection(49_999), 0);
+        assert_eq!(fc.data_received_connection(1), 50_000);
     }
 }

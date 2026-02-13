@@ -851,6 +851,7 @@ where
     let mut framed = http2::FramedH2::new(stream, Vec::new());
     let mut hpack = http2::HpackDecoder::new();
     let mut max_frame_size: u32 = 16 * 1024;
+    let mut flow_control = http2::H2FlowControl::new();
 
     let first = framed.read_frame(max_frame_size).await?;
     if first.header.frame_type() != http2::FrameType::Settings
@@ -859,7 +860,12 @@ where
     {
         return Err(http2::Http2Error::Protocol("expected client SETTINGS after preface").into());
     }
-    apply_http2_settings(&mut hpack, &mut max_frame_size, &first.payload)?;
+    apply_http2_settings_with_fc(
+        &mut hpack,
+        &mut max_frame_size,
+        Some(&mut flow_control),
+        &first.payload,
+    )?;
 
     framed
         .write_frame(http2::FrameType::Settings, 0, 0, &[])
@@ -886,7 +892,12 @@ where
                 if is_ack {
                     continue;
                 }
-                apply_http2_settings(&mut hpack, &mut max_frame_size, &frame.payload)?;
+                apply_http2_settings_with_fc(
+                    &mut hpack,
+                    &mut max_frame_size,
+                    Some(&mut flow_control),
+                    &frame.payload,
+                )?;
                 framed
                     .write_frame(http2::FrameType::Settings, FLAG_ACK, 0, &[])
                     .await?;
@@ -938,6 +949,7 @@ where
                 if !end_stream {
                     let mut body = Vec::new();
                     let mut stream_reset = false;
+                    let mut stream_received: u32 = 0;
                     loop {
                         let f = framed.read_frame(max_frame_size).await?;
                         match f.header.frame_type() {
@@ -951,6 +963,19 @@ where
                                     .into());
                                 }
                                 body.extend_from_slice(data);
+
+                                // Flow control: track received data and send
+                                // WINDOW_UPDATEs to prevent sender stalling.
+                                let data_len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+                                stream_received += data_len;
+                                let conn_inc = flow_control.data_received_connection(data_len);
+                                let stream_inc = flow_control.stream_window_update(stream_received);
+                                if stream_inc > 0 {
+                                    stream_received = 0;
+                                }
+                                send_window_updates(&mut framed, conn_inc, stream_id, stream_inc)
+                                    .await?;
+
                                 if data_end_stream {
                                     break;
                                 }
@@ -1002,9 +1027,10 @@ where
                                         &f.payload,
                                     )?;
                                     if !is_ack {
-                                        apply_http2_settings(
+                                        apply_http2_settings_with_fc(
                                             &mut hpack,
                                             &mut max_frame_size,
+                                            Some(&mut flow_control),
                                             &f.payload,
                                         )?;
                                         framed
@@ -2335,6 +2361,7 @@ impl TcpServer {
         let mut framed = http2::FramedH2::new(stream, Vec::new());
         let mut hpack = http2::HpackDecoder::new();
         let mut max_frame_size: u32 = 16 * 1024; // RFC 7540 default.
+        let mut flow_control = http2::H2FlowControl::new();
 
         let first = framed.read_frame(max_frame_size).await?;
         self.record_bytes_in((http2::FrameHeader::LEN + first.payload.len()) as u64);
@@ -2348,7 +2375,12 @@ impl TcpServer {
             );
         }
 
-        apply_http2_settings(&mut hpack, &mut max_frame_size, &first.payload)?;
+        apply_http2_settings_with_fc(
+            &mut hpack,
+            &mut max_frame_size,
+            Some(&mut flow_control),
+            &first.payload,
+        )?;
 
         // Send server SETTINGS (empty for now) and ACK the client's SETTINGS.
         framed
@@ -2380,7 +2412,12 @@ impl TcpServer {
                         // ACK for our SETTINGS.
                         continue;
                     }
-                    apply_http2_settings(&mut hpack, &mut max_frame_size, &frame.payload)?;
+                    apply_http2_settings_with_fc(
+                        &mut hpack,
+                        &mut max_frame_size,
+                        Some(&mut flow_control),
+                        &frame.payload,
+                    )?;
                     // ACK peer SETTINGS.
                     framed
                         .write_frame(http2::FrameType::Settings, FLAG_ACK, 0, &[])
@@ -2444,6 +2481,7 @@ impl TcpServer {
                         let max = app.config().max_body_size;
                         let mut body = Vec::new();
                         let mut stream_reset = false;
+                        let mut stream_received: u32 = 0;
                         loop {
                             let f = framed.read_frame(max_frame_size).await?;
                             self.record_bytes_in(
@@ -2460,6 +2498,25 @@ impl TcpServer {
                                         .into());
                                     }
                                     body.extend_from_slice(data);
+
+                                    // Flow control: track received data and send
+                                    // WINDOW_UPDATEs to prevent sender stalling.
+                                    let data_len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+                                    stream_received += data_len;
+                                    let conn_inc = flow_control.data_received_connection(data_len);
+                                    let stream_inc =
+                                        flow_control.stream_window_update(stream_received);
+                                    if stream_inc > 0 {
+                                        stream_received = 0;
+                                    }
+                                    send_window_updates(
+                                        &mut framed,
+                                        conn_inc,
+                                        stream_id,
+                                        stream_inc,
+                                    )
+                                    .await?;
+
                                     if data_end_stream {
                                         break;
                                     }
@@ -2477,9 +2534,6 @@ impl TcpServer {
                                 | http2::FrameType::WindowUpdate
                                 | http2::FrameType::Priority
                                 | http2::FrameType::Unknown => {
-                                    // Re-process control frames by pushing back through the top-level loop.
-                                    // For minimal correctness, handle them inline here.
-                                    // SETTINGS/PING were already validated above; just dispatch quickly.
                                     if f.header.frame_type() == http2::FrameType::Goaway {
                                         return Ok(());
                                     }
@@ -2517,9 +2571,10 @@ impl TcpServer {
                                             &f.payload,
                                         )?;
                                         if !is_ack {
-                                            apply_http2_settings(
+                                            apply_http2_settings_with_fc(
                                                 &mut hpack,
                                                 &mut max_frame_size,
+                                                Some(&mut flow_control),
                                                 &f.payload,
                                             )?;
                                             framed
@@ -2759,6 +2814,7 @@ impl TcpServer {
         let mut framed = http2::FramedH2::new(stream, Vec::new());
         let mut hpack = http2::HpackDecoder::new();
         let mut max_frame_size: u32 = 16 * 1024;
+        let mut flow_control = http2::H2FlowControl::new();
 
         let first = framed.read_frame(max_frame_size).await?;
         self.record_bytes_in((http2::FrameHeader::LEN + first.payload.len()) as u64);
@@ -2772,7 +2828,12 @@ impl TcpServer {
             );
         }
 
-        apply_http2_settings(&mut hpack, &mut max_frame_size, &first.payload)?;
+        apply_http2_settings_with_fc(
+            &mut hpack,
+            &mut max_frame_size,
+            Some(&mut flow_control),
+            &first.payload,
+        )?;
 
         framed
             .write_frame(http2::FrameType::Settings, 0, 0, &[])
@@ -2804,7 +2865,12 @@ impl TcpServer {
                     if is_ack {
                         continue;
                     }
-                    apply_http2_settings(&mut hpack, &mut max_frame_size, &frame.payload)?;
+                    apply_http2_settings_with_fc(
+                        &mut hpack,
+                        &mut max_frame_size,
+                        Some(&mut flow_control),
+                        &frame.payload,
+                    )?;
                     framed
                         .write_frame(http2::FrameType::Settings, FLAG_ACK, 0, &[])
                         .await?;
@@ -2862,6 +2928,7 @@ impl TcpServer {
                     if !end_stream {
                         let mut body = Vec::new();
                         let mut stream_reset = false;
+                        let mut stream_received: u32 = 0;
                         loop {
                             let f = framed.read_frame(max_frame_size).await?;
                             self.record_bytes_in(
@@ -2878,6 +2945,25 @@ impl TcpServer {
                                         .into());
                                     }
                                     body.extend_from_slice(data);
+
+                                    // Flow control: track received data and send
+                                    // WINDOW_UPDATEs to prevent sender stalling.
+                                    let data_len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+                                    stream_received += data_len;
+                                    let conn_inc = flow_control.data_received_connection(data_len);
+                                    let stream_inc =
+                                        flow_control.stream_window_update(stream_received);
+                                    if stream_inc > 0 {
+                                        stream_received = 0;
+                                    }
+                                    send_window_updates(
+                                        &mut framed,
+                                        conn_inc,
+                                        stream_id,
+                                        stream_inc,
+                                    )
+                                    .await?;
+
                                     if data_end_stream {
                                         break;
                                     }
@@ -2932,9 +3018,10 @@ impl TcpServer {
                                             &f.payload,
                                         )?;
                                         if !is_ack {
-                                            apply_http2_settings(
+                                            apply_http2_settings_with_fc(
                                                 &mut hpack,
                                                 &mut max_frame_size,
+                                                Some(&mut flow_control),
                                                 &f.payload,
                                             )?;
                                             framed
@@ -3400,6 +3487,15 @@ fn apply_http2_settings(
     max_frame_size: &mut u32,
     payload: &[u8],
 ) -> Result<(), http2::Http2Error> {
+    apply_http2_settings_with_fc(hpack, max_frame_size, None, payload)
+}
+
+fn apply_http2_settings_with_fc(
+    hpack: &mut http2::HpackDecoder,
+    max_frame_size: &mut u32,
+    mut flow_control: Option<&mut http2::H2FlowControl>,
+    payload: &[u8],
+) -> Result<(), http2::Http2Error> {
     // SETTINGS payload is a sequence of (u16 id, u32 value) pairs.
     if payload.len() % 6 != 0 {
         return Err(http2::Http2Error::Protocol(
@@ -3414,6 +3510,18 @@ fn apply_http2_settings(
             0x1 => {
                 // SETTINGS_HEADER_TABLE_SIZE
                 hpack.set_dynamic_table_max_size(value as usize);
+            }
+            0x3 => {
+                // SETTINGS_INITIAL_WINDOW_SIZE (RFC 7540 §6.5.2)
+                // Must not exceed 2^31 - 1.
+                if value > 0x7FFF_FFFF {
+                    return Err(http2::Http2Error::Protocol(
+                        "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum",
+                    ));
+                }
+                if let Some(ref mut fc) = flow_control {
+                    fc.set_initial_window_size(value);
+                }
             }
             0x5 => {
                 // SETTINGS_MAX_FRAME_SIZE (RFC 7540: 16384..=16777215)
@@ -3471,6 +3579,34 @@ fn validate_window_update_payload(payload: &[u8]) -> Result<(), http2::Http2Erro
         ));
     }
 
+    Ok(())
+}
+
+/// Build the 4-byte WINDOW_UPDATE payload for a given increment.
+fn window_update_payload(increment: u32) -> [u8; 4] {
+    (increment & 0x7FFF_FFFF).to_be_bytes()
+}
+
+/// Send WINDOW_UPDATE frames for both connection and stream levels after
+/// receiving DATA. Returns early on zero increments.
+async fn send_window_updates(
+    framed: &mut http2::FramedH2,
+    conn_increment: u32,
+    stream_id: u32,
+    stream_increment: u32,
+) -> Result<(), http2::Http2Error> {
+    if conn_increment > 0 {
+        let payload = window_update_payload(conn_increment);
+        framed
+            .write_frame(http2::FrameType::WindowUpdate, 0, 0, &payload)
+            .await?;
+    }
+    if stream_increment > 0 {
+        let payload = window_update_payload(stream_increment);
+        framed
+            .write_frame(http2::FrameType::WindowUpdate, 0, stream_id, &payload)
+            .await?;
+    }
     Ok(())
 }
 

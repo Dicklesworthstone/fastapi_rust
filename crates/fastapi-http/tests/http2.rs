@@ -1183,3 +1183,279 @@ fn http2_closure_path_allows_interleaved_rst_stream_and_continues_next_stream() 
     drop(TcpStream::connect(addr));
     server_thread.join().expect("server thread join");
 }
+
+// ---------------------------------------------------------------------------
+// Flow-control: verify that the server emits WINDOW_UPDATE frames when the
+// client sends a large request body (80 KiB split across 16 KiB DATA chunks).
+// ---------------------------------------------------------------------------
+
+/// Send an 80 KiB POST body and collect any WINDOW_UPDATE frames the server
+/// emits while processing the request (app path).
+#[test]
+fn http2_app_path_emits_window_updates_for_large_body() {
+    let app = App::builder()
+        .post("/", |_ctx: &RequestContext, req: &mut Request| {
+            let body_len = req.take_body().into_bytes().len();
+            async move {
+                Response::ok().body(ResponseBody::Bytes(format!("got {body_len}").into_bytes()))
+            }
+        })
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]); // Client SETTINGS
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]); // ACK server SETTINGS
+
+    // HEADERS: POST / (method=POST, scheme=http, path=/, authority=www.example.com)
+    let post_header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &post_header_block); // END_HEADERS, no END_STREAM
+
+    // Send 80 KiB of body data in 16 KiB chunks
+    let chunk = vec![0xABu8; 16_384];
+    for i in 0..5 {
+        let flags = u8::from(i == 4); // END_STREAM on last
+        write_frame(&mut stream, 0x0, flags, 1, &chunk);
+    }
+
+    // Read response frames, collecting WINDOW_UPDATE increments
+    let mut conn_window_increments: u32 = 0;
+    let mut stream_window_increments: u32 = 0;
+    let mut got_headers = false;
+    let mut resp_body = Vec::new();
+    let mut done = false;
+
+    while !done {
+        let (ftype, flags, sid, payload) = read_frame(&mut stream);
+        match ftype {
+            0x8 => {
+                // WINDOW_UPDATE
+                if payload.len() >= 4 {
+                    let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                        & 0x7FFF_FFFF;
+                    if sid == 0 {
+                        conn_window_increments += inc;
+                    } else {
+                        stream_window_increments += inc;
+                    }
+                }
+            }
+            0x1 => got_headers = true,
+            0x0 => {
+                // DATA
+                resp_body.extend_from_slice(&payload);
+                if flags & 0x1 != 0 {
+                    done = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_headers, "should receive response HEADERS");
+    assert!(
+        conn_window_increments > 0,
+        "server should emit connection-level WINDOW_UPDATE for 80 KiB body"
+    );
+    assert!(
+        stream_window_increments > 0,
+        "server should emit stream-level WINDOW_UPDATE for 80 KiB body"
+    );
+    let body_str = String::from_utf8_lossy(&resp_body);
+    assert!(
+        body_str.contains("got 81920"),
+        "response should echo body length, got: {body_str}"
+    );
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// Flow-control WINDOW_UPDATE test for the handler path.
+#[test]
+fn http2_handler_path_emits_window_updates_for_large_body() {
+    let app = App::builder()
+        .post("/", |_ctx: &RequestContext, req: &mut Request| {
+            let body_len = req.take_body().into_bytes().len();
+            async move {
+                Response::ok().body(ResponseBody::Bytes(
+                    format!("handler got {body_len}").into_bytes(),
+                ))
+            }
+        })
+        .build();
+
+    let handler: Arc<dyn fastapi_core::Handler> = Arc::new(app);
+    let (server, addr, server_thread) = spawn_server_handler(&handler);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    let post_header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &post_header_block);
+
+    let chunk = vec![0xCDu8; 16_384];
+    for i in 0..5 {
+        let flags = u8::from(i == 4);
+        write_frame(&mut stream, 0x0, flags, 1, &chunk);
+    }
+
+    let mut conn_window_increments: u32 = 0;
+    let mut stream_window_increments: u32 = 0;
+    let mut got_headers = false;
+    let mut resp_body = Vec::new();
+    let mut done = false;
+
+    while !done {
+        let (ftype, flags, sid, payload) = read_frame(&mut stream);
+        match ftype {
+            0x8 => {
+                if payload.len() >= 4 {
+                    let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                        & 0x7FFF_FFFF;
+                    if sid == 0 {
+                        conn_window_increments += inc;
+                    } else {
+                        stream_window_increments += inc;
+                    }
+                }
+            }
+            0x1 => got_headers = true,
+            0x0 => {
+                resp_body.extend_from_slice(&payload);
+                if flags & 0x1 != 0 {
+                    done = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_headers, "should receive response HEADERS");
+    assert!(
+        conn_window_increments > 0,
+        "handler path: server should emit connection-level WINDOW_UPDATE"
+    );
+    assert!(
+        stream_window_increments > 0,
+        "handler path: server should emit stream-level WINDOW_UPDATE"
+    );
+    let body_str = String::from_utf8_lossy(&resp_body);
+    assert!(
+        body_str.contains("handler got 81920"),
+        "handler response should echo body length, got: {body_str}"
+    );
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// Flow-control WINDOW_UPDATE test for the closure path.
+/// The closure path has a fixed response, but the server still processes
+/// incoming body data through flow control and emits WINDOW_UPDATEs.
+#[test]
+fn http2_closure_path_emits_window_updates_for_large_body() {
+    let (server, addr, server_thread) = spawn_server_closure();
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    let post_header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &post_header_block);
+
+    let chunk = vec![0xEFu8; 16_384];
+    for i in 0..5 {
+        let flags = u8::from(i == 4);
+        write_frame(&mut stream, 0x0, flags, 1, &chunk);
+    }
+
+    let mut conn_window_increments: u32 = 0;
+    let mut stream_window_increments: u32 = 0;
+    let mut got_headers = false;
+    let mut resp_body = Vec::new();
+    let mut done = false;
+
+    while !done {
+        let (ftype, flags, sid, payload) = read_frame(&mut stream);
+        match ftype {
+            0x8 => {
+                if payload.len() >= 4 {
+                    let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                        & 0x7FFF_FFFF;
+                    if sid == 0 {
+                        conn_window_increments += inc;
+                    } else {
+                        stream_window_increments += inc;
+                    }
+                }
+            }
+            0x1 => got_headers = true,
+            0x0 => {
+                resp_body.extend_from_slice(&payload);
+                if flags & 0x1 != 0 {
+                    done = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_headers, "should receive response HEADERS");
+    assert!(
+        conn_window_increments > 0,
+        "closure path: server should emit connection-level WINDOW_UPDATE"
+    );
+    assert!(
+        stream_window_increments > 0,
+        "closure path: server should emit stream-level WINDOW_UPDATE"
+    );
+    assert_eq!(resp_body, b"closure-path-ok");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
