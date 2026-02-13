@@ -1615,3 +1615,153 @@ fn http2_closure_path_send_side_flow_control_small_window() {
     drop(TcpStream::connect(addr));
     server_thread.join().expect("server thread join");
 }
+
+// ---------- RFC 7540 frame validation E2E tests ----------
+
+/// Server must reject PUSH_PROMISE frames (§6.6) -- app path.
+#[test]
+fn http2_app_path_rejects_push_promise() {
+    let app = App::builder()
+        .get(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // Send PUSH_PROMISE (frame type 0x5) on stream 1.
+    write_frame(&mut stream, 0x5, 0x4, 1, &[0, 0, 0, 2, 0x82]);
+
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// Server must reject DATA frames on stream 0 (§6.1) -- app path.
+#[test]
+fn http2_app_path_rejects_data_on_stream_zero() {
+    let app = App::builder()
+        .post(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // Send POST HEADERS without END_STREAM.
+    let post_header_block: [u8; 17] = [
+        0x83, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x4, 1, &post_header_block);
+
+    // Send DATA on stream 0 -- protocol violation.
+    write_frame(&mut stream, 0x0, 0x1, 0, b"bad");
+
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// Server must reject GOAWAY with payload shorter than 8 bytes (§6.8).
+#[test]
+fn http2_app_path_rejects_short_goaway_payload() {
+    let app = App::builder()
+        .get(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // Send GOAWAY with only 4 bytes (should be >= 8).
+    write_frame(&mut stream, 0x7, 0x0, 0, &[0, 0, 0, 0]);
+
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// Server accepts well-formed GOAWAY and closes cleanly.
+#[test]
+fn http2_app_path_accepts_valid_goaway() {
+    let app = App::builder()
+        .get(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // Send valid GOAWAY: last_stream_id=0, error_code=0 (NO_ERROR).
+    write_frame(&mut stream, 0x7, 0x0, 0, &[0, 0, 0, 0, 0, 0, 0, 0]);
+
+    // Server should gracefully close.
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}

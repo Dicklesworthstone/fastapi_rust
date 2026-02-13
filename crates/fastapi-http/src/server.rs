@@ -1374,6 +1374,7 @@ async fn h2_fc_clamp_send(
                 )));
             }
             http2::FrameType::RstStream => {
+                validate_rst_stream_payload(frame.header.stream_id, &frame.payload)?;
                 if frame.header.stream_id == stream_id {
                     return Err(ServerError::Http2(http2::Http2Error::Protocol(
                         "stream reset by peer during response",
