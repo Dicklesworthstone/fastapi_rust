@@ -788,12 +788,6 @@ where
             return Poll::Ready(None);
         }
 
-        // Check if we've read all expected bytes
-        if self.bytes_read >= self.expected_size {
-            self.complete = true;
-            return Poll::Ready(None);
-        }
-
         // Check size limit
         if self.bytes_read > self.max_size {
             self.error = true;
@@ -805,14 +799,30 @@ where
             })));
         }
 
+        // Check if we've read all expected bytes
+        if self.bytes_read >= self.expected_size {
+            self.complete = true;
+            return Poll::Ready(None);
+        }
+
+        let remaining_for_body = self.expected_size.saturating_sub(self.bytes_read);
+        let remaining_budget = self.max_size.saturating_sub(self.bytes_read);
+        if remaining_for_body > 0 && remaining_budget == 0 {
+            self.error = true;
+            return Poll::Ready(Some(Err(RequestBodyStreamError::TooLarge {
+                received: self.bytes_read.saturating_add(1),
+                max: self.max_size,
+            })));
+        }
+
         // First, try to yield from initial buffer
         let initial_remaining = self.initial_remaining();
         if initial_remaining > 0 {
-            let remaining_for_body = self.expected_size.saturating_sub(self.bytes_read);
             let chunk_size = self
                 .chunk_size
                 .min(initial_remaining)
-                .min(remaining_for_body);
+                .min(remaining_for_body)
+                .min(remaining_budget);
 
             if chunk_size > 0 {
                 let start = self.initial_position;
@@ -825,7 +835,7 @@ where
 
         // Initial buffer exhausted, read from reader
         let remaining = self.expected_size.saturating_sub(self.bytes_read);
-        let to_read = self.chunk_size.min(remaining);
+        let to_read = self.chunk_size.min(remaining).min(remaining_budget);
 
         if to_read == 0 {
             self.complete = true;
@@ -1836,6 +1846,56 @@ mod tests {
         let result = Pin::new(&mut stream).poll_next(&mut cx);
         assert!(matches!(result, Poll::Ready(None)));
         assert!(stream.is_complete());
+    }
+
+    #[test]
+    fn async_content_length_stream_enforces_max_size() {
+        use std::io::Cursor;
+        use std::sync::Arc;
+        use std::task::{Wake, Waker};
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        fn noop_waker() -> Waker {
+            Waker::from(Arc::new(NoopWaker))
+        }
+
+        let initial = b"123456".to_vec();
+        let reader = Cursor::new(b"abcdef".to_vec());
+        let config = StreamingBodyConfig::new()
+            .with_chunk_size(8)
+            .with_max_size(10);
+        let mut stream = AsyncContentLengthStream::new(initial, reader, 12, &config);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First 6 bytes come from initial buffer.
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        match result {
+            Poll::Ready(Some(Ok(chunk))) => assert_eq!(chunk, b"123456"),
+            _ => panic!("expected initial chunk"),
+        }
+
+        // Stream can still emit bytes up to max_size.
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        match result {
+            Poll::Ready(Some(Ok(chunk))) => assert_eq!(chunk, b"abcd"),
+            _ => panic!("expected bounded reader chunk"),
+        }
+
+        // Next poll must fail because body is larger than max_size.
+        let result = Pin::new(&mut stream).poll_next(&mut cx);
+        match result {
+            Poll::Ready(Some(Err(RequestBodyStreamError::TooLarge { received, max }))) => {
+                assert_eq!(received, 11);
+                assert_eq!(max, 10);
+            }
+            _ => panic!("expected TooLarge error, got {:?}", result),
+        }
     }
 
     // ========================================================================
