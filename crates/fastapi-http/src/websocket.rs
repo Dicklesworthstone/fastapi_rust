@@ -496,10 +496,23 @@ pub fn validate_upgrade_request(
     Ok(key.to_string())
 }
 
+fn is_valid_subprotocol_token(value: &str) -> bool {
+    // RFC 6455 references HTTP token syntax: 1*<any CHAR except CTLs or separators>.
+    // Restrict to visible ASCII token chars and reject separators/whitespace.
+    const SEPARATORS: &str = "()<>@,;:\\\"/[]?={} \t";
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii() && (0x21..=0x7E).contains(&b) && !SEPARATORS.contains(b as char))
+}
+
 /// Build the HTTP 101 Switching Protocols response bytes for a WebSocket upgrade.
 ///
 /// If `subprotocol` is provided, includes `Sec-WebSocket-Protocol` in the response.
-pub fn build_accept_response(client_key: &str, subprotocol: Option<&str>) -> Vec<u8> {
+pub fn build_accept_response(
+    client_key: &str,
+    subprotocol: Option<&str>,
+) -> Result<Vec<u8>, WebSocketError> {
     let accept = accept_key(client_key);
     let mut response = format!(
         "HTTP/1.1 101 Switching Protocols\r\n\
@@ -508,10 +521,15 @@ pub fn build_accept_response(client_key: &str, subprotocol: Option<&str>) -> Vec
          Sec-WebSocket-Accept: {accept}\r\n"
     );
     if let Some(proto) = subprotocol {
+        if !is_valid_subprotocol_token(proto) {
+            return Err(WebSocketError::HandshakeFailed(
+                "invalid Sec-WebSocket-Protocol token".into(),
+            ));
+        }
         response.push_str(&format!("Sec-WebSocket-Protocol: {proto}\r\n"));
     }
     response.push_str("\r\n");
-    response.into_bytes()
+    Ok(response.into_bytes())
 }
 
 // ============================================================================
@@ -893,7 +911,7 @@ impl WebSocket {
             ));
         }
 
-        let response_bytes = build_accept_response(&self.client_key, subprotocol);
+        let response_bytes = build_accept_response(&self.client_key, subprotocol)?;
         ws_write_all(&mut self.stream, &response_bytes).await?;
         ws_flush(&mut self.stream).await?;
         self.state = WsState::Open;
@@ -1211,7 +1229,8 @@ mod tests {
 
     #[test]
     fn test_build_accept_response_basic() {
-        let resp = build_accept_response("dGhlIHNhbXBsZSBub25jZQ==", None);
+        let resp = build_accept_response("dGhlIHNhbXBsZSBub25jZQ==", None)
+            .expect("response build should succeed");
         let resp_str = String::from_utf8(resp).unwrap();
         assert!(resp_str.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
         assert!(resp_str.contains("Upgrade: websocket\r\n"));
@@ -1222,9 +1241,22 @@ mod tests {
 
     #[test]
     fn test_build_accept_response_with_subprotocol() {
-        let resp = build_accept_response("dGhlIHNhbXBsZSBub25jZQ==", Some("graphql-ws"));
+        let resp = build_accept_response("dGhlIHNhbXBsZSBub25jZQ==", Some("graphql-ws"))
+            .expect("response build should succeed");
         let resp_str = String::from_utf8(resp).unwrap();
         assert!(resp_str.contains("Sec-WebSocket-Protocol: graphql-ws\r\n"));
+    }
+
+    #[test]
+    fn test_build_accept_response_rejects_invalid_subprotocol_token() {
+        let err =
+            build_accept_response("dGhlIHNhbXBsZSBub25jZQ==", Some("graphql-ws\r\nX-Evil: 1"))
+                .expect_err("invalid subprotocol token must fail");
+        assert!(matches!(err, WebSocketError::HandshakeFailed(_)));
+        assert!(
+            err.to_string()
+                .contains("invalid Sec-WebSocket-Protocol token")
+        );
     }
 
     #[test]
