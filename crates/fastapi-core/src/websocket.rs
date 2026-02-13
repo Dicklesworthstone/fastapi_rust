@@ -19,6 +19,8 @@ use std::task::Poll;
 /// The GUID used for computing `Sec-WebSocket-Accept`.
 pub const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_TEXT_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CONTROL_PAYLOAD_BYTES: usize = 125;
+const MAX_CLOSE_REASON_BYTES: usize = 123;
 const CLOSE_CODE_PROTOCOL_ERROR: u16 = 1002;
 const CLOSE_CODE_UNSUPPORTED_DATA: u16 = 1003;
 const CLOSE_CODE_INVALID_PAYLOAD: u16 = 1007;
@@ -385,7 +387,7 @@ impl WebSocket {
 
     /// Send a `Pong` control frame (server-side, unmasked).
     pub async fn send_pong(&mut self, payload: &[u8]) -> Result<(), WebSocketError> {
-        if payload.len() > 125 {
+        if payload.len() > MAX_CONTROL_PAYLOAD_BYTES {
             return Err(WebSocketError::Protocol("pong payload too large"));
         }
         let frame = Frame {
@@ -402,6 +404,44 @@ impl WebSocket {
             fin: true,
             opcode: OpCode::Text,
             payload: text.as_bytes().to_vec(),
+        };
+        self.write_frame(&frame).await
+    }
+
+    /// Convenience: send a binary message.
+    pub async fn send_bytes(&mut self, data: &[u8]) -> Result<(), WebSocketError> {
+        let frame = Frame {
+            fin: true,
+            opcode: OpCode::Binary,
+            payload: data.to_vec(),
+        };
+        self.write_frame(&frame).await
+    }
+
+    /// Convenience: send a `Ping` control frame.
+    pub async fn ping(&mut self, payload: &[u8]) -> Result<(), WebSocketError> {
+        if payload.len() > MAX_CONTROL_PAYLOAD_BYTES {
+            return Err(WebSocketError::Protocol("ping payload too large"));
+        }
+        let frame = Frame {
+            fin: true,
+            opcode: OpCode::Ping,
+            payload: payload.to_vec(),
+        };
+        self.write_frame(&frame).await
+    }
+
+    /// Initiate a close handshake with an explicit close code and optional reason.
+    pub async fn close(
+        &mut self,
+        close_code: u16,
+        reason: Option<&str>,
+    ) -> Result<(), WebSocketError> {
+        let payload = build_close_payload(close_code, reason)?;
+        let frame = Frame {
+            fin: true,
+            opcode: OpCode::Close,
+            payload,
         };
         self.write_frame(&frame).await
     }
@@ -660,6 +700,23 @@ fn is_valid_close_payload(payload: &[u8]) -> bool {
     std::str::from_utf8(&payload[2..]).is_ok()
 }
 
+fn build_close_payload(close_code: u16, reason: Option<&str>) -> Result<Vec<u8>, WebSocketError> {
+    if !is_valid_close_code(close_code) {
+        return Err(WebSocketError::Protocol("invalid close code"));
+    }
+
+    let mut payload = Vec::with_capacity(2 + reason.map_or(0, str::len));
+    payload.extend_from_slice(&close_code.to_be_bytes());
+    if let Some(reason_str) = reason {
+        let mut end = reason_str.len().min(MAX_CLOSE_REASON_BYTES);
+        while end > 0 && !reason_str.is_char_boundary(end) {
+            end -= 1;
+        }
+        payload.extend_from_slice(&reason_str.as_bytes()[..end]);
+    }
+    Ok(payload)
+}
+
 fn is_valid_close_code(code: u16) -> bool {
     matches!(
         code,
@@ -696,5 +753,23 @@ mod tests {
         assert!(is_valid_close_payload(&[0x03, 0xE8])); // 1000
         assert!(is_valid_close_payload(&[0x03, 0xE8, b'o', b'k']));
         assert!(!is_valid_close_payload(&[0x03, 0xE8, 0xFF])); // invalid utf-8 reason
+    }
+
+    #[test]
+    fn build_close_payload_rejects_invalid_code() {
+        let err = build_close_payload(1006, None).expect_err("1006 must be rejected");
+        assert!(matches!(err, WebSocketError::Protocol(_)));
+    }
+
+    #[test]
+    fn build_close_payload_truncates_on_utf8_boundary() {
+        let reason = "é".repeat(100); // 200 bytes UTF-8.
+        let payload = build_close_payload(1000, Some(&reason)).expect("payload");
+        assert!(payload.len() <= MAX_CONTROL_PAYLOAD_BYTES);
+        let reason_bytes = &payload[2..];
+        assert!(
+            std::str::from_utf8(reason_bytes).is_ok(),
+            "close reason must remain valid UTF-8"
+        );
     }
 }

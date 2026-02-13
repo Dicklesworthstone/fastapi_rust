@@ -910,7 +910,7 @@ impl WebSocket {
     /// Returns an error if the connection is closed or a protocol
     /// violation occurs.
     pub async fn receive(&mut self) -> Result<Message, WebSocketError> {
-        self.ensure_open()?;
+        self.ensure_can_receive()?;
         let msg = read_message(&mut self.stream, &self.config).await?;
         match msg {
             Message::Close(code, reason) => {
@@ -1042,6 +1042,16 @@ impl WebSocket {
                 "must call accept() before sending/receiving".into(),
             )),
             WsState::CloseSent | WsState::Closed => Err(WebSocketError::ConnectionClosed),
+        }
+    }
+
+    fn ensure_can_receive(&self) -> Result<(), WebSocketError> {
+        match self.state {
+            WsState::Open | WsState::CloseSent => Ok(()),
+            WsState::Pending => Err(WebSocketError::Protocol(
+                "must call accept() before sending/receiving".into(),
+            )),
+            WsState::Closed => Err(WebSocketError::ConnectionClosed),
         }
     }
 }
