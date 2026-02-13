@@ -2661,6 +2661,19 @@ impl TcpServer {
                                     }
                                     if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                         validate_window_update_payload(&f.payload)?;
+                                        // Track send-side window updates from peer.
+                                        if f.payload.len() >= 4 {
+                                            let increment = u32::from_be_bytes([
+                                                f.payload[0],
+                                                f.payload[1],
+                                                f.payload[2],
+                                                f.payload[3],
+                                            ]) & 0x7FFF_FFFF;
+                                            if f.header.stream_id == 0 {
+                                                flow_control
+                                                    .peer_window_update_connection(increment);
+                                            }
+                                        }
                                     }
                                     if f.header.frame_type() == http2::FrameType::Ping {
                                         if f.header.stream_id != 0 || f.payload.len() != 8 {
@@ -2736,22 +2749,40 @@ impl TcpServer {
                     if let Err(err) = validate_host_header(&request, &self.config) {
                         ctx.trace(&format!("Rejecting HTTP/2 request: {}", err.detail));
                         let response = err.response();
-                        self.write_h2_response(&mut framed, response, stream_id, max_frame_size)
-                            .await?;
+                        self.write_h2_response(
+                            &mut framed,
+                            response,
+                            stream_id,
+                            max_frame_size,
+                            Some(&mut flow_control),
+                        )
+                        .await?;
                         continue;
                     }
 
                     if let Err(response) = self.config.pre_body_validators.validate_all(&request) {
-                        self.write_h2_response(&mut framed, response, stream_id, max_frame_size)
-                            .await?;
+                        self.write_h2_response(
+                            &mut framed,
+                            response,
+                            stream_id,
+                            max_frame_size,
+                            Some(&mut flow_control),
+                        )
+                        .await?;
                         continue;
                     }
 
                     let response = app.handle(&ctx, &mut request).await;
 
                     // Send response on the same stream.
-                    self.write_h2_response(&mut framed, response, stream_id, max_frame_size)
-                        .await?;
+                    self.write_h2_response(
+                        &mut framed,
+                        response,
+                        stream_id,
+                        max_frame_size,
+                        Some(&mut flow_control),
+                    )
+                    .await?;
 
                     if let Some(tasks) = App::take_background_tasks(&mut request) {
                         tasks.execute_all().await;
@@ -2760,8 +2791,22 @@ impl TcpServer {
                     // Yield to keep cancellation responsive.
                     asupersync::runtime::yield_now().await;
                 }
+                http2::FrameType::WindowUpdate => {
+                    validate_window_update_payload(&frame.payload)?;
+                    if frame.payload.len() >= 4 {
+                        let increment = u32::from_be_bytes([
+                            frame.payload[0],
+                            frame.payload[1],
+                            frame.payload[2],
+                            frame.payload[3],
+                        ]) & 0x7FFF_FFFF;
+                        if frame.header.stream_id == 0 {
+                            flow_control.peer_window_update_connection(increment);
+                        }
+                    }
+                }
                 _ => {
-                    // Minimal: ignore other frame types for now.
+                    // Ignore other frame types for now.
                 }
             }
         }
@@ -2773,6 +2818,7 @@ impl TcpServer {
         response: Response,
         stream_id: u32,
         max_frame_size: u32,
+        mut flow_control: Option<&mut http2::H2FlowControl>,
     ) -> Result<(), ServerError> {
         use std::future::poll_fn;
 
@@ -2852,7 +2898,12 @@ impl TcpServer {
             self.record_bytes_out((http2::FrameHeader::LEN + remaining.len()) as u64);
         }
 
-        // Write body.
+        // Track per-stream send window (peer's receive window for this stream).
+        let mut stream_send_window: i64 = flow_control
+            .as_ref()
+            .map_or(i64::MAX, |fc| i64::from(fc.peer_initial_window_size()));
+
+        // Write body with send-side flow control.
         match body {
             fastapi_core::ResponseBody::Empty => Ok(()),
             fastapi_core::ResponseBody::Bytes(bytes) => {
@@ -2860,23 +2911,26 @@ impl TcpServer {
                     return Ok(());
                 }
                 let mut remaining = bytes.as_slice();
-                while remaining.len() > max {
-                    let (chunk, r) = remaining.split_at(max);
+                while !remaining.is_empty() {
+                    let send_len = remaining.len().min(max);
+                    let send_len = h2_fc_clamp_send(
+                        framed,
+                        &mut flow_control,
+                        &mut stream_send_window,
+                        stream_id,
+                        send_len,
+                        max_frame_size,
+                    )
+                    .await?;
+
+                    let (chunk, r) = remaining.split_at(send_len);
+                    let flags = if r.is_empty() { FLAG_END_STREAM } else { 0 };
                     framed
-                        .write_frame(http2::FrameType::Data, 0, stream_id, chunk)
+                        .write_frame(http2::FrameType::Data, flags, stream_id, chunk)
                         .await?;
                     self.record_bytes_out((http2::FrameHeader::LEN + chunk.len()) as u64);
                     remaining = r;
                 }
-                framed
-                    .write_frame(
-                        http2::FrameType::Data,
-                        FLAG_END_STREAM,
-                        stream_id,
-                        remaining,
-                    )
-                    .await?;
-                self.record_bytes_out((http2::FrameHeader::LEN + remaining.len()) as u64);
                 Ok(())
             }
             fastapi_core::ResponseBody::Stream(mut s) => {
@@ -2885,21 +2939,24 @@ impl TcpServer {
                     match next {
                         Some(chunk) => {
                             let mut remaining = chunk.as_slice();
-                            while remaining.len() > max {
-                                let (c, r) = remaining.split_at(max);
+                            while !remaining.is_empty() {
+                                let send_len = remaining.len().min(max);
+                                let send_len = h2_fc_clamp_send(
+                                    framed,
+                                    &mut flow_control,
+                                    &mut stream_send_window,
+                                    stream_id,
+                                    send_len,
+                                    max_frame_size,
+                                )
+                                .await?;
+
+                                let (c, r) = remaining.split_at(send_len);
                                 framed
                                     .write_frame(http2::FrameType::Data, 0, stream_id, c)
                                     .await?;
                                 self.record_bytes_out((http2::FrameHeader::LEN + c.len()) as u64);
                                 remaining = r;
-                            }
-                            if !remaining.is_empty() {
-                                framed
-                                    .write_frame(http2::FrameType::Data, 0, stream_id, remaining)
-                                    .await?;
-                                self.record_bytes_out(
-                                    (http2::FrameHeader::LEN + remaining.len()) as u64,
-                                );
                             }
                         }
                         None => {
@@ -3111,6 +3168,19 @@ impl TcpServer {
                                     }
                                     if f.header.frame_type() == http2::FrameType::WindowUpdate {
                                         validate_window_update_payload(&f.payload)?;
+                                        // Track send-side window updates from peer.
+                                        if f.payload.len() >= 4 {
+                                            let increment = u32::from_be_bytes([
+                                                f.payload[0],
+                                                f.payload[1],
+                                                f.payload[2],
+                                                f.payload[3],
+                                            ]) & 0x7FFF_FFFF;
+                                            if f.header.stream_id == 0 {
+                                                flow_control
+                                                    .peer_window_update_connection(increment);
+                                            }
+                                        }
                                     }
                                     if f.header.frame_type() == http2::FrameType::Ping {
                                         if f.header.stream_id != 0 || f.payload.len() != 8 {
@@ -3189,19 +3259,51 @@ impl TcpServer {
 
                     if let Err(err) = validate_host_header(&request, &self.config) {
                         let response = err.response();
-                        self.write_h2_response(&mut framed, response, stream_id, max_frame_size)
-                            .await?;
+                        self.write_h2_response(
+                            &mut framed,
+                            response,
+                            stream_id,
+                            max_frame_size,
+                            Some(&mut flow_control),
+                        )
+                        .await?;
                         continue;
                     }
                     if let Err(response) = self.config.pre_body_validators.validate_all(&request) {
-                        self.write_h2_response(&mut framed, response, stream_id, max_frame_size)
-                            .await?;
+                        self.write_h2_response(
+                            &mut framed,
+                            response,
+                            stream_id,
+                            max_frame_size,
+                            Some(&mut flow_control),
+                        )
+                        .await?;
                         continue;
                     }
 
                     let response = handler.call(&ctx, &mut request).await;
-                    self.write_h2_response(&mut framed, response, stream_id, max_frame_size)
-                        .await?;
+                    self.write_h2_response(
+                        &mut framed,
+                        response,
+                        stream_id,
+                        max_frame_size,
+                        Some(&mut flow_control),
+                    )
+                    .await?;
+                }
+                http2::FrameType::WindowUpdate => {
+                    validate_window_update_payload(&frame.payload)?;
+                    if frame.payload.len() >= 4 {
+                        let increment = u32::from_be_bytes([
+                            frame.payload[0],
+                            frame.payload[1],
+                            frame.payload[2],
+                            frame.payload[3],
+                        ]) & 0x7FFF_FFFF;
+                        if frame.header.stream_id == 0 {
+                            flow_control.peer_window_update_connection(increment);
+                        }
+                    }
                 }
                 _ => {}
             }
