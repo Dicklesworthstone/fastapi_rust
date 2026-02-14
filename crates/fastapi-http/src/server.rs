@@ -869,7 +869,7 @@ where
     )?;
 
     framed
-        .write_frame(http2::FrameType::Settings, 0, 0, &[])
+        .write_frame(http2::FrameType::Settings, 0, 0, SERVER_SETTINGS_PAYLOAD)
         .await?;
     framed
         .write_frame(http2::FrameType::Settings, FLAG_ACK, 0, &[])
@@ -925,12 +925,24 @@ where
                 );
             }
             http2::FrameType::Headers => {
-                if frame.header.stream_id == 0 {
+                let stream_id = frame.header.stream_id;
+                if stream_id == 0 {
                     return Err(
                         http2::Http2Error::Protocol("HEADERS must not be on stream 0").into(),
                     );
                 }
-                let stream_id = frame.header.stream_id;
+                if stream_id % 2 == 0 {
+                    return Err(http2::Http2Error::Protocol(
+                        "client-initiated stream ID must be odd",
+                    )
+                    .into());
+                }
+                if stream_id <= last_stream_id {
+                    return Err(http2::Http2Error::Protocol(
+                        "stream ID must be greater than previous",
+                    )
+                    .into());
+                }
                 last_stream_id = stream_id;
                 let (end_stream, mut header_block) =
                     extract_header_block_fragment(frame.header.flags, &frame.payload)?;
@@ -2563,7 +2575,7 @@ impl TcpServer {
 
         // Send server SETTINGS (empty for now) and ACK the client's SETTINGS.
         framed
-            .write_frame(http2::FrameType::Settings, 0, 0, &[])
+            .write_frame(http2::FrameType::Settings, 0, 0, SERVER_SETTINGS_PAYLOAD)
             .await?;
         self.record_bytes_out(http2::FrameHeader::LEN as u64);
 
@@ -2628,13 +2640,24 @@ impl TcpServer {
                     .into());
                 }
                 http2::FrameType::Headers => {
-                    if frame.header.stream_id == 0 {
+                    let stream_id = frame.header.stream_id;
+                    if stream_id == 0 {
                         return Err(
                             http2::Http2Error::Protocol("HEADERS must not be on stream 0").into(),
                         );
                     }
-
-                    let stream_id = frame.header.stream_id;
+                    if stream_id % 2 == 0 {
+                        return Err(http2::Http2Error::Protocol(
+                            "client-initiated stream ID must be odd",
+                        )
+                        .into());
+                    }
+                    if stream_id <= last_stream_id {
+                        return Err(http2::Http2Error::Protocol(
+                            "stream ID must be greater than previous",
+                        )
+                        .into());
+                    }
                     last_stream_id = stream_id;
                     let (end_stream, mut header_block) =
                         extract_header_block_fragment(frame.header.flags, &frame.payload)?;
@@ -3109,7 +3132,7 @@ impl TcpServer {
         )?;
 
         framed
-            .write_frame(http2::FrameType::Settings, 0, 0, &[])
+            .write_frame(http2::FrameType::Settings, 0, 0, SERVER_SETTINGS_PAYLOAD)
             .await?;
         self.record_bytes_out(http2::FrameHeader::LEN as u64);
 
@@ -3173,13 +3196,24 @@ impl TcpServer {
                     .into());
                 }
                 http2::FrameType::Headers => {
-                    if frame.header.stream_id == 0 {
+                    let stream_id = frame.header.stream_id;
+                    if stream_id == 0 {
                         return Err(
                             http2::Http2Error::Protocol("HEADERS must not be on stream 0").into(),
                         );
                     }
-
-                    let stream_id = frame.header.stream_id;
+                    if stream_id % 2 == 0 {
+                        return Err(http2::Http2Error::Protocol(
+                            "client-initiated stream ID must be odd",
+                        )
+                        .into());
+                    }
+                    if stream_id <= last_stream_id {
+                        return Err(http2::Http2Error::Protocol(
+                            "stream ID must be greater than previous",
+                        )
+                        .into());
+                    }
                     last_stream_id = stream_id;
                     let (end_stream, mut header_block) =
                         extract_header_block_fragment(frame.header.flags, &frame.payload)?;
@@ -3890,8 +3924,9 @@ fn apply_http2_settings_with_fc(
         let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
         match id {
             0x1 => {
-                // SETTINGS_HEADER_TABLE_SIZE
-                hpack.set_dynamic_table_max_size(value as usize);
+                // SETTINGS_HEADER_TABLE_SIZE — cap to prevent memory exhaustion.
+                let capped = (value as usize).min(MAX_HPACK_TABLE_SIZE);
+                hpack.set_dynamic_table_max_size(capped);
             }
             0x3 => {
                 // SETTINGS_INITIAL_WINDOW_SIZE (RFC 7540 §6.5.2)
@@ -4002,6 +4037,19 @@ fn handle_h2_idle_frame(frame: &http2::Frame) -> Result<(), http2::Http2Error> {
 
 /// Maximum flow-control window size (2^31 - 1) per RFC 7540 §6.9.1.
 const MAX_FLOW_CONTROL_WINDOW: i64 = 0x7FFF_FFFF;
+
+/// Server SETTINGS payload advertising SETTINGS_MAX_CONCURRENT_STREAMS = 1.
+/// The server processes streams serially, so advertising this informs clients
+/// to avoid opening multiple concurrent streams on one connection.
+const SERVER_SETTINGS_PAYLOAD: &[u8] = &[
+    0x00, 0x03, // SETTINGS_MAX_CONCURRENT_STREAMS
+    0x00, 0x00, 0x00, 0x01, // value = 1
+];
+
+/// Maximum HPACK dynamic table size we allow from peer SETTINGS.
+/// Capped at 64 KiB to prevent gradual memory exhaustion on long-lived
+/// connections where a client sets SETTINGS_HEADER_TABLE_SIZE to 4 GB.
+const MAX_HPACK_TABLE_SIZE: usize = 64 * 1024;
 
 /// Maximum accumulated header block size across HEADERS + CONTINUATION frames.
 /// Prevents CONTINUATION bomb attacks where an attacker sends unlimited
@@ -4777,6 +4825,27 @@ mod tests {
     #[test]
     fn max_header_block_size_is_128k() {
         assert_eq!(MAX_HEADER_BLOCK_SIZE, 128 * 1024);
+    }
+
+    #[test]
+    fn server_settings_payload_advertises_max_concurrent_streams() {
+        // SETTINGS_MAX_CONCURRENT_STREAMS (0x3) = 1
+        assert_eq!(SERVER_SETTINGS_PAYLOAD.len(), 6);
+        assert_eq!(SERVER_SETTINGS_PAYLOAD[0..2], [0x00, 0x03]);
+        assert_eq!(
+            u32::from_be_bytes([
+                SERVER_SETTINGS_PAYLOAD[2],
+                SERVER_SETTINGS_PAYLOAD[3],
+                SERVER_SETTINGS_PAYLOAD[4],
+                SERVER_SETTINGS_PAYLOAD[5],
+            ]),
+            1
+        );
+    }
+
+    #[test]
+    fn max_hpack_table_size_is_64k() {
+        assert_eq!(MAX_HPACK_TABLE_SIZE, 64 * 1024);
     }
 
     #[test]
