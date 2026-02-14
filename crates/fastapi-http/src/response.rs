@@ -2,6 +2,7 @@
 
 use asupersync::stream::Stream;
 use fastapi_core::{BodyStream, Response, ResponseBody, StatusCode};
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -70,10 +71,7 @@ impl Trailers {
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for (name, value) in &self.headers {
-            out.extend_from_slice(name.as_bytes());
-            out.extend_from_slice(b": ");
-            out.extend_from_slice(value.as_bytes());
-            out.extend_from_slice(b"\r\n");
+            write_header_line(&mut out, name, value.as_bytes());
         }
         out
     }
@@ -213,10 +211,7 @@ impl ResponseWriter {
             if is_content_length(name) || is_transfer_encoding(name) {
                 continue;
             }
-            self.buffer.extend_from_slice(name.as_bytes());
-            self.buffer.extend_from_slice(b": ");
-            self.buffer.extend_from_slice(value);
-            self.buffer.extend_from_slice(b"\r\n");
+            write_header_line(&mut self.buffer, name, value);
         }
 
         // Content-Length
@@ -247,10 +242,7 @@ impl ResponseWriter {
             if is_content_length(name) || is_transfer_encoding(name) {
                 continue;
             }
-            self.buffer.extend_from_slice(name.as_bytes());
-            self.buffer.extend_from_slice(b": ");
-            self.buffer.extend_from_slice(value);
-            self.buffer.extend_from_slice(b"\r\n");
+            write_header_line(&mut self.buffer, name, value);
         }
 
         // Transfer-Encoding: chunked
@@ -285,6 +277,58 @@ fn is_content_length(name: &str) -> bool {
 
 fn is_transfer_encoding(name: &str) -> bool {
     name.eq_ignore_ascii_case("transfer-encoding")
+}
+
+fn write_header_line(buffer: &mut Vec<u8>, name: &str, value: &[u8]) {
+    if !is_valid_header_name(name) {
+        return;
+    }
+    buffer.extend_from_slice(name.as_bytes());
+    buffer.extend_from_slice(b": ");
+    buffer.extend_from_slice(sanitize_header_value(value).as_ref());
+    buffer.extend_from_slice(b"\r\n");
+}
+
+fn sanitize_header_value(value: &[u8]) -> Cow<'_, [u8]> {
+    if value
+        .iter()
+        .all(|&byte| byte != b'\r' && byte != b'\n' && byte != 0)
+    {
+        return Cow::Borrowed(value);
+    }
+    Cow::Owned(
+        value
+            .iter()
+            .copied()
+            .filter(|&byte| byte != b'\r' && byte != b'\n' && byte != 0)
+            .collect(),
+    )
+}
+
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'a'..=b'z'
+                    | b'|'
+                    | b'~'
+            )
+        })
 }
 
 impl Default for ResponseWriter {
@@ -419,5 +463,56 @@ mod tests {
         let final_chunk = encoder.encode_final_chunk();
         let s = std::str::from_utf8(&final_chunk).unwrap();
         assert_eq!(s, "0\r\nDigest: sha-256=abc\r\nSignature: sig123\r\n\r\n");
+    }
+
+    #[test]
+    fn write_full_drops_invalid_header_names_and_sanitizes_values() {
+        let mut writer = ResponseWriter::new();
+        let headers = vec![
+            ("x-ok".to_string(), b"safe".to_vec()),
+            ("bad\r\nname".to_string(), b"ignored".to_vec()),
+            ("x-test".to_string(), b"hello\r\nx-injected: yes".to_vec()),
+        ];
+
+        let bytes = writer.write_full(StatusCode::OK, &headers, b"body");
+        let text = String::from_utf8_lossy(&bytes);
+
+        assert!(text.contains("x-ok: safe\r\n"));
+        assert!(!text.contains("bad\r\nname:"));
+        assert!(text.contains("x-test: hellox-injected: yes\r\n"));
+        assert!(!text.contains("\r\nx-injected: yes\r\n"));
+    }
+
+    #[test]
+    fn write_stream_head_drops_invalid_header_names_and_sanitizes_values() {
+        let mut writer = ResponseWriter::new();
+        let headers = vec![
+            ("content-type".to_string(), b"text/plain".to_vec()),
+            ("bad\nname".to_string(), b"ignored".to_vec()),
+            ("x-test".to_string(), b"hello\r\nx-injected: yes".to_vec()),
+        ];
+
+        let bytes = writer.write_stream_head(StatusCode::OK, &headers);
+        let text = String::from_utf8_lossy(&bytes);
+
+        assert!(text.contains("content-type: text/plain\r\n"));
+        assert!(!text.contains("bad\nname:"));
+        assert!(text.contains("x-test: hellox-injected: yes\r\n"));
+        assert!(!text.contains("\r\nx-injected: yes\r\n"));
+    }
+
+    #[test]
+    fn trailers_encode_drops_invalid_names_and_sanitizes_values() {
+        let encoded = Trailers::new()
+            .add("Checksum", "abc123")
+            .add("Bad\r\nName", "ignored")
+            .add("Signature", "sig\r\nInjected: yes")
+            .encode();
+        let text = std::str::from_utf8(&encoded).unwrap();
+
+        assert!(text.contains("Checksum: abc123\r\n"));
+        assert!(!text.contains("Bad\r\nName"));
+        assert!(text.contains("Signature: sigInjected: yes\r\n"));
+        assert!(!text.contains("\r\nInjected: yes\r\n"));
     }
 }
