@@ -856,16 +856,17 @@ pub fn url_encode(s: &str) -> String {
     result
 }
 
-/// URL-encode a path segment.
+/// URL-encode a path segment, preserving forward slashes.
 ///
-/// Similar to `url_encode` but also allows forward slashes for path converter values.
+/// Similar to `url_encode` but also allows forward slashes for path converter
+/// values, so `/files/a/b/c.txt` stays as-is instead of encoding `/` as `%2F`.
 #[must_use]
 pub fn url_encode_path_segment(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
         match byte {
-            // Unreserved characters (RFC 3986)
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+            // Unreserved characters (RFC 3986) + forward slash for paths
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 result.push(byte as char);
             }
             // Everything else gets percent-encoded
@@ -1336,6 +1337,17 @@ mod tests {
     fn url_encode_unicode() {
         assert_eq!(url_encode("日本"), "%E6%97%A5%E6%9C%AC");
         assert_eq!(url_encode("café"), "caf%C3%A9");
+    }
+
+    #[test]
+    fn url_encode_path_segment_preserves_slashes() {
+        // url_encode encodes slashes
+        assert_eq!(url_encode("a/b/c"), "a%2Fb%2Fc");
+        // url_encode_path_segment preserves them
+        assert_eq!(url_encode_path_segment("a/b/c"), "a/b/c");
+        // But still encodes other special chars
+        assert_eq!(url_encode_path_segment("a b/c"), "a%20b/c");
+        assert_eq!(url_encode_path_segment("a&b/c"), "a%26b/c");
     }
 
     #[test]

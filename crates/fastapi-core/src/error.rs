@@ -183,22 +183,9 @@ impl DebugConfig {
 
 /// Constant-time string comparison to prevent timing attacks.
 ///
-/// This function compares two strings in constant time (for same-length inputs)
-/// to prevent timing-based side-channel attacks.
+/// Delegates to `crate::password::constant_time_eq` to avoid duplication.
 fn constant_time_str_eq(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-
-    if a_bytes.len() != b_bytes.len() {
-        return false;
-    }
-
-    let diff = a_bytes
-        .iter()
-        .zip(b_bytes.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
-
-    diff == 0
+    crate::password::constant_time_eq(a.as_bytes(), b.as_bytes())
 }
 
 // ============================================================================

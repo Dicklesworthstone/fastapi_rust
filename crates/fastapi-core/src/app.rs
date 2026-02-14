@@ -626,9 +626,18 @@ impl AppConfig {
     }
 
     /// Set the root path for proxied deployments.
+    ///
+    /// The value is normalized: trailing slashes are stripped, and the value
+    /// must start with `/` (or be empty). This prevents misconfigured
+    /// root paths from producing broken redirects or URL generation.
     #[must_use]
     pub fn root_path(mut self, root_path: impl Into<String>) -> Self {
-        self.root_path = root_path.into();
+        let mut rp = root_path.into();
+        // Strip trailing slashes (consistent with UrlRegistry::with_root_path)
+        while rp.ends_with('/') {
+            rp.pop();
+        }
+        self.root_path = rp;
         self
     }
 
@@ -2819,5 +2828,21 @@ mod tests {
         // Second run - no hooks left
         futures_executor::block_on(app.run_shutdown_hooks());
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn root_path_strips_trailing_slashes() {
+        let config = AppConfig::new().root_path("/api/");
+        assert_eq!(config.root_path, "/api");
+
+        let config = AppConfig::new().root_path("/api///");
+        assert_eq!(config.root_path, "/api");
+
+        let config = AppConfig::new().root_path("/api");
+        assert_eq!(config.root_path, "/api");
+
+        // Empty root_path stays empty
+        let config = AppConfig::new().root_path("");
+        assert_eq!(config.root_path, "");
     }
 }
