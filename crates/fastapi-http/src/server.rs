@@ -947,6 +947,12 @@ where
                             .into());
                         }
                         header_block.extend_from_slice(&cont.payload);
+                        if header_block.len() > MAX_HEADER_BLOCK_SIZE {
+                            return Err(http2::Http2Error::Protocol(
+                                "header block exceeds maximum size",
+                            )
+                            .into());
+                        }
                         if (cont.header.flags & FLAG_END_HEADERS) != 0 {
                             break;
                         }
@@ -1154,7 +1160,9 @@ where
                     apply_send_conn_window_update(&mut flow_control, increment)?;
                 }
             }
-            _ => {}
+            _ => {
+                handle_h2_idle_frame(&frame)?;
+            }
         }
     }
 }
@@ -2647,6 +2655,12 @@ impl TcpServer {
                                 .into());
                             }
                             header_block.extend_from_slice(&cont.payload);
+                            if header_block.len() > MAX_HEADER_BLOCK_SIZE {
+                                return Err(http2::Http2Error::Protocol(
+                                    "header block exceeds maximum size",
+                                )
+                                .into());
+                            }
                             if (cont.header.flags & FLAG_END_HEADERS) != 0 {
                                 break;
                             }
@@ -2883,7 +2897,7 @@ impl TcpServer {
                     }
                 }
                 _ => {
-                    // Ignore other frame types for now.
+                    handle_h2_idle_frame(&frame)?;
                 }
             }
         }
@@ -3185,6 +3199,12 @@ impl TcpServer {
                                 .into());
                             }
                             header_block.extend_from_slice(&cont.payload);
+                            if header_block.len() > MAX_HEADER_BLOCK_SIZE {
+                                return Err(http2::Http2Error::Protocol(
+                                    "header block exceeds maximum size",
+                                )
+                                .into());
+                            }
                             if (cont.header.flags & FLAG_END_HEADERS) != 0 {
                                 break;
                             }
@@ -3410,7 +3430,9 @@ impl TcpServer {
                         apply_send_conn_window_update(&mut flow_control, increment)?;
                     }
                 }
-                _ => {}
+                _ => {
+                    handle_h2_idle_frame(&frame)?;
+                }
             }
         }
     }
@@ -3928,8 +3950,35 @@ fn validate_window_update_payload(payload: &[u8]) -> Result<(), http2::Http2Erro
     Ok(())
 }
 
+fn handle_h2_idle_frame(frame: &http2::Frame) -> Result<(), http2::Http2Error> {
+    match frame.header.frame_type() {
+        http2::FrameType::RstStream => {
+            validate_rst_stream_payload(frame.header.stream_id, &frame.payload)
+        }
+        http2::FrameType::Priority => {
+            validate_priority_payload(frame.header.stream_id, &frame.payload)
+        }
+        http2::FrameType::Data => Err(http2::Http2Error::Protocol(
+            "unexpected DATA frame outside active request stream",
+        )),
+        http2::FrameType::Continuation => Err(http2::Http2Error::Protocol(
+            "unexpected CONTINUATION frame outside header block",
+        )),
+        http2::FrameType::Unknown => Ok(()),
+        _ => Ok(()),
+    }
+}
+
 /// Maximum flow-control window size (2^31 - 1) per RFC 7540 §6.9.1.
 const MAX_FLOW_CONTROL_WINDOW: i64 = 0x7FFF_FFFF;
+
+/// Maximum accumulated header block size across HEADERS + CONTINUATION frames.
+/// Prevents CONTINUATION bomb attacks where an attacker sends unlimited
+/// CONTINUATION frames to exhaust server memory before HPACK decoding.
+/// Set to 128 KiB — generous enough for legitimate requests while limiting
+/// memory exposure (the HPACK decoder enforces its own `max_header_list_size`
+/// on the decoded output, defaulting to 64 KiB).
+const MAX_HEADER_BLOCK_SIZE: usize = 128 * 1024;
 
 /// Apply a connection-level WINDOW_UPDATE from the peer with overflow detection.
 /// Returns `Err(FLOW_CONTROL_ERROR)` if the window would exceed 2^31-1.
@@ -4633,6 +4682,70 @@ mod tests {
             err.to_string()
                 .contains("GOAWAY payload must be at least 8 bytes")
         );
+    }
+
+    fn h2_test_frame(
+        frame_type: http2::FrameType,
+        stream_id: u32,
+        payload: Vec<u8>,
+    ) -> http2::Frame {
+        http2::Frame {
+            header: http2::FrameHeader {
+                length: payload.len() as u32,
+                frame_type: frame_type as u8,
+                flags: 0,
+                stream_id,
+            },
+            payload,
+        }
+    }
+
+    #[test]
+    fn h2_idle_frame_rejects_data_outside_request_stream() {
+        let frame = h2_test_frame(http2::FrameType::Data, 1, Vec::new());
+        let err = handle_h2_idle_frame(&frame).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unexpected DATA frame outside active request stream")
+        );
+    }
+
+    #[test]
+    fn h2_idle_frame_rejects_continuation_outside_header_block() {
+        let frame = h2_test_frame(http2::FrameType::Continuation, 1, Vec::new());
+        let err = handle_h2_idle_frame(&frame).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unexpected CONTINUATION frame outside header block")
+        );
+    }
+
+    #[test]
+    fn h2_idle_frame_validates_rst_stream_payload() {
+        let invalid = h2_test_frame(http2::FrameType::RstStream, 0, 8u32.to_be_bytes().to_vec());
+        let err = handle_h2_idle_frame(&invalid).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("RST_STREAM must not be on stream 0")
+        );
+
+        let valid = h2_test_frame(http2::FrameType::RstStream, 3, 8u32.to_be_bytes().to_vec());
+        assert!(handle_h2_idle_frame(&valid).is_ok());
+    }
+
+    #[test]
+    fn h2_idle_frame_validates_priority_payload() {
+        let invalid = h2_test_frame(http2::FrameType::Priority, 0, vec![0, 0, 0, 0, 16]);
+        let err = handle_h2_idle_frame(&invalid).unwrap_err();
+        assert!(err.to_string().contains("PRIORITY must not be on stream 0"));
+
+        let valid = h2_test_frame(http2::FrameType::Priority, 1, vec![0, 0, 0, 0, 16]);
+        assert!(handle_h2_idle_frame(&valid).is_ok());
+    }
+
+    #[test]
+    fn max_header_block_size_is_128k() {
+        assert_eq!(MAX_HEADER_BLOCK_SIZE, 128 * 1024);
     }
 
     #[test]
