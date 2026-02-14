@@ -385,33 +385,21 @@ impl<'a> Header<'a> {
         self.value_str()?.trim().parse().ok()
     }
 
-    /// Returns true if Transfer-Encoding includes "chunked".
+    /// Returns true if Transfer-Encoding is exactly "chunked" (case-insensitive,
+    /// ignoring optional whitespace). We do NOT accept compound codings like
+    /// "gzip, chunked" since the server does not support non-chunked transfer
+    /// codings; rejecting them prevents request smuggling via unsupported
+    /// intermediate codings.
     #[must_use]
     pub fn is_chunked_encoding(&self) -> bool {
         if !self.is_transfer_encoding() {
             return false;
         }
-        // Use case-insensitive search without allocating a new String
         self.value_str()
-            .is_some_and(|v| contains_ignore_ascii_case(v, "chunked"))
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("chunked"))
     }
 }
 
-/// Case-insensitive substring search without allocation.
-#[inline]
-fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if haystack.len() < needle.len() {
-        return false;
-    }
-    let needle_bytes = needle.as_bytes();
-    haystack
-        .as_bytes()
-        .windows(needle_bytes.len())
-        .any(|window| window.eq_ignore_ascii_case(needle_bytes))
-}
 
 /// Iterator over HTTP headers in a buffer.
 ///
@@ -1506,13 +1494,15 @@ mod tests {
     }
 
     #[test]
-    fn header_transfer_encoding_gzip_chunked() {
+    fn header_transfer_encoding_gzip_chunked_is_not_chunked() {
+        // Compound TE like "gzip, chunked" must NOT be accepted as chunked
+        // since the server does not support gzip transfer coding.
         let buffer = b"Transfer-Encoding: gzip, chunked\r\n";
         let mut iter = HeadersIter::new(buffer);
         let header = iter.next().unwrap().unwrap();
 
         assert!(header.is_transfer_encoding());
-        assert!(header.is_chunked_encoding());
+        assert!(!header.is_chunked_encoding());
     }
 
     #[test]
