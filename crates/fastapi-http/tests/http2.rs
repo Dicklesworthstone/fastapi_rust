@@ -1874,3 +1874,49 @@ fn http2_app_path_accepts_valid_goaway() {
     drop(TcpStream::connect(addr));
     server_thread.join().expect("server thread join");
 }
+
+/// CONTINUATION bomb: sending many CONTINUATION frames that accumulate beyond
+/// MAX_HEADER_BLOCK_SIZE (128 KiB) must close the connection with a protocol error.
+#[test]
+fn http2_app_path_rejects_continuation_bomb() {
+    let app = App::builder()
+        .get(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // Send HEADERS without END_HEADERS (flags = 0x1 = END_STREAM only).
+    // Use a minimal valid HPACK fragment for :method=GET.
+    let initial_header = [0x82u8]; // Indexed: :method=GET
+    write_frame(&mut stream, 0x1, 0x1, 1, &initial_header);
+
+    // Send CONTINUATION frames with 16 KiB padding each until we exceed 128 KiB.
+    // 128 KiB / 16 KiB = 8 frames, so 9 frames should exceed the limit.
+    let padding = vec![0u8; 16 * 1024];
+    for _ in 0..9 {
+        // CONTINUATION (0x9) without END_HEADERS (flags=0x0) on stream 1.
+        write_frame(&mut stream, 0x9, 0x0, 1, &padding);
+    }
+
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
