@@ -684,3 +684,59 @@ fn stateful_handles_attacks() {
         "Stateful parser should reject smuggling attempts"
     );
 }
+
+// ============================================================================
+// 7. Request Line Hardening Tests
+// ============================================================================
+
+/// Unknown HTTP version must be rejected, not silently defaulted to HTTP/1.1.
+/// A proxy that forwards HTTP/9.9 could desync with a server that treats it as 1.1.
+#[test]
+fn smuggling_unknown_http_version_rejected() {
+    let buffer = b"GET / HTTP/9.9\r\nHost: example.com\r\n\r\n";
+    let parser = Parser::new();
+    let result = parser.parse(buffer);
+    assert!(
+        result.is_err(),
+        "Unknown HTTP version should be rejected, got: {result:?}"
+    );
+}
+
+/// Extra parts in the request line must be rejected to prevent desync.
+#[test]
+fn smuggling_request_line_extra_parts_rejected() {
+    let buffer = b"GET / HTTP/1.1 extra-data\r\nHost: example.com\r\n\r\n";
+    let parser = Parser::new();
+    let result = parser.parse(buffer);
+    assert!(
+        result.is_err(),
+        "Extra request-line parts should be rejected, got: {result:?}"
+    );
+}
+
+/// Overlong UTF-8 encoding in percent-decoded path must be rejected.
+/// %C0%AF is an overlong encoding of '/' that could bypass path-based access controls.
+#[test]
+fn traversal_overlong_utf8_percent_decoded() {
+    let buffer = b"GET /%C0%AF HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    let parser = Parser::new();
+    let result = parser.parse(buffer);
+    assert!(
+        result.is_err(),
+        "Overlong UTF-8 in percent-decoded path should be rejected, got: {result:?}"
+    );
+}
+
+/// Compound Transfer-Encoding like "gzip, chunked" must be rejected since the
+/// server doesn't support gzip transfer coding.
+#[test]
+fn smuggling_compound_transfer_encoding_rejected() {
+    let buffer =
+        b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n";
+    let parser = Parser::new();
+    let result = parser.parse(buffer);
+    assert!(
+        result.is_err(),
+        "Compound TE should be rejected, got: {result:?}"
+    );
+}
