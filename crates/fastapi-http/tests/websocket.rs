@@ -67,6 +67,47 @@ fn ws_masked_oversized_text_header_only(payload_len: u64) -> Vec<u8> {
     out
 }
 
+fn spawn_ws_echo_server() -> (Arc<TcpServer>, SocketAddr, std::thread::JoinHandle<()>) {
+    let app = App::builder()
+        .websocket(
+            "/ws",
+            |_ctx: &RequestContext, _req: &mut Request, mut ws: WebSocket| async move {
+                let msg = ws.read_text().await?;
+                ws.send_text(&msg).await?;
+                Ok::<(), WebSocketError>(())
+            },
+        )
+        .build();
+
+    let server = Arc::new(TcpServer::new(ServerConfig::new("127.0.0.1:0")));
+    let app = Arc::new(app);
+    let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+
+    let server_thread = {
+        let server = Arc::clone(&server);
+        let app = Arc::clone(&app);
+        std::thread::spawn(move || {
+            let rt = RuntimeBuilder::current_thread()
+                .build()
+                .expect("test runtime must build");
+            rt.block_on(async move {
+                let cx = asupersync::Cx::for_testing();
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind must succeed");
+                let local_addr = listener.local_addr().expect("local_addr must work");
+                addr_tx.send(local_addr).expect("addr send must succeed");
+                let _ = server.serve_on_app(&cx, listener, app).await;
+            });
+        })
+    };
+
+    let addr = addr_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server must report addr");
+    (server, addr, server_thread)
+}
+
 fn ws_read_unmasked_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
     let mut header = [0u8; 2];
     stream.read_exact(&mut header).expect("read header");
@@ -985,6 +1026,81 @@ Sec-WebSocket-Key: {key}\r\n\
     let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
     assert_eq!(opcode, 0x8, "expected close opcode");
     assert_eq!(payload, 1009u16.to_be_bytes(), "expected close code 1009");
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// WebSocket upgrade without Sec-WebSocket-Key must return 400 Bad Request.
+#[test]
+fn websocket_upgrade_rejects_missing_key() {
+    let (server, addr, server_thread) = spawn_ws_echo_server();
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    // Upgrade request WITHOUT Sec-WebSocket-Key
+    let req = format!(
+        "GET /ws HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Version: 13\r\n\
+\r\n"
+    );
+    stream.write_all(req.as_bytes()).expect("write handshake");
+
+    let resp = read_until_double_crlf(&mut stream, 16 * 1024);
+    let resp_str = std::str::from_utf8(&resp).expect("utf8 response");
+    assert!(
+        resp_str.starts_with("HTTP/1.1 400"),
+        "expected 400 Bad Request without key, got:\n{resp_str}"
+    );
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// WebSocket upgrade with POST method must return non-101 (upgrade requires GET).
+#[test]
+fn websocket_upgrade_rejects_post_method() {
+    let (server, addr, server_thread) = spawn_ws_echo_server();
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    let key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let req = format!(
+        "POST /ws HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: {key}\r\n\
+\r\n"
+    );
+    stream.write_all(req.as_bytes()).expect("write handshake");
+
+    let resp = read_until_double_crlf(&mut stream, 16 * 1024);
+    let resp_str = std::str::from_utf8(&resp).expect("utf8 response");
+    assert!(
+        !resp_str.starts_with("HTTP/1.1 101"),
+        "POST upgrade should not produce 101, got:\n{resp_str}"
+    );
 
     let _ = stream.shutdown(Shutdown::Both);
     server.shutdown();
