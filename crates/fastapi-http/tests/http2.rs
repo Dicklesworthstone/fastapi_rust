@@ -1920,3 +1920,145 @@ fn http2_app_path_rejects_continuation_bomb() {
     drop(TcpStream::connect(addr));
     server_thread.join().expect("server thread join");
 }
+
+/// Verify the server's initial SETTINGS frame advertises MAX_CONCURRENT_STREAMS = 1.
+#[test]
+fn http2_server_settings_includes_max_concurrent_streams() {
+    let app = App::builder()
+        .get(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+
+    // Read server SETTINGS (non-ACK) and check for MAX_CONCURRENT_STREAMS.
+    let mut found_max_concurrent = false;
+    for _ in 0..4 {
+        let (ty, flags, _sid, payload) = read_frame(&mut stream);
+        if ty == 0x4 && (flags & 0x1) == 0 {
+            // Parse settings pairs (6 bytes each: u16 id + u32 value).
+            for chunk in payload.chunks_exact(6) {
+                let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+                let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+                if id == 0x3 {
+                    assert_eq!(value, 1, "SETTINGS_MAX_CONCURRENT_STREAMS should be 1");
+                    found_max_concurrent = true;
+                }
+            }
+            break;
+        }
+    }
+    assert!(
+        found_max_concurrent,
+        "server SETTINGS must include MAX_CONCURRENT_STREAMS"
+    );
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// Server rejects HEADERS with even stream ID (only odd IDs are client-initiated).
+#[test]
+fn http2_app_path_rejects_even_stream_id() {
+    let app = App::builder()
+        .get(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    // Send HEADERS on stream 2 (even — protocol violation).
+    let header_block: [u8; 17] = [
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x5, 2, &header_block);
+
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
+
+/// Server rejects HEADERS with non-increasing stream ID.
+#[test]
+fn http2_app_path_rejects_non_increasing_stream_id() {
+    let app = App::builder()
+        .get(
+            "/",
+            |_ctx: &RequestContext, _req: &mut Request| async move {
+                Response::ok().body(ResponseBody::Bytes(b"ok".to_vec()))
+            },
+        )
+        .build();
+
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set write timeout");
+
+    stream.write_all(PREFACE).expect("write preface");
+    write_frame(&mut stream, 0x4, 0x0, 0, &[]);
+    read_settings_handshake(&mut stream);
+    write_frame(&mut stream, 0x4, 0x1, 0, &[]);
+
+    let header_block: [u8; 17] = [
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+
+    // First request on stream 3 (valid).
+    write_frame(&mut stream, 0x1, 0x5, 3, &header_block);
+
+    // Consume response frames for stream 3 before sending the invalid one.
+    let _resp = read_header_block(&mut stream, 3);
+    let _body = read_data_body(&mut stream, 3);
+
+    // Second request on stream 1 (lower than 3 — protocol violation).
+    write_frame(&mut stream, 0x1, 0x5, 1, &header_block);
+
+    assert_connection_closed(&mut stream);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
+}
