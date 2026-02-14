@@ -718,8 +718,11 @@ impl<T: DeserializeOwned> FromRequest for Json<T> {
 
         let is_json = content_type.is_some_and(|ct| {
             let ct_lower = ct.to_ascii_lowercase();
-            ct_lower.starts_with("application/json")
-                || ct_lower.starts_with("application/") && ct_lower.contains("+json")
+            // Check for exact "application/json" possibly followed by parameters (";")
+            // Reject near-miss types like "application/jsonl" or "application/json-seq"
+            let base_type = ct_lower.split(';').next().unwrap_or("").trim();
+            base_type == "application/json"
+                || (base_type.starts_with("application/") && base_type.ends_with("+json"))
         });
 
         if !is_json {
@@ -4958,6 +4961,12 @@ impl FromRequest for OAuth2PasswordBearer {
             return Err(OAuth2BearerError::empty_token());
         }
 
+        // Reject excessively long tokens to prevent memory/DoS issues
+        const MAX_TOKEN_LEN: usize = 8192;
+        if token.len() > MAX_TOKEN_LEN {
+            return Err(OAuth2BearerError::empty_token());
+        }
+
         Ok(OAuth2PasswordBearer::new(token))
     }
 }
@@ -5206,6 +5215,12 @@ impl FromRequest for BasicAuth {
             return Err(BasicAuthError::invalid_format());
         }
 
+        // Reject excessively long credentials to prevent memory/DoS issues
+        const MAX_ENCODED_LEN: usize = 8192;
+        if encoded.len() > MAX_ENCODED_LEN {
+            return Err(BasicAuthError::invalid_format());
+        }
+
         // Decode and parse credentials
         let (username, password) = BasicAuth::decode_credentials(encoded.trim())
             .ok_or_else(BasicAuthError::invalid_format)?;
@@ -5346,6 +5361,12 @@ impl FromRequest for BearerToken {
 
         let token = parts.next().unwrap_or("").trim();
         if token.is_empty() {
+            return Err(BearerTokenError::empty_token());
+        }
+
+        // Reject excessively long tokens to prevent memory/DoS issues
+        const MAX_TOKEN_LEN: usize = 8192;
+        if token.len() > MAX_TOKEN_LEN {
             return Err(BearerTokenError::empty_token());
         }
 
@@ -6036,32 +6057,47 @@ fn parse_urlencoded(data: &str) -> impl Iterator<Item = (String, String)> + '_ {
 }
 
 /// URL-decode a string (percent-decoding).
+///
+/// Uses byte-level decoding to correctly handle multi-byte UTF-8 sequences
+/// (e.g., `%C3%A9` → `é`). Falls back to the replacement character for
+/// invalid UTF-8 after decoding.
 fn url_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.as_bytes().iter().copied();
 
-    while let Some(c) = chars.next() {
-        if c == '%' {
+    while let Some(b) = chars.next() {
+        if b == b'%' {
             // Try to read two hex digits
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
+            let hi = chars.next();
+            let lo = chars.next();
+            if let (Some(h), Some(l)) = (hi, lo) {
+                let hex_str = [h, l];
+                if let Ok(decoded) =
+                    u8::from_str_radix(std::str::from_utf8(&hex_str).unwrap_or(""), 16)
+                {
+                    bytes.push(decoded);
                     continue;
                 }
+                // Invalid hex — keep raw bytes
+                bytes.push(b'%');
+                bytes.push(h);
+                bytes.push(l);
+            } else {
+                // Truncated escape — keep raw bytes
+                bytes.push(b'%');
+                if let Some(h) = hi {
+                    bytes.push(h);
+                }
             }
-            // Invalid escape, keep the percent sign
-            result.push('%');
-            result.push_str(&hex);
-        } else if c == '+' {
+        } else if b == b'+' {
             // Plus signs decode to spaces in form data
-            result.push(' ');
+            bytes.push(b' ');
         } else {
-            result.push(c);
+            bytes.push(b);
         }
     }
 
-    result
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 impl<T> FromRequest for Form<T>
@@ -8142,6 +8178,87 @@ mod security_tests {
                 content_type
             );
         }
+    }
+
+    #[test]
+    fn json_content_type_rejects_near_miss_types() {
+        use serde::Deserialize;
+
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct Data {
+            value: i32,
+        }
+
+        // These look like JSON but are different formats — must be rejected
+        for content_type in &[
+            "application/jsonl",
+            "application/json-seq",
+            "application/json-patch",
+            "application/jsonlines",
+        ] {
+            let ctx = test_context();
+            let mut req = Request::new(Method::Post, "/test");
+            req.headers_mut()
+                .insert("content-type", content_type.as_bytes().to_vec());
+            req.set_body(Body::Bytes(b"{\"value\": 42}".to_vec()));
+
+            let result = futures_executor::block_on(Json::<Data>::from_request(&ctx, &mut req));
+            assert!(
+                matches!(result, Err(JsonExtractError::UnsupportedMediaType { .. })),
+                "Should reject content-type: {}",
+                content_type
+            );
+        }
+
+        // But application/json with parameters is still valid
+        let ctx = test_context();
+        let mut req = Request::new(Method::Post, "/test");
+        req.headers_mut().insert(
+            "content-type",
+            b"application/json; charset=utf-8".to_vec(),
+        );
+        req.set_body(Body::Bytes(b"{\"value\": 42}".to_vec()));
+
+        let result = futures_executor::block_on(Json::<Data>::from_request(&ctx, &mut req));
+        assert!(
+            result.is_ok(),
+            "application/json with charset parameter should be accepted"
+        );
+
+        // Vendor JSON types should also be accepted
+        let ctx = test_context();
+        let mut req = Request::new(Method::Post, "/test");
+        req.headers_mut().insert(
+            "content-type",
+            b"application/vnd.api+json".to_vec(),
+        );
+        req.set_body(Body::Bytes(b"{\"value\": 42}".to_vec()));
+
+        let result = futures_executor::block_on(Json::<Data>::from_request(&ctx, &mut req));
+        assert!(
+            result.is_ok(),
+            "application/vnd.api+json should be accepted"
+        );
+    }
+
+    #[test]
+    fn form_url_decode_handles_multibyte_utf8() {
+        // %C3%A9 is the UTF-8 encoding of "é"
+        let decoded = url_decode("caf%C3%A9");
+        assert_eq!(decoded, "café");
+
+        // Japanese: %E6%97%A5%E6%9C%AC = "日本"
+        let decoded = url_decode("%E6%97%A5%E6%9C%AC");
+        assert_eq!(decoded, "日本");
+
+        // Plus sign and mixed
+        let decoded = url_decode("hello+w%C3%B6rld");
+        assert_eq!(decoded, "hello wörld");
+
+        // ASCII only
+        let decoded = url_decode("hello+world");
+        assert_eq!(decoded, "hello world");
     }
 
     #[test]
