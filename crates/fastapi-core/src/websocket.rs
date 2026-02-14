@@ -254,6 +254,8 @@ impl WebSocket {
 
     /// Write a frame to the peer (server-side, unmasked).
     pub async fn write_frame(&mut self, frame: &Frame) -> Result<(), WebSocketError> {
+        validate_outgoing_frame(frame)?;
+
         let mut out = Vec::with_capacity(2 + frame.payload.len() + 8);
         let b0 = (if frame.fin { 0x80 } else { 0 }) | (frame.opcode as u8);
         out.push(b0);
@@ -725,6 +727,23 @@ fn is_valid_close_code(code: u16) -> bool {
     )
 }
 
+fn validate_outgoing_frame(frame: &Frame) -> Result<(), WebSocketError> {
+    if frame.opcode.is_control() {
+        if !frame.fin {
+            return Err(WebSocketError::Protocol(
+                "control frames must not be fragmented",
+            ));
+        }
+        if frame.payload.len() > MAX_CONTROL_PAYLOAD_BYTES {
+            return Err(WebSocketError::Protocol("control frame too large"));
+        }
+        if matches!(frame.opcode, OpCode::Close) && !is_valid_close_payload(&frame.payload) {
+            return Err(WebSocketError::Protocol("invalid close frame payload"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,5 +790,49 @@ mod tests {
             std::str::from_utf8(reason_bytes).is_ok(),
             "close reason must remain valid UTF-8"
         );
+    }
+
+    #[test]
+    fn outgoing_frame_validation_rejects_fragmented_control() {
+        let frame = Frame {
+            fin: false,
+            opcode: OpCode::Ping,
+            payload: vec![],
+        };
+        let err = validate_outgoing_frame(&frame).expect_err("fragmented control frame must fail");
+        assert!(matches!(err, WebSocketError::Protocol(_)));
+    }
+
+    #[test]
+    fn outgoing_frame_validation_rejects_oversized_control() {
+        let frame = Frame {
+            fin: true,
+            opcode: OpCode::Pong,
+            payload: vec![0; MAX_CONTROL_PAYLOAD_BYTES + 1],
+        };
+        let err = validate_outgoing_frame(&frame).expect_err("oversized control frame must fail");
+        assert!(matches!(err, WebSocketError::Protocol(_)));
+    }
+
+    #[test]
+    fn outgoing_frame_validation_rejects_invalid_close_payload() {
+        // 1006 is not a sendable close code.
+        let frame = Frame {
+            fin: true,
+            opcode: OpCode::Close,
+            payload: 1006u16.to_be_bytes().to_vec(),
+        };
+        let err = validate_outgoing_frame(&frame).expect_err("invalid close payload must fail");
+        assert!(matches!(err, WebSocketError::Protocol(_)));
+    }
+
+    #[test]
+    fn outgoing_frame_validation_accepts_data_frames() {
+        let frame = Frame {
+            fin: false,
+            opcode: OpCode::Text,
+            payload: vec![0; MAX_CONTROL_PAYLOAD_BYTES + 10],
+        };
+        assert!(validate_outgoing_frame(&frame).is_ok());
     }
 }
