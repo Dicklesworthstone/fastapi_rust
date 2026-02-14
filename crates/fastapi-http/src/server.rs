@@ -3519,6 +3519,37 @@ impl TcpServer {
             let request_cx = Cx::for_testing_with_budget(request_budget);
             let ctx = RequestContext::new(request_cx, request_id);
 
+            // Validate Host header
+            if let Err(err) = validate_host_header(&request, &self.config) {
+                let response = err.response().header("connection", b"close".to_vec());
+                let response_write = response_writer.write(response);
+                write_response(&mut stream, response_write).await?;
+                return Ok(());
+            }
+
+            // Run header-only validators before reading any body bytes.
+            if let Err(response) = self.config.pre_body_validators.validate_all(&request) {
+                let response = response.header("connection", b"close".to_vec());
+                let response_write = response_writer.write(response);
+                write_response(&mut stream, response_write).await?;
+                return Ok(());
+            }
+
+            // Handle Expect: 100-continue
+            match ExpectHandler::check_expect(&request) {
+                ExpectResult::NoExpectation => {}
+                ExpectResult::ExpectsContinue => {
+                    write_raw_response(&mut stream, CONTINUE_RESPONSE).await?;
+                }
+                ExpectResult::UnknownExpectation(_) => {
+                    let response =
+                        ExpectHandler::expectation_failed("Unsupported Expect value".to_string());
+                    let response_write = response_writer.write(response);
+                    write_response(&mut stream, response_write).await?;
+                    return Ok(());
+                }
+            }
+
             // Call handler - ctx lives until after await
             let response = handler.call(&ctx, &mut request).await;
 

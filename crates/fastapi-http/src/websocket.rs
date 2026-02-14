@@ -579,6 +579,12 @@ async fn read_frame(
             let mut len_bytes = [0u8; 8];
             read_exact(stream, &mut len_bytes).await?;
             let len = u64::from_be_bytes(len_bytes);
+            // RFC 6455 §5.2: most significant bit MUST be 0
+            if (len >> 63) != 0 {
+                return Err(WebSocketError::Protocol(
+                    "64-bit frame length has most significant bit set".into(),
+                ));
+            }
             // Check for overflow and excessive size
             if len > usize::MAX as u64 {
                 return Err(WebSocketError::MessageTooLarge {

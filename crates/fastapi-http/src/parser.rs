@@ -400,7 +400,6 @@ impl<'a> Header<'a> {
     }
 }
 
-
 /// Iterator over HTTP headers in a buffer.
 ///
 /// Zero-copy: returns borrowed [`Header`] references into the original buffer.
@@ -1078,16 +1077,21 @@ fn parse_request_line(
     let version_bytes = parts.next().ok_or(ParseError::InvalidRequestLine)?;
     let version_str =
         std::str::from_utf8(version_bytes).map_err(|_| ParseError::InvalidRequestLine)?;
-    let http_version = HttpVersion::parse(version_str).unwrap_or(HttpVersion::Http11);
+    let http_version = HttpVersion::parse(version_str).ok_or(ParseError::InvalidRequestLine)?;
+
+    // Reject request lines with extra parts (RFC 7230 Section 3.1.1)
+    if parts.next().is_some() {
+        return Err(ParseError::InvalidRequestLine);
+    }
 
     // Split path and query
     let (path, query) = if let Some(q_pos) = uri.find('?') {
         (
-            percent_decode_path(&uri[..q_pos]),
+            percent_decode_path(&uri[..q_pos])?,
             Some(uri[q_pos + 1..].to_string()),
         )
     } else {
-        (percent_decode_path(uri), None)
+        (percent_decode_path(uri)?, None)
     };
 
     let path = match path {
@@ -1104,9 +1108,9 @@ fn parse_request_line(
 /// percent sequences were decoded. Plus signs are preserved (no space decoding).
 ///
 /// Invalid percent sequences are left as-is.
-fn percent_decode_path(s: &str) -> Cow<'_, str> {
+fn percent_decode_path(s: &str) -> Result<Cow<'_, str>, ParseError> {
     if !s.contains('%') {
-        return Cow::Borrowed(s);
+        return Ok(Cow::Borrowed(s));
     }
 
     let mut result = Vec::with_capacity(s.len());
@@ -1131,7 +1135,9 @@ fn percent_decode_path(s: &str) -> Cow<'_, str> {
         }
     }
 
-    Cow::Owned(String::from_utf8_lossy(&result).into_owned())
+    String::from_utf8(result)
+        .map(Cow::Owned)
+        .map_err(|_| ParseError::InvalidRequestLine)
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
@@ -1153,25 +1159,34 @@ mod tests {
 
     #[test]
     fn percent_decode_path_no_encoding() {
-        let decoded = percent_decode_path("/simple/path");
+        let decoded = percent_decode_path("/simple/path").unwrap();
         assert!(matches!(decoded, Cow::Borrowed(_)));
         assert_eq!(&*decoded, "/simple/path");
     }
 
     #[test]
     fn percent_decode_path_simple() {
-        assert_eq!(&*percent_decode_path("/hello%20world"), "/hello world");
-        assert_eq!(&*percent_decode_path("%2F"), "/");
+        assert_eq!(
+            &*percent_decode_path("/hello%20world").unwrap(),
+            "/hello world"
+        );
+        assert_eq!(&*percent_decode_path("%2F").unwrap(), "/");
     }
 
     #[test]
     fn percent_decode_path_utf8() {
-        assert_eq!(&*percent_decode_path("/caf%C3%A9"), "/café");
+        assert_eq!(&*percent_decode_path("/caf%C3%A9").unwrap(), "/café");
     }
 
     #[test]
     fn percent_decode_path_plus_preserved() {
-        assert_eq!(&*percent_decode_path("/a+b"), "/a+b");
+        assert_eq!(&*percent_decode_path("/a+b").unwrap(), "/a+b");
+    }
+
+    #[test]
+    fn percent_decode_path_rejects_invalid_utf8() {
+        // %C0%AF is an overlong encoding of '/' — produces invalid UTF-8
+        assert!(percent_decode_path("/%C0%AF").is_err());
     }
 
     #[test]
