@@ -77,14 +77,18 @@ pub enum Converter {
 
 impl Converter {
     /// Check if a value matches this converter.
+    ///
+    /// For `Str`, rejects path traversal segments (`..` and `.`).
+    /// For `Float`, rejects NaN, inf, and -inf (non-finite values).
+    /// For `Path`, rejects values containing `..` components to prevent traversal.
     #[must_use]
     pub fn matches(&self, value: &str) -> bool {
         match self {
-            Self::Str => true,
+            Self::Str => value != ".." && value != ".",
             Self::Int => value.parse::<i64>().is_ok(),
-            Self::Float => value.parse::<f64>().is_ok(),
+            Self::Float => value.parse::<f64>().is_ok_and(f64::is_finite),
             Self::Uuid => is_uuid(value),
-            Self::Path => true,
+            Self::Path => !path_has_traversal(value),
         }
     }
 
@@ -99,6 +103,14 @@ impl Converter {
             _ => Self::Str,
         }
     }
+}
+
+/// Check if a path value contains traversal components (`..` or `.`).
+///
+/// Splits on `/` and checks each segment, preventing directory traversal
+/// attacks through path parameters like `/files/{path:path}`.
+fn path_has_traversal(value: &str) -> bool {
+    value.split('/').any(|seg| seg == ".." || seg == ".")
 }
 
 fn is_uuid(s: &str) -> bool {
@@ -208,6 +220,10 @@ impl RoutePattern {
                         // Path converter captures everything remaining
                         let start = path_ranges[path_idx].0;
                         let value = &path[start..last_end];
+                        // Reject path traversal (../ or ./ components)
+                        if path_has_traversal(value) {
+                            return None;
+                        }
                         params.push((info.name.clone(), value));
                         // Consume all remaining segments
                         path_idx = path_segments.len();
@@ -1545,5 +1561,98 @@ mod tests {
 
         let config = AppConfig::new().trailing_slash_mode(TrailingSlashMode::MatchBoth);
         assert_eq!(config.trailing_slash_mode, TrailingSlashMode::MatchBoth);
+    }
+
+    // === Security regression tests ===
+
+    #[test]
+    fn converter_str_rejects_dot_dot_traversal() {
+        assert!(!Converter::Str.matches(".."));
+        assert!(!Converter::Str.matches("."));
+        // Normal values still pass
+        assert!(Converter::Str.matches("users"));
+        assert!(Converter::Str.matches("file.txt"));
+        assert!(Converter::Str.matches("my..name"));
+    }
+
+    #[test]
+    fn converter_path_rejects_traversal_components() {
+        assert!(!Converter::Path.matches("../etc/passwd"));
+        assert!(!Converter::Path.matches("foo/../../bar"));
+        assert!(!Converter::Path.matches("./hidden"));
+        assert!(!Converter::Path.matches(".."));
+        // Normal paths still pass
+        assert!(Converter::Path.matches("a/b/c.txt"));
+        assert!(Converter::Path.matches("docs/readme.md"));
+    }
+
+    #[test]
+    fn converter_float_rejects_nan_and_infinity() {
+        assert!(!Converter::Float.matches("NaN"));
+        assert!(!Converter::Float.matches("inf"));
+        assert!(!Converter::Float.matches("-inf"));
+        assert!(!Converter::Float.matches("infinity"));
+        assert!(!Converter::Float.matches("-infinity"));
+        // Finite values still pass
+        assert!(Converter::Float.matches("3.14"));
+        assert!(Converter::Float.matches("-1.5"));
+        assert!(Converter::Float.matches("1e10"));
+        assert!(Converter::Float.matches("42"));
+    }
+
+    #[test]
+    fn route_table_rejects_traversal_in_str_param() {
+        let mut table = RouteTable::new();
+        table.add(Method::Get, "/files/{name}", "handler");
+
+        // Normal file names match
+        assert!(matches!(
+            table.lookup("/files/readme.txt", Method::Get),
+            RouteLookup::Match { .. }
+        ));
+
+        // Traversal segment does NOT match
+        assert!(matches!(
+            table.lookup("/files/..", Method::Get),
+            RouteLookup::NotFound
+        ));
+    }
+
+    #[test]
+    fn route_table_rejects_traversal_in_path_param() {
+        let mut table = RouteTable::new();
+        table.add(Method::Get, "/files/{filepath:path}", "handler");
+
+        // Normal paths match
+        if let RouteLookup::Match { params, .. } =
+            table.lookup("/files/docs/readme.md", Method::Get)
+        {
+            assert_eq!(params[0].1, "docs/readme.md");
+        } else {
+            panic!("Expected match for normal path");
+        }
+
+        // Traversal paths do NOT match
+        assert!(matches!(
+            table.lookup("/files/../etc/passwd", Method::Get),
+            RouteLookup::NotFound
+        ));
+        assert!(matches!(
+            table.lookup("/files/a/../../etc/shadow", Method::Get),
+            RouteLookup::NotFound
+        ));
+    }
+
+    #[test]
+    fn path_has_traversal_helper() {
+        assert!(path_has_traversal(".."));
+        assert!(path_has_traversal("."));
+        assert!(path_has_traversal("../foo"));
+        assert!(path_has_traversal("foo/.."));
+        assert!(path_has_traversal("foo/../bar"));
+        assert!(path_has_traversal("./bar"));
+        assert!(!path_has_traversal("foo/bar"));
+        assert!(!path_has_traversal("foo.bar"));
+        assert!(!path_has_traversal("a..b"));
     }
 }

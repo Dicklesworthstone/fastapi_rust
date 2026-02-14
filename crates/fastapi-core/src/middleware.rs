@@ -907,15 +907,32 @@ impl Cors {
     }
 
     fn allow_headers_value(&self, request: &Request) -> Option<String> {
-        if !self.config.allowed_headers.is_empty() {
-            return Some(self.config.allowed_headers.join(", "));
+        if self.config.allowed_headers.is_empty() {
+            // No allowed headers configured — do NOT reflect the request's
+            // Access-Control-Request-Headers back, as that effectively allows
+            // arbitrary headers. Return None so the header is omitted entirely,
+            // meaning only CORS-safelisted request headers are permitted.
+            return None;
         }
 
-        request
-            .headers()
-            .get("access-control-request-headers")
-            .and_then(|value| std::str::from_utf8(value).ok())
-            .map(ToString::to_string)
+        // Check for wildcard "*" — if any entry is wildcard, reflect request
+        // headers (standard CORS wildcard behavior when credentials are not
+        // in use). When credentials are enabled, wildcard is NOT valid per
+        // the Fetch spec, so we reflect the requested headers instead.
+        if self.config.allowed_headers.iter().any(|h| h == "*") {
+            if self.config.allow_credentials {
+                // With credentials, we cannot use literal "*" so reflect
+                // the request's headers as an explicit allow list.
+                return request
+                    .headers()
+                    .get("access-control-request-headers")
+                    .and_then(|value| std::str::from_utf8(value).ok())
+                    .map(ToString::to_string);
+            }
+            return Some("*".to_string());
+        }
+
+        Some(self.config.allowed_headers.join(", "))
     }
 
     fn apply_common_headers(&self, mut response: Response, origin: &str) -> Response {
@@ -1455,8 +1472,8 @@ impl RequestId {
             .unwrap_or(0);
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        // Format: base36 timestamp + counter for compact, unique IDs
-        Self(format!("{:x}-{:04x}", timestamp, counter & 0xFFFF))
+        // Format: hex timestamp + full counter for unique IDs without collisions
+        Self(format!("{:x}-{:x}", timestamp, counter))
     }
 }
 
@@ -2331,11 +2348,16 @@ impl CsrfMiddleware {
             .as_deref()
             .unwrap_or(default_message);
 
-        // Create a FastAPI-compatible error response
-        let body = format!(
-            r#"{{"detail":[{{"type":"csrf_error","loc":["header","{}"],"msg":"{}"}}]}}"#,
-            self.config.header_name, message
-        );
+        // Create a FastAPI-compatible error response using serde_json
+        // to properly escape header_name and message values.
+        let detail = serde_json::json!({
+            "detail": [{
+                "type": "csrf_error",
+                "loc": ["header", self.config.header_name],
+                "msg": message,
+            }]
+        });
+        let body = detail.to_string();
 
         Response::with_status(crate::response::StatusCode::FORBIDDEN)
             .header("content-type", b"application/json".to_vec())
@@ -8945,6 +8967,61 @@ mod tests {
     fn cors_middleware_name() {
         let cors = Cors::new();
         assert_eq!(cors.name(), "Cors");
+    }
+
+    #[test]
+    fn cors_empty_allowed_headers_does_not_reflect_request_headers() {
+        // When allowed_headers is empty (default), the CORS middleware should
+        // NOT reflect the client's Access-Control-Request-Headers back. That
+        // would effectively allow arbitrary headers — a security risk.
+        let cors = Cors::new().allow_any_origin(); // default: allowed_headers = []
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Options, "/api");
+        req.headers_mut()
+            .insert("origin", b"https://example.com".to_vec());
+        req.headers_mut()
+            .insert("access-control-request-method", b"GET".to_vec());
+        req.headers_mut().insert(
+            "access-control-request-headers",
+            b"x-evil-custom, authorization".to_vec(),
+        );
+
+        let result = futures_executor::block_on(cors.before(&ctx, &mut req));
+        if let ControlFlow::Break(response) = result {
+            // Preflight response should NOT have access-control-allow-headers
+            // when no allowed_headers are configured.
+            assert_eq!(
+                header_value(&response, "access-control-allow-headers"),
+                None,
+                "Empty allowed_headers must not reflect request headers"
+            );
+        } else {
+            panic!("Preflight should have been handled (Break)");
+        }
+    }
+
+    #[test]
+    fn cors_explicit_allowed_headers_returned_in_preflight() {
+        let cors = Cors::new()
+            .allow_any_origin()
+            .allow_headers(["x-token", "content-type"]);
+        let ctx = test_context();
+        let mut req = Request::new(crate::request::Method::Options, "/api");
+        req.headers_mut()
+            .insert("origin", b"https://example.com".to_vec());
+        req.headers_mut()
+            .insert("access-control-request-method", b"POST".to_vec());
+
+        let result = futures_executor::block_on(cors.before(&ctx, &mut req));
+        if let ControlFlow::Break(response) = result {
+            let headers_val = header_value(&response, "access-control-allow-headers");
+            assert!(headers_val.is_some());
+            let val = headers_val.unwrap();
+            assert!(val.contains("x-token"));
+            assert!(val.contains("content-type"));
+        } else {
+            panic!("Preflight should have been handled (Break)");
+        }
     }
 
     // =========================================================================
