@@ -25,7 +25,7 @@ use syn::{
 };
 
 /// Validation constraint parsed from attributes.
-#[derive(Debug, Default)]
+#[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
 struct FieldValidation {
     /// Minimum string length.
