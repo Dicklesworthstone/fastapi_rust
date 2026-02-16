@@ -21,7 +21,7 @@ homepage = "https://github.com/Dicklesworthstone/fastapi_rust"
 
 [workspace.dependencies]
 # Runtime (our own) - uses git for CI; override with path in .cargo/config.toml for local dev
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync.git", version = "0.2.0" }
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "c7c15f630caf9bd2c6b9f39feed6212d64986dfa", version = "0.2.0" }
 
 # Serialization (only these)
 serde = { version = "1", features = ["derive"] }
