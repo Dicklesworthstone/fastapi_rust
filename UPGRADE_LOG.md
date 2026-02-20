@@ -1,59 +1,80 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-01-20  |  **Project:** fastapi_rust  |  **Language:** Rust (workspace)
+**Date:** 2026-02-19  |  **Project:** fastapi_rust  |  **Language:** Rust
 
 ## Summary
-- **Updated:** 2
-- **Skipped:** 0
-- **Failed:** 0
-- **Needs attention:** 0
+- **Updated:** 4 spec bumps + 14 lock-file updates  |  **Skipped:** 7 (already at latest within spec)  |  **Failed:** 0  |  **Needs attention:** 0
 
-## Updates
+## Lock-File Updates (cargo update)
 
-| Package | Old | New | Notes |
-|---------|-----|-----|-------|
-| regex (spec) | 1.11 | 1.12 | Updated version specifier in Cargo.toml (actual version unchanged at 1.12.2) |
-| zmij | 1.0.15 | 1.0.16 | Transitive dependency via serde_json |
+All within existing semver specs — no Cargo.toml changes needed:
 
-## Already Up-to-Date
+| Dependency | Old | New |
+|---|---|---|
+| bitflags | 2.10.0 | 2.11.0 |
+| bumpalo | 3.19.1 | 3.20.2 |
+| cc | 1.2.55 | 1.2.56 |
+| clap | 4.5.57 | 4.5.60 |
+| clap_builder | 4.5.57 | 4.5.60 |
+| clap_lex | 0.7.7 | 1.0.0 |
+| deranged | 0.5.5 | 0.5.6 |
+| futures-core | 0.3.31 | 0.3.32 |
+| futures-executor | 0.3.31 | 0.3.32 |
+| futures-task | 0.3.31 | 0.3.32 |
+| futures-util | 0.3.31 | 0.3.32 |
+| syn | 2.0.114 | 2.0.116 |
+| unicode-ident | 1.0.23 | 1.0.24 |
+| zmij | 1.0.20 | 1.0.21 |
 
-The following dependencies were already at their latest stable versions:
+## Spec-Level Updates
 
-| Package | Version | Latest |
-|---------|---------|--------|
-| serde | 1.0.228 | 1.0.228 |
-| serde_json | 1.0.149 | 1.0.149 |
-| parking_lot | 0.12.5 | 0.12.5 |
-| futures-executor | 0.3.31 | 0.3.31 |
-| proc-macro2 | 1.0.105 | 1.0.105 |
-| quote | 1.0.43 | 1.0.43 |
-| syn | 2.0.114 | 2.0.114 |
-| regex | 1.12.2 | 1.12.2 |
+### crossterm: 0.28 -> 0.29 (fastapi-output)
+- **Breaking:** Rustix default backend, cursor 0-based, Event no longer Copy, terminal::size() returns error
+- **Impact:** Only `IsTty` trait used — none of the breaking changes apply
+- **Tests:** Passed
 
-## Toolchain Fix
+### criterion: 0.5 -> 0.8 (fastapi-http dev-dep)
+- **Breaking:** async-std removed, deprecated APIs deleted, MSRV bumped
+- **Impact:** None — benchmark code uses standard BenchmarkGroup API only
+- **Tests:** Passed (compilation verified; bench harness not executed)
 
-Updated `rust-toolchain.toml` to use the latest available nightly:
-- Before: `channel = "nightly"` (broken, missing rustc component)
-- After: `channel = "nightly"` (working after rustup update)
+### insta: 1.34 -> 1.46 (fastapi-output dev-dep)
+- **Breaking:** None (minor version bumps)
+- **Tests:** Passed
 
-## Code Fixes Required
+### serial_test: 3.2 -> 3.3 (fastapi-output dev-dep)
+- **Breaking:** None (aligned with fastapi-core's existing 3.3.1 spec)
+- **Tests:** Passed
 
-Fixed lifetime issue in `/data/projects/fastapi_rust/crates/fastapi-http/src/server.rs`:
-- The `TcpListener::bind` method requires `'static` lifetime for the address parameter
-- Changed `TcpListener::bind(&self.config.bind_addr)` to `TcpListener::bind(bind_addr.clone())`
+## Already Latest (no change needed)
 
-## Verification
+These specs already cover the latest stable versions:
 
-- `cargo build` - Build successful
-- `cargo test --lib` - All 431 library tests passed
-- Doc tests have pre-existing failures (unrelated to dependency updates)
+| Dependency | Spec | Latest Resolved |
+|---|---|---|
+| serde | "1" | 1.0.228 |
+| serde_json | "1" | 1.0.149 |
+| parking_lot | "0.12" | 0.12.5 |
+| futures-executor | "0.3" | 0.3.32 |
+| regex | "1" / "1.12" | 1.12.3 |
+| proc-macro2 | "1" | 1.0.106 |
+| quote | "1" | 1.0.44 |
+| syn | "2" | 2.0.116 |
+| unicode-width | "0.2" | 0.2.2 |
+| proptest | "1" | 1.10.0 |
+| serial_test (core) | "3.3.1" | 3.3.1 |
 
-## Previous Updates (2026-01-18)
+## Path/Git Dependencies (not updated)
 
-| Package | Old | New |
-|---------|-----|-----|
-| pin-project | (new) | 1.1.10 |
-| pin-project-internal | (new) | 1.1.10 |
-| thiserror | 2.0.17 | 2.0.18 |
-| thiserror-impl | 2.0.17 | 2.0.18 |
-| zmij | 1.0.14 | 1.0.15 |
+| Dependency | Type | Notes |
+|---|---|---|
+| asupersync | git + path override | Own project, updated separately |
+| rich_rust | crates.io + path override | Own project, updated separately |
+
+## Failed
+
+_(none)_
+
+## Needs Attention
+
+_(none)_
