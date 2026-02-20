@@ -30,3 +30,6 @@ rustc-ice-*.txt
 *.snap.new
 sweep_*.png
 test_screenshot.png
+
+# Agent progress tracking files (ephemeral)
+claude-upgrade-progress.json
