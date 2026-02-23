@@ -113,7 +113,7 @@ jobs:
           key: build-${{ matrix.target }}
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: build-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/
