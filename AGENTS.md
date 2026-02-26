@@ -96,6 +96,183 @@ strip = true        # Remove debug symbols
 
 ---
 
+## fastapi_rust — This Project
+
+**This is the project you're working on.** fastapi_rust is an ultra-optimized Rust web framework inspired by FastAPI's developer experience. It provides a type-safe, high-performance web framework with automatic OpenAPI generation, dependency injection, and structured concurrency via asupersync — built from scratch with minimal dependencies.
+
+### What It Does
+
+Provides a familiar FastAPI-like developer experience in Rust: declarative route handlers via proc macros (`#[get]`, `#[post]`, etc.), type-safe request extraction (Path, Query, Json, Header, Cookie, Bearer), compile-time validation (`#[derive(Validate)]`), automatic OpenAPI 3.1 schema generation (`#[derive(JsonSchema)]`), composable middleware, dependency injection, and a zero-copy HTTP/1.1 server — all powered by asupersync's structured concurrency with cancel-correctness.
+
+### Architecture
+
+```
+Request bytes → fastapi-http (zero-copy parse) → fastapi-router (trie lookup)
+                                                          │
+                                    ┌─────────────────────┤
+                                    ▼                     ▼
+                         fastapi-core Middleware    Path/Query/Json Extractors
+                         (CORS, Security, Logging)  (FromRequest trait)
+                                    │                     │
+                                    ▼                     ▼
+                              Handler fn (async, &Cx) ◄───┘
+                                    │
+                                    ▼
+                         IntoResponse → HTTP response bytes
+                                    │
+                         fastapi-openapi (schema gen from #[derive(JsonSchema)])
+                         fastapi-macros (proc macros: route + validation + schema)
+                         fastapi-output (agent-aware console formatting)
+```
+
+### Workspace Structure
+
+```
+fastapi_rust/
+├── Cargo.toml                         # Workspace root
+├── crates/
+│   ├── fastapi/                       # Facade crate (re-exports everything)
+│   ├── fastapi-core/                  # Core types, extractors, middleware, DI, app
+│   ├── fastapi-http/                  # Zero-copy HTTP/1.1 parser, TCP server
+│   ├── fastapi-router/               # Radix trie router with path parameters
+│   ├── fastapi-macros/               # Proc macros (#[get], Validate, JsonSchema)
+│   ├── fastapi-openapi/              # OpenAPI 3.1 types and schema generation
+│   ├── fastapi-types/                # Shared types (Method enum)
+│   └── fastapi-output/              # Agent-aware rich console output
+├── legacy_fastapi/                    # Python FastAPI source (reference only)
+├── PLAN_TO_PORT_FASTAPI_TO_RUST.md   # Porting plan with exclusions
+├── EXISTING_FASTAPI_STRUCTURE.md     # THE SPEC — complete behavior extraction
+├── PROPOSED_RUST_ARCHITECTURE.md     # Rust design decisions
+└── ARCHITECTURE.md                   # Architecture overview
+```
+
+### Key Files by Crate
+
+| Crate | Key Files | Purpose |
+|-------|-----------|---------|
+| `fastapi-core` | `src/app.rs` | `App`, `AppBuilder`, `AppConfig`, startup hooks, state container |
+| `fastapi-core` | `src/request.rs` | `Request`, `Body`, `Headers`, `Method`, `HttpVersion`, `BackgroundTasks` |
+| `fastapi-core` | `src/response.rs` | `Response`, `StatusCode`, `IntoResponse`, `FileResponse`, `Redirect`, `SetCookie` |
+| `fastapi-core` | `src/extract.rs` | `FromRequest` trait, `Path`, `Query`, `Json`, `Header`, `Cookie`, `Pagination`, `BearerToken`, `BasicAuth`, `OAuth2PasswordBearer`, `State`, `Form` |
+| `fastapi-core` | `src/middleware.rs` | `Middleware` trait, `Cors`, `SecurityHeaders`, `RequestId`, `RequestResponseLogger`, `RequireHeader` |
+| `fastapi-core` | `src/dependency.rs` | `FromDependency`, `Depends`, `DependencyCache`, `DependencyScope` |
+| `fastapi-core` | `src/error.rs` | `HttpError`, `ValidationError`, `ValidationErrors` |
+| `fastapi-core` | `src/context.rs` | `RequestContext` wrapping asupersync `Cx` |
+| `fastapi-core` | `src/validation.rs` | Validation rules (length, range, email, regex, custom) |
+| `fastapi-core` | `src/routing.rs` | Route integration with core types |
+| `fastapi-core` | `src/websocket.rs` | WebSocket frame parsing, handshake, accept key generation |
+| `fastapi-core` | `src/shutdown.rs` | `GracefulShutdown`, `ShutdownController`, phase-based shutdown |
+| `fastapi-core` | `src/testing.rs` | `TestClient`, `RequestBuilder`, `TestResponse`, assertion macros |
+| `fastapi-http` | `src/parser.rs` | Zero-copy HTTP/1.1 request parser (`Parser`, `StatefulParser`) |
+| `fastapi-http` | `src/server.rs` | `Server`, `TcpServer`, `serve()`, connection management |
+| `fastapi-http` | `src/body.rs` | Body parsing (Content-Length, chunked), streaming |
+| `fastapi-http` | `src/response.rs` | `ResponseWriter`, `ChunkedEncoder`, trailers |
+| `fastapi-http` | `src/websocket.rs` | WebSocket upgrade, frame I/O, close codes |
+| `fastapi-http` | `src/http2.rs` | HTTP/2 connection preface detection |
+| `fastapi-http` | `src/streaming.rs` | Cancel-aware streaming, file streams, chunked bytes |
+| `fastapi-router` | `src/trie.rs` | Radix trie `Router`, `Route`, path parameter converters |
+| `fastapi-router` | `src/match.rs` | `RouteMatch`, `RouteLookup`, `AllowedMethods` |
+| `fastapi-router` | `src/registry.rs` | Global route registration for macro-generated routes |
+| `fastapi-macros` | `src/route.rs` | `#[get]`, `#[post]`, etc. route macro implementation |
+| `fastapi-macros` | `src/validate.rs` | `#[derive(Validate)]` implementation |
+| `fastapi-macros` | `src/openapi.rs` | `#[derive(JsonSchema)]` implementation |
+| `fastapi-openapi` | `src/spec.rs` | `OpenApi`, `OpenApiBuilder`, `Operation`, `Parameter`, `PathItem` |
+| `fastapi-openapi` | `src/schema.rs` | `Schema`, `JsonSchema` trait, type-to-schema mapping |
+| `fastapi-output` | `src/detection.rs` | Agent/CI environment detection |
+| `fastapi-output` | `src/facade.rs` | `RichOutput` — main API surface |
+| `fastapi-output` | `src/mode.rs` | `OutputMode` (Rich/Plain/Minimal) |
+
+### Feature Flags
+
+**Facade crate (`fastapi-rust`):**
+
+```toml
+[features]
+default = ["output"]
+output = ["dep:fastapi-output", "fastapi-output/rich"]    # Rich console output with agent detection
+output-plain = ["dep:fastapi-output"]                      # Plain-text-only output (smaller binary)
+full = ["output", "fastapi-output/full"]                   # All output features + every theme
+```
+
+**Core crate (`fastapi-core`):**
+
+```toml
+[features]
+regex = ["dep:regex"]          # Regex support in testing assertions
+compression = []               # Response compression middleware (reserved)
+```
+
+**Output crate (`fastapi-output`):**
+
+```toml
+[features]
+default = ["rich"]
+rich = ["dep:rich_rust"]       # Rich terminal rendering
+full = ["rich", "rich_rust/full"]  # All themes and components
+```
+
+### Core Types Quick Reference
+
+| Type | Purpose |
+|------|---------|
+| `App` | Application container — routes, middleware, state, config |
+| `AppBuilder` | Builder pattern for `App` construction |
+| `Request` | Parsed HTTP request with headers, body, path params |
+| `Response` | HTTP response with status, headers, body |
+| `StatusCode` | HTTP status codes (200, 404, 500, etc.) |
+| `HttpError` | Unified error type with status code + detail |
+| `FromRequest` | Async trait — extract typed data from requests |
+| `IntoResponse` | Trait — convert handler return into HTTP response |
+| `Middleware` | Trait — intercept and transform request/response |
+| `FromDependency` | Trait — type-based dependency injection |
+| `Depends<T>` | Extractor wrapper for injected dependencies |
+| `Router` | Radix trie router with O(log n) path lookup |
+| `Route` | Route definition with method, path, converters |
+| `Path<T>` | Extractor for path parameters |
+| `Query<T>` | Extractor for query string parameters |
+| `Json<T>` | Extractor/responder for JSON bodies |
+| `Header<T>` | Extractor for HTTP headers |
+| `BearerToken` | Extractor for Bearer authentication |
+| `BasicAuth` | Extractor for HTTP Basic authentication |
+| `Pagination` | Extractor for page/per_page query params |
+| `RequestContext` | Wrapper around asupersync `Cx` for request lifecycle |
+| `Cx` | asupersync capability context — passed to all async operations |
+| `Outcome<T, E>` | Four-valued result: Ok, Err, Cancelled, Panicked |
+| `OpenApi` | OpenAPI 3.1 document type |
+| `JsonSchema` | Trait for compile-time JSON Schema generation |
+| `Validate` | Trait for compile-time validation rules |
+| `GracefulShutdown` | Coordinated multi-phase server shutdown |
+| `TestClient` | In-process HTTP test client (no actual TCP) |
+
+### Porting Methodology
+
+This project is ported from Python FastAPI using a **spec-first methodology**:
+
+1. **Extract spec from legacy** → `EXISTING_FASTAPI_STRUCTURE.md` captures all behaviors and data structures
+2. **Design Rust architecture** → `PROPOSED_RUST_ARCHITECTURE.md` defines the Rust-idiomatic approach
+3. **Implement from spec** → NEVER translate Python to Rust line-by-line
+
+**Critical rules:**
+- After reading the spec, you should NOT need legacy code
+- Extract behaviors and data structures, not implementation details
+- Consult ONLY the spec doc during implementation
+
+### Key Design Decisions
+
+- **Zero-copy HTTP parsing** — Request parser works directly on byte buffers, no allocation for headers
+- **Radix trie router** — O(log n) lookups with type-safe path parameter converters (int, float, uuid, slug, path)
+- **Proc macros for everything** — Route registration, validation, OpenAPI schema — all at compile time, zero runtime reflection
+- **`FromRequest` extractor pattern** — Each parameter type (Path, Query, Json, Header, etc.) implements an async extractor trait
+- **Type-based DI** — `FromDependency` trait + `Depends<T>` wrapper, not function-based like Python's `Depends(func)`
+- **asupersync exclusively** — NO tokio/reqwest/hyper. All async via `Cx` + structured concurrency
+- **Cancel-correct lifecycle** — Request handlers run in asupersync regions with budget-based timeouts
+- **Agent-aware output** — Auto-detects AI agent environments and switches to plain text (no ANSI codes)
+- **Minimal dependency stack** — Only asupersync + serde as core external deps; everything else built in-house
+- **Facade crate pattern** — `fastapi-rust` re-exports everything so users need a single dependency
+- **`fastapi-types` leaf crate** — Zero-dep crate with shared `Method` enum to break dependency cycles
+
+---
+
 ## Code Editing Discipline
 
 ### No Script-Based Changes
@@ -620,7 +797,36 @@ git push                # Push to remote
 
 ---
 
-Note for Codex/GPT-5.2:
+## cass — Cross-Agent Session Search
+
+`cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.
+
+**Rules:** Never run bare `cass` (TUI). Always use `--robot` or `--json`.
+
+### Examples
+
+```bash
+cass health
+cass search "async runtime" --robot --limit 5
+cass view /path/to/session.jsonl -n 42 --json
+cass expand /path/to/session.jsonl -n 42 -C 3 --json
+cass capabilities --json
+cass robot-docs guide
+```
+
+### Tips
+
+- Use `--fields minimal` for lean output
+- Filter by agent with `--agent`
+- Use `--days N` to limit to recent history
+
+stdout is data-only, stderr is diagnostics; exit code 0 means success.
+
+Treat cass as a way to avoid re-solving problems other agents already handled.
+
+---
+
+## Note for Codex/GPT-5.2
 
 You constantly bother me and stop working with concerned questions that look similar to this:
 
@@ -643,180 +849,3 @@ NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are cha
 ## Note on Built-in TODO Functionality
 
 Also, if I ask you to explicitly use your built-in TODO functionality, don't complain about this and say you need to use beads. You can use built-in TODOs if I tell you specifically to do so. Always comply with such orders.
-
----
-
-## fastapi_rust — This Project
-
-**This is the project you're working on.** fastapi_rust is an ultra-optimized Rust web framework inspired by FastAPI's developer experience. It provides a type-safe, high-performance web framework with automatic OpenAPI generation, dependency injection, and structured concurrency via asupersync — built from scratch with minimal dependencies.
-
-### What It Does
-
-Provides a familiar FastAPI-like developer experience in Rust: declarative route handlers via proc macros (`#[get]`, `#[post]`, etc.), type-safe request extraction (Path, Query, Json, Header, Cookie, Bearer), compile-time validation (`#[derive(Validate)]`), automatic OpenAPI 3.1 schema generation (`#[derive(JsonSchema)]`), composable middleware, dependency injection, and a zero-copy HTTP/1.1 server — all powered by asupersync's structured concurrency with cancel-correctness.
-
-### Architecture
-
-```
-Request bytes → fastapi-http (zero-copy parse) → fastapi-router (trie lookup)
-                                                          │
-                                    ┌─────────────────────┤
-                                    ▼                     ▼
-                         fastapi-core Middleware    Path/Query/Json Extractors
-                         (CORS, Security, Logging)  (FromRequest trait)
-                                    │                     │
-                                    ▼                     ▼
-                              Handler fn (async, &Cx) ◄───┘
-                                    │
-                                    ▼
-                         IntoResponse → HTTP response bytes
-                                    │
-                         fastapi-openapi (schema gen from #[derive(JsonSchema)])
-                         fastapi-macros (proc macros: route + validation + schema)
-                         fastapi-output (agent-aware console formatting)
-```
-
-### Workspace Structure
-
-```
-fastapi_rust/
-├── Cargo.toml                         # Workspace root
-├── crates/
-│   ├── fastapi/                       # Facade crate (re-exports everything)
-│   ├── fastapi-core/                  # Core types, extractors, middleware, DI, app
-│   ├── fastapi-http/                  # Zero-copy HTTP/1.1 parser, TCP server
-│   ├── fastapi-router/               # Radix trie router with path parameters
-│   ├── fastapi-macros/               # Proc macros (#[get], Validate, JsonSchema)
-│   ├── fastapi-openapi/              # OpenAPI 3.1 types and schema generation
-│   ├── fastapi-types/                # Shared types (Method enum)
-│   └── fastapi-output/              # Agent-aware rich console output
-├── legacy_fastapi/                    # Python FastAPI source (reference only)
-├── PLAN_TO_PORT_FASTAPI_TO_RUST.md   # Porting plan with exclusions
-├── EXISTING_FASTAPI_STRUCTURE.md     # THE SPEC — complete behavior extraction
-├── PROPOSED_RUST_ARCHITECTURE.md     # Rust design decisions
-└── ARCHITECTURE.md                   # Architecture overview
-```
-
-### Key Files by Crate
-
-| Crate | Key Files | Purpose |
-|-------|-----------|---------|
-| `fastapi-core` | `src/app.rs` | `App`, `AppBuilder`, `AppConfig`, startup hooks, state container |
-| `fastapi-core` | `src/request.rs` | `Request`, `Body`, `Headers`, `Method`, `HttpVersion`, `BackgroundTasks` |
-| `fastapi-core` | `src/response.rs` | `Response`, `StatusCode`, `IntoResponse`, `FileResponse`, `Redirect`, `SetCookie` |
-| `fastapi-core` | `src/extract.rs` | `FromRequest` trait, `Path`, `Query`, `Json`, `Header`, `Cookie`, `Pagination`, `BearerToken`, `BasicAuth`, `OAuth2PasswordBearer`, `State`, `Form` |
-| `fastapi-core` | `src/middleware.rs` | `Middleware` trait, `Cors`, `SecurityHeaders`, `RequestId`, `RequestResponseLogger`, `RequireHeader` |
-| `fastapi-core` | `src/dependency.rs` | `FromDependency`, `Depends`, `DependencyCache`, `DependencyScope` |
-| `fastapi-core` | `src/error.rs` | `HttpError`, `ValidationError`, `ValidationErrors` |
-| `fastapi-core` | `src/context.rs` | `RequestContext` wrapping asupersync `Cx` |
-| `fastapi-core` | `src/validation.rs` | Validation rules (length, range, email, regex, custom) |
-| `fastapi-core` | `src/routing.rs` | Route integration with core types |
-| `fastapi-core` | `src/websocket.rs` | WebSocket frame parsing, handshake, accept key generation |
-| `fastapi-core` | `src/shutdown.rs` | `GracefulShutdown`, `ShutdownController`, phase-based shutdown |
-| `fastapi-core` | `src/testing.rs` | `TestClient`, `RequestBuilder`, `TestResponse`, assertion macros |
-| `fastapi-http` | `src/parser.rs` | Zero-copy HTTP/1.1 request parser (`Parser`, `StatefulParser`) |
-| `fastapi-http` | `src/server.rs` | `Server`, `TcpServer`, `serve()`, connection management |
-| `fastapi-http` | `src/body.rs` | Body parsing (Content-Length, chunked), streaming |
-| `fastapi-http` | `src/response.rs` | `ResponseWriter`, `ChunkedEncoder`, trailers |
-| `fastapi-http` | `src/websocket.rs` | WebSocket upgrade, frame I/O, close codes |
-| `fastapi-http` | `src/http2.rs` | HTTP/2 connection preface detection |
-| `fastapi-http` | `src/streaming.rs` | Cancel-aware streaming, file streams, chunked bytes |
-| `fastapi-router` | `src/trie.rs` | Radix trie `Router`, `Route`, path parameter converters |
-| `fastapi-router` | `src/match.rs` | `RouteMatch`, `RouteLookup`, `AllowedMethods` |
-| `fastapi-router` | `src/registry.rs` | Global route registration for macro-generated routes |
-| `fastapi-macros` | `src/route.rs` | `#[get]`, `#[post]`, etc. route macro implementation |
-| `fastapi-macros` | `src/validate.rs` | `#[derive(Validate)]` implementation |
-| `fastapi-macros` | `src/openapi.rs` | `#[derive(JsonSchema)]` implementation |
-| `fastapi-openapi` | `src/spec.rs` | `OpenApi`, `OpenApiBuilder`, `Operation`, `Parameter`, `PathItem` |
-| `fastapi-openapi` | `src/schema.rs` | `Schema`, `JsonSchema` trait, type-to-schema mapping |
-| `fastapi-output` | `src/detection.rs` | Agent/CI environment detection |
-| `fastapi-output` | `src/facade.rs` | `RichOutput` — main API surface |
-| `fastapi-output` | `src/mode.rs` | `OutputMode` (Rich/Plain/Minimal) |
-
-### Feature Flags
-
-**Facade crate (`fastapi-rust`):**
-
-```toml
-[features]
-default = ["output"]
-output = ["dep:fastapi-output", "fastapi-output/rich"]    # Rich console output with agent detection
-output-plain = ["dep:fastapi-output"]                      # Plain-text-only output (smaller binary)
-full = ["output", "fastapi-output/full"]                   # All output features + every theme
-```
-
-**Core crate (`fastapi-core`):**
-
-```toml
-[features]
-regex = ["dep:regex"]          # Regex support in testing assertions
-compression = []               # Response compression middleware (reserved)
-```
-
-**Output crate (`fastapi-output`):**
-
-```toml
-[features]
-default = ["rich"]
-rich = ["dep:rich_rust"]       # Rich terminal rendering
-full = ["rich", "rich_rust/full"]  # All themes and components
-```
-
-### Core Types Quick Reference
-
-| Type | Purpose |
-|------|---------|
-| `App` | Application container — routes, middleware, state, config |
-| `AppBuilder` | Builder pattern for `App` construction |
-| `Request` | Parsed HTTP request with headers, body, path params |
-| `Response` | HTTP response with status, headers, body |
-| `StatusCode` | HTTP status codes (200, 404, 500, etc.) |
-| `HttpError` | Unified error type with status code + detail |
-| `FromRequest` | Async trait — extract typed data from requests |
-| `IntoResponse` | Trait — convert handler return into HTTP response |
-| `Middleware` | Trait — intercept and transform request/response |
-| `FromDependency` | Trait — type-based dependency injection |
-| `Depends<T>` | Extractor wrapper for injected dependencies |
-| `Router` | Radix trie router with O(log n) path lookup |
-| `Route` | Route definition with method, path, converters |
-| `Path<T>` | Extractor for path parameters |
-| `Query<T>` | Extractor for query string parameters |
-| `Json<T>` | Extractor/responder for JSON bodies |
-| `Header<T>` | Extractor for HTTP headers |
-| `BearerToken` | Extractor for Bearer authentication |
-| `BasicAuth` | Extractor for HTTP Basic authentication |
-| `Pagination` | Extractor for page/per_page query params |
-| `RequestContext` | Wrapper around asupersync `Cx` for request lifecycle |
-| `Cx` | asupersync capability context — passed to all async operations |
-| `Outcome<T, E>` | Four-valued result: Ok, Err, Cancelled, Panicked |
-| `OpenApi` | OpenAPI 3.1 document type |
-| `JsonSchema` | Trait for compile-time JSON Schema generation |
-| `Validate` | Trait for compile-time validation rules |
-| `GracefulShutdown` | Coordinated multi-phase server shutdown |
-| `TestClient` | In-process HTTP test client (no actual TCP) |
-
-### Porting Methodology
-
-This project is ported from Python FastAPI using a **spec-first methodology**:
-
-1. **Extract spec from legacy** → `EXISTING_FASTAPI_STRUCTURE.md` captures all behaviors and data structures
-2. **Design Rust architecture** → `PROPOSED_RUST_ARCHITECTURE.md` defines the Rust-idiomatic approach
-3. **Implement from spec** → NEVER translate Python to Rust line-by-line
-
-**Critical rules:**
-- After reading the spec, you should NOT need legacy code
-- Extract behaviors and data structures, not implementation details
-- Consult ONLY the spec doc during implementation
-
-### Key Design Decisions
-
-- **Zero-copy HTTP parsing** — Request parser works directly on byte buffers, no allocation for headers
-- **Radix trie router** — O(log n) lookups with type-safe path parameter converters (int, float, uuid, slug, path)
-- **Proc macros for everything** — Route registration, validation, OpenAPI schema — all at compile time, zero runtime reflection
-- **`FromRequest` extractor pattern** — Each parameter type (Path, Query, Json, Header, etc.) implements an async extractor trait
-- **Type-based DI** — `FromDependency` trait + `Depends<T>` wrapper, not function-based like Python's `Depends(func)`
-- **asupersync exclusively** — NO tokio/reqwest/hyper. All async via `Cx` + structured concurrency
-- **Cancel-correct lifecycle** — Request handlers run in asupersync regions with budget-based timeouts
-- **Agent-aware output** — Auto-detects AI agent environments and switches to plain text (no ANSI codes)
-- **Minimal dependency stack** — Only asupersync + serde as core external deps; everything else built in-house
-- **Facade crate pattern** — `fastapi-rust` re-exports everything so users need a single dependency
-- **`fastapi-types` leaf crate** — Zero-dep crate with shared `Method` enum to break dependency cycles
