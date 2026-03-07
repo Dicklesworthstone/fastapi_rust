@@ -107,6 +107,38 @@ pub const DEFAULT_MAX_REQUESTS_PER_CONNECTION: usize = 100;
 /// Default drain timeout in seconds (time to wait for in-flight requests on shutdown).
 pub const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 30;
 
+struct CatchUnwind<F>(Pin<Box<F>>);
+
+impl<F: Future> CatchUnwind<F> {
+    fn new(future: F) -> Self {
+        Self(Box::pin(future))
+    }
+}
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let inner = self.0.as_mut();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
+        match result {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 /// Server configuration for the HTTP/1.1 server.
 ///
 /// Controls bind address, timeouts, connection limits, and HTTP parsing behavior.
@@ -158,7 +190,8 @@ pub struct ServerConfig {
     /// Maximum requests per connection (0 = unlimited).
     pub max_requests_per_connection: usize,
     /// Drain timeout (time to wait for in-flight requests on shutdown).
-    /// After this timeout, connections are forcefully closed.
+    /// After this timeout, the server stops waiting for lingering connection
+    /// tasks and returns to the caller.
     pub drain_timeout: Duration,
     /// Pre-body validation hooks (run after parsing headers but before any body is read).
     ///
@@ -307,7 +340,8 @@ impl ServerConfig {
     /// Sets the drain timeout.
     ///
     /// This is the time to wait for in-flight requests to complete during
-    /// shutdown. After this timeout, connections are forcefully closed.
+    /// shutdown. After this timeout, the server stops waiting for lingering
+    /// connection tasks and returns.
     #[must_use]
     pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
         self.drain_timeout = timeout;
@@ -1648,7 +1682,7 @@ impl TcpServer {
     /// This is a convenience method that combines `start_drain()` and
     /// `wait_for_drain()` using the configured drain timeout.
     ///
-    /// Returns the number of connections that were forcefully closed
+    /// Returns the number of connections still active after the wait completes
     /// (0 if all drained within the timeout).
     pub async fn drain(&self) -> u64 {
         self.start_drain();
@@ -1794,6 +1828,7 @@ impl TcpServer {
                 Err(e) => {
                     cx.trace(&format!("Accept error: {e}"));
                     if is_fatal_accept_error(&e) {
+                        self.drain_connection_tasks(cx).await;
                         return Err(ServerError::Io(e));
                     }
                     continue;
@@ -2167,7 +2202,7 @@ impl TcpServer {
         let accept_poll_interval = Duration::from_millis(50);
 
         loop {
-            self.cleanup_completed_handles();
+            self.cleanup_completed_handles(cx).await;
 
             // Check for cancellation or drain
             if cx.is_cancel_requested() || self.is_draining() {
@@ -2242,7 +2277,7 @@ impl TcpServer {
                         handles.push(handle);
                     }
                     // Periodically clean up completed handles
-                    self.cleanup_completed_handles();
+                    self.cleanup_completed_handles(cx).await;
                 }
                 Err(e) => {
                     cx.trace(&format!("Failed to spawn connection task: {e:?}"));
@@ -2292,10 +2327,31 @@ impl TcpServer {
         })
     }
 
-    /// Removes completed task handles from the tracking vector.
-    fn cleanup_completed_handles(&self) {
+    fn take_finished_connection_handles(&self) -> Vec<JoinHandle<()>> {
         if let Ok(mut handles) = self.connection_handles.lock() {
-            handles.retain(|handle| !handle.is_finished());
+            let mut finished = Vec::new();
+            let mut idx = 0;
+            while idx < handles.len() {
+                if handles[idx].is_finished() {
+                    finished.push(handles.swap_remove(idx));
+                } else {
+                    idx += 1;
+                }
+            }
+            finished
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Removes completed task handles from the tracking vector and reports any panics.
+    async fn cleanup_completed_handles(&self, cx: &Cx) {
+        for handle in self.take_finished_connection_handles() {
+            if let Err(payload) = CatchUnwind::new(handle).await {
+                let message = panic_payload_message(payload.as_ref());
+                cx.trace(&format!("Connection task panicked: {message}"));
+                eprintln!("Connection task panicked: {message}");
+            }
         }
     }
 
@@ -2312,7 +2368,7 @@ impl TcpServer {
 
         // Wait for all tasks to complete or timeout
         while start.elapsed() < drain_timeout {
-            self.cleanup_completed_handles();
+            self.cleanup_completed_handles(cx).await;
 
             let remaining = self
                 .connection_handles
@@ -2320,7 +2376,7 @@ impl TcpServer {
                 .map_or(0, |h| h.iter().filter(|t| !t.is_finished()).count());
 
             if remaining == 0 {
-                self.cleanup_completed_handles();
+                self.cleanup_completed_handles(cx).await;
                 cx.trace("All connection tasks drained successfully");
                 return;
             }
@@ -2329,9 +2385,9 @@ impl TcpServer {
             asupersync::runtime::yield_now().await;
         }
 
-        self.cleanup_completed_handles();
+        self.cleanup_completed_handles(cx).await;
         cx.trace(&format!(
-            "Drain timeout reached with {} tasks still running",
+            "Drain timeout reached with {} tasks still running; lingering connection tasks will continue in the background",
             self.connection_handles
                 .lock()
                 .map_or(0, |h| h.iter().filter(|t| !t.is_finished()).count())
@@ -5636,7 +5692,59 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        server.cleanup_completed_handles();
+        block_on(async {
+            server.cleanup_completed_handles(&Cx::for_testing()).await;
+        });
+
+        let remaining = server
+            .connection_handles
+            .lock()
+            .expect("connection handle mutex should not be poisoned")
+            .len();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn cleanup_completed_handles_reaps_panicked_runtime_tasks_without_panicking() {
+        use std::time::{Duration, Instant as StdInstant};
+
+        let runtime = asupersync::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime build");
+        let handle = runtime.handle();
+        let server = TcpServer::default();
+
+        let join = handle.spawn(async move {
+            panic!("intentional panic to verify cleanup panics are observed");
+        });
+
+        server
+            .connection_handles
+            .lock()
+            .expect("connection handle mutex should not be poisoned")
+            .push(join);
+
+        let deadline = StdInstant::now() + Duration::from_secs(1);
+        loop {
+            let finished = server
+                .connection_handles
+                .lock()
+                .expect("connection handle mutex should not be poisoned")[0]
+                .is_finished();
+            if finished {
+                break;
+            }
+            assert!(
+                StdInstant::now() < deadline,
+                "panicking task should finish promptly"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        block_on(async {
+            server.cleanup_completed_handles(&Cx::for_testing()).await;
+        });
 
         let remaining = server
             .connection_handles

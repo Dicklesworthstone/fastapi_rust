@@ -62,6 +62,7 @@ checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 [[package]]
 name = "asupersync"
 version = "0.2.7"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git#b57247ef0af10918ef9b67d314a021a9657c7a08"
 dependencies = [
  "base64",
  "bincode-next",
@@ -72,6 +73,7 @@ dependencies = [
  "futures-lite",
  "getrandom 0.4.1",
  "hmac",
+ "js-sys",
  "libc",
  "memchr",
  "nix",
@@ -92,6 +94,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "visibility",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -646,6 +651,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 [[package]]
 name = "franken-decision"
 version = "0.2.7"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git#b57247ef0af10918ef9b67d314a021a9657c7a08"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -655,6 +661,7 @@ dependencies = [
 [[package]]
 name = "franken-evidence"
 version = "0.2.7"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git#b57247ef0af10918ef9b67d314a021a9657c7a08"
 dependencies = [
  "serde",
  "serde_json",
@@ -663,6 +670,7 @@ dependencies = [
 [[package]]
 name = "franken-kernel"
 version = "0.2.7"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git#b57247ef0af10918ef9b67d314a021a9657c7a08"
 dependencies = [
  "serde",
 ]
@@ -1479,6 +1487,8 @@ checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 [[package]]
 name = "rich_rust"
 version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28b19f5711867dc33a82cdbfd437c03b4089308f63a7ec3ee6ab34a9d74ff519"
 dependencies = [
  "backtrace",
  "bitflags",
@@ -2099,6 +2109,20 @@ dependencies = [
  "rustversion",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70a6e77fd0ae8029c9ea0063f87c46fde723e7d887703d74ad2616d792e51e6f"
+dependencies = [
+ "cfg-if",
+ "futures-util",
+ "js-sys",
+ "once_cell",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
