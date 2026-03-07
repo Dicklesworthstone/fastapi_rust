@@ -8214,10 +8214,8 @@ mod security_tests {
         // But application/json with parameters is still valid
         let ctx = test_context();
         let mut req = Request::new(Method::Post, "/test");
-        req.headers_mut().insert(
-            "content-type",
-            b"application/json; charset=utf-8".to_vec(),
-        );
+        req.headers_mut()
+            .insert("content-type", b"application/json; charset=utf-8".to_vec());
         req.set_body(Body::Bytes(b"{\"value\": 42}".to_vec()));
 
         let result = futures_executor::block_on(Json::<Data>::from_request(&ctx, &mut req));
@@ -8229,10 +8227,8 @@ mod security_tests {
         // Vendor JSON types should also be accepted
         let ctx = test_context();
         let mut req = Request::new(Method::Post, "/test");
-        req.headers_mut().insert(
-            "content-type",
-            b"application/vnd.api+json".to_vec(),
-        );
+        req.headers_mut()
+            .insert("content-type", b"application/vnd.api+json".to_vec());
         req.set_body(Body::Bytes(b"{\"value\": 42}".to_vec()));
 
         let result = futures_executor::block_on(Json::<Data>::from_request(&ctx, &mut req));

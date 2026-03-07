@@ -1463,10 +1463,7 @@ impl std::fmt::Debug for TcpServer {
             .field("draining", &self.draining)
             .field(
                 "connection_handles",
-                &self
-                    .connection_handles
-                    .lock()
-                    .map_or(0, |h| h.len()),
+                &self.connection_handles.lock().map_or(0, |h| h.len()),
             )
             .field("shutdown_controller", &self.shutdown_controller)
             .field("metrics_counters", &self.metrics_counters)
@@ -2120,11 +2117,7 @@ impl TcpServer {
     /// Panics if called outside of an asupersync runtime context (i.e. when
     /// [`Runtime::current_handle()`] returns `None`).
     #[allow(clippy::too_many_lines)]
-    pub async fn serve_concurrent<H, Fut>(
-        &self,
-        cx: &Cx,
-        handler: H,
-    ) -> Result<(), ServerError>
+    pub async fn serve_concurrent<H, Fut>(&self, cx: &Cx, handler: H) -> Result<(), ServerError>
     where
         H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
@@ -5577,28 +5570,55 @@ mod tests {
 
     #[test]
     fn cleanup_completed_handles_prunes_finished_runtime_tasks() {
-        block_on(async {
-            let server = TcpServer::default();
-            let join = Runtime::current_handle()
-                .expect("cleanup test should run inside a runtime")
-                .spawn(async {});
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant as StdInstant};
 
-            server
-                .connection_handles
-                .lock()
-                .expect("connection handle mutex should not be poisoned")
-                .push(join);
+        let runtime = asupersync::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime build");
+        let handle = runtime.handle();
+        let server = TcpServer::default();
+        let (tx, rx) = mpsc::sync_channel(1);
 
-            asupersync::runtime::yield_now().await;
-            server.cleanup_completed_handles();
-
-            let remaining = server
-                .connection_handles
-                .lock()
-                .expect("connection handle mutex should not be poisoned")
-                .len();
-            assert_eq!(remaining, 0);
+        let join = handle.spawn(async move {
+            tx.send(()).expect("completion signal should send");
         });
+
+        server
+            .connection_handles
+            .lock()
+            .expect("connection handle mutex should not be poisoned")
+            .push(join);
+
+        rx.recv_timeout(Duration::from_secs(1))
+            .expect("spawned runtime task should complete");
+
+        let deadline = StdInstant::now() + Duration::from_secs(1);
+        loop {
+            if server
+                .connection_handles
+                .lock()
+                .expect("connection handle mutex should not be poisoned")[0]
+                .is_finished()
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < deadline,
+                "JoinHandle should report completion after task exit"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        server.cleanup_completed_handles();
+
+        let remaining = server
+            .connection_handles
+            .lock()
+            .expect("connection handle mutex should not be poisoned")
+            .len();
+        assert_eq!(remaining, 0);
     }
 
     #[test]
