@@ -2164,8 +2164,11 @@ impl TcpServer {
     {
         let runtime_handle = Runtime::current_handle()
             .expect("serve_concurrent must be called inside an asupersync runtime");
+        let accept_poll_interval = Duration::from_millis(50);
 
         loop {
+            self.cleanup_completed_handles();
+
             // Check for cancellation or drain
             if cx.is_cancel_requested() || self.is_draining() {
                 cx.trace("Server shutting down, draining connections");
@@ -2173,20 +2176,24 @@ impl TcpServer {
                 return Ok(());
             }
 
-            // Accept a connection
-            let (mut stream, peer_addr) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    cx.trace(&format!("Accept error: {e}"));
-                    if is_fatal_accept_error(&e) {
-                        return Err(ServerError::Io(e));
+            // Poll accept periodically so shutdown is observed promptly even
+            // when the listener is otherwise idle.
+            let accept_future = Box::pin(listener.accept());
+            let (mut stream, peer_addr) =
+                match timeout(current_time(), accept_poll_interval, accept_future).await {
+                    Ok(Ok(conn)) => conn,
+                    Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
                     }
-                    continue;
-                }
-            };
+                    Ok(Err(e)) => {
+                        cx.trace(&format!("Accept error: {e}"));
+                        if is_fatal_accept_error(&e) {
+                            return Err(ServerError::Io(e));
+                        }
+                        continue;
+                    }
+                    Err(_elapsed) => continue,
+                };
 
             // Check connection limit before processing
             if !self.try_acquire_connection() {
@@ -2239,7 +2246,6 @@ impl TcpServer {
                 }
                 Err(e) => {
                     cx.trace(&format!("Failed to spawn connection task: {e:?}"));
-                    self.release_connection();
                 }
             }
         }
@@ -2306,12 +2312,15 @@ impl TcpServer {
 
         // Wait for all tasks to complete or timeout
         while start.elapsed() < drain_timeout {
+            self.cleanup_completed_handles();
+
             let remaining = self
                 .connection_handles
                 .lock()
                 .map_or(0, |h| h.iter().filter(|t| !t.is_finished()).count());
 
             if remaining == 0 {
+                self.cleanup_completed_handles();
                 cx.trace("All connection tasks drained successfully");
                 return;
             }
@@ -2320,6 +2329,7 @@ impl TcpServer {
             asupersync::runtime::yield_now().await;
         }
 
+        self.cleanup_completed_handles();
         cx.trace(&format!(
             "Drain timeout reached with {} tasks still running",
             self.connection_handles
@@ -5686,6 +5696,45 @@ mod tests {
             counter.load(Ordering::Relaxed),
             0,
             "connection slot must be released even if the spawned future is dropped before polling"
+        );
+    }
+
+    #[test]
+    fn serve_concurrent_shutdown_wakes_idle_accept_loop() {
+        use std::time::{Duration, Instant as StdInstant};
+
+        let server = Arc::new(TcpServer::new(ServerConfig::new("127.0.0.1:0")));
+        let server_for_thread = Arc::clone(&server);
+
+        let serve_thread = std::thread::spawn(move || {
+            block_on(async {
+                let cx = Cx::for_testing();
+                server_for_thread
+                    .serve_concurrent(&cx, |_ctx, _req| async {
+                        Response::ok().body(fastapi_core::ResponseBody::Bytes(b"ok".to_vec()))
+                    })
+                    .await
+            })
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        server.shutdown();
+
+        let deadline = StdInstant::now() + Duration::from_secs(2);
+        while !serve_thread.is_finished() {
+            assert!(
+                StdInstant::now() < deadline,
+                "serve_concurrent should exit promptly after shutdown without a new connection"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let result = serve_thread
+            .join()
+            .expect("serve_concurrent regression thread should not panic");
+        assert!(
+            result.is_ok(),
+            "serve_concurrent should stop cleanly on shutdown"
         );
     }
 
