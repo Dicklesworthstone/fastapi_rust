@@ -1454,6 +1454,22 @@ pub struct TcpServer {
     metrics_counters: Arc<MetricsCounters>,
 }
 
+struct ConnectionSlotGuard {
+    counter: Arc<AtomicU64>,
+}
+
+impl ConnectionSlotGuard {
+    fn new(counter: Arc<AtomicU64>) -> Self {
+        Self { counter }
+    }
+}
+
+impl Drop for ConnectionSlotGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl std::fmt::Debug for TcpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TcpServer")
@@ -2251,6 +2267,7 @@ impl TcpServer {
         let connection_counter = Arc::clone(&self.connection_counter);
 
         handle.try_spawn(async move {
+            let _connection_slot = ConnectionSlotGuard::new(connection_counter);
             let result = process_connection(
                 &connection_cx,
                 &request_counter,
@@ -2260,9 +2277,6 @@ impl TcpServer {
                 |ctx, req| handler(ctx, req),
             )
             .await;
-
-            // Release connection slot (always, regardless of success/failure)
-            connection_counter.fetch_sub(1, Ordering::Relaxed);
 
             if let Err(e) = result {
                 // Current default: print to stderr. A structured sink can be wired via fastapi-core::logging.
@@ -5619,6 +5633,41 @@ mod tests {
             .expect("connection handle mutex should not be poisoned")
             .len();
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn connection_slot_guard_releases_counter_when_task_panics() {
+        use std::time::{Duration, Instant as StdInstant};
+
+        let runtime = asupersync::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime build");
+        let handle = runtime.handle();
+        let counter = Arc::new(AtomicU64::new(1));
+
+        let panic_task = handle.spawn({
+            let counter = Arc::clone(&counter);
+            async move {
+                let _connection_slot = ConnectionSlotGuard::new(counter);
+                panic!("intentional panic to verify connection slot cleanup");
+            }
+        });
+
+        let deadline = StdInstant::now() + Duration::from_secs(1);
+        while !panic_task.is_finished() {
+            assert!(
+                StdInstant::now() < deadline,
+                "panicing task should finish promptly"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "connection slot must be released even when the task unwinds"
+        );
     }
 
     #[test]
