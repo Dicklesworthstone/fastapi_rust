@@ -2265,9 +2265,10 @@ impl TcpServer {
         let connection_cx = cx.clone();
         let request_counter = Arc::clone(&self.request_counter);
         let connection_counter = Arc::clone(&self.connection_counter);
+        let connection_slot = ConnectionSlotGuard::new(connection_counter);
 
         handle.try_spawn(async move {
-            let _connection_slot = ConnectionSlotGuard::new(connection_counter);
+            let _connection_slot = connection_slot;
             let result = process_connection(
                 &connection_cx,
                 &request_counter,
@@ -5667,6 +5668,24 @@ mod tests {
             counter.load(Ordering::Relaxed),
             0,
             "connection slot must be released even when the task unwinds"
+        );
+    }
+
+    #[test]
+    fn connection_slot_guard_releases_counter_when_future_drops_before_poll() {
+        let counter = Arc::new(AtomicU64::new(1));
+        let connection_slot = ConnectionSlotGuard::new(Arc::clone(&counter));
+
+        let future = async move {
+            let _connection_slot = connection_slot;
+        };
+
+        drop(future);
+
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "connection slot must be released even if the spawned future is dropped before polling"
         );
     }
 
