@@ -54,11 +54,11 @@ use crate::parser::{ParseError, ParseLimits, ParseStatus, Parser, StatefulParser
 use crate::response::{ResponseWrite, ResponseWriter};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::{TcpListener, TcpStream};
-use asupersync::runtime::{RuntimeState, SpawnError, TaskHandle};
+use asupersync::runtime::{JoinHandle, Runtime, RuntimeHandle, SpawnError};
 use asupersync::signal::{GracefulOutcome, ShutdownController, ShutdownReceiver};
 use asupersync::stream::Stream;
 use asupersync::time::timeout;
-use asupersync::{Budget, Cx, Scope, Time};
+use asupersync::{Budget, Cx, Time};
 use fastapi_core::app::App;
 use fastapi_core::{Method, Request, RequestContext, Response, StatusCode};
 use std::future::Future;
@@ -677,7 +677,12 @@ impl From<http2::Http2Error> for ServerError {
 /// Processes a connection with the given handler.
 ///
 /// This is the unified connection handling logic used by all server modes.
-async fn process_connection<H, Fut>(
+/// It runs the parse-dispatch-write loop for HTTP/1.1 (and delegates to
+/// [`process_connection_http2`] when h2c prior-knowledge is detected).
+///
+/// The function is public so that embedders can build custom accept loops
+/// while reusing the core per-connection logic.
+pub async fn process_connection<H, Fut>(
     cx: &Cx,
     request_counter: &AtomicU64,
     mut stream: TcpStream,
@@ -1434,7 +1439,6 @@ async fn h2_fc_clamp_send(
 /// This server manages the lifecycle of connections and requests using
 /// asupersync's structured concurrency primitives. Each connection runs
 /// in its own region, and each request gets its own task with a budget.
-#[derive(Debug)]
 pub struct TcpServer {
     config: ServerConfig,
     request_counter: Arc<AtomicU64>,
@@ -1443,11 +1447,31 @@ pub struct TcpServer {
     /// Whether the server is draining (shutting down gracefully).
     draining: Arc<AtomicBool>,
     /// Handles to spawned connection tasks for graceful shutdown.
-    connection_handles: Mutex<Vec<TaskHandle<()>>>,
+    connection_handles: Mutex<Vec<JoinHandle<()>>>,
     /// Shutdown controller for coordinated graceful shutdown.
     shutdown_controller: Arc<ShutdownController>,
     /// Connection pool metrics counters.
     metrics_counters: Arc<MetricsCounters>,
+}
+
+impl std::fmt::Debug for TcpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpServer")
+            .field("config", &self.config)
+            .field("request_counter", &self.request_counter)
+            .field("connection_counter", &self.connection_counter)
+            .field("draining", &self.draining)
+            .field(
+                "connection_handles",
+                &self
+                    .connection_handles
+                    .lock()
+                    .map_or(0, |h| h.len()),
+            )
+            .field("shutdown_controller", &self.shutdown_controller)
+            .field("metrics_counters", &self.metrics_counters)
+            .finish()
+    }
 }
 
 impl TcpServer {
@@ -2080,24 +2104,25 @@ impl TcpServer {
         }
     }
 
-    /// Serves HTTP requests with concurrent connection handling using asupersync Scope.
+    /// Serves HTTP requests with concurrent connection handling using `RuntimeHandle::spawn`.
     ///
-    /// This method uses `Scope::spawn_registered` for proper structured concurrency,
-    /// ensuring all spawned connection tasks are tracked and can be properly drained
-    /// during shutdown.
+    /// Each accepted connection is spawned as an independent task on the current
+    /// asupersync runtime via [`RuntimeHandle`]. Task handles are tracked internally
+    /// so they can be drained during graceful shutdown.
     ///
     /// # Arguments
     ///
     /// * `cx` - The asupersync context for cancellation and tracing
-    /// * `scope` - A scope for spawning connection tasks
-    /// * `state` - Runtime state for task registration
     /// * `handler` - The request handler
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside of an asupersync runtime context (i.e. when
+    /// [`Runtime::current_handle()`] returns `None`).
     #[allow(clippy::too_many_lines)]
     pub async fn serve_concurrent<H, Fut>(
         &self,
         cx: &Cx,
-        scope: &Scope<'_>,
-        state: &mut RuntimeState,
         handler: H,
     ) -> Result<(), ServerError>
     where
@@ -2114,16 +2139,13 @@ impl TcpServer {
 
         let handler = Arc::new(handler);
 
-        self.accept_loop_concurrent(cx, scope, state, listener, handler)
-            .await
+        self.accept_loop_concurrent(cx, listener, handler).await
     }
 
-    /// Accept loop that spawns connection handlers concurrently using Scope.
+    /// Accept loop that spawns connection handlers concurrently using `RuntimeHandle`.
     async fn accept_loop_concurrent<H, Fut>(
         &self,
         cx: &Cx,
-        scope: &Scope<'_>,
-        state: &mut RuntimeState,
         listener: TcpListener,
         handler: Arc<H>,
     ) -> Result<(), ServerError>
@@ -2131,6 +2153,9 @@ impl TcpServer {
         H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
+        let runtime_handle = Runtime::current_handle()
+            .expect("serve_concurrent must be called inside an asupersync runtime");
+
         loop {
             // Check for cancellation or drain
             if cx.is_cancel_requested() || self.is_draining() {
@@ -2187,10 +2212,9 @@ impl TcpServer {
                 }
             ));
 
-            // Spawn connection task using Scope
+            // Spawn connection task using RuntimeHandle
             match self.spawn_connection_task(
-                scope,
-                state,
+                &runtime_handle,
                 cx,
                 stream,
                 peer_addr,
@@ -2212,27 +2236,30 @@ impl TcpServer {
         }
     }
 
-    /// Spawns a connection handler task using Scope::spawn_registered.
+    /// Spawns a connection handler task using [`RuntimeHandle::try_spawn`].
+    ///
+    /// The parent server [`Cx`] is cloned into the task so shutdown and
+    /// cancellation propagate into per-connection I/O.
     fn spawn_connection_task<H, Fut>(
         &self,
-        scope: &Scope<'_>,
-        state: &mut RuntimeState,
+        handle: &RuntimeHandle,
         cx: &Cx,
         stream: TcpStream,
         peer_addr: SocketAddr,
         handler: Arc<H>,
-    ) -> Result<TaskHandle<()>, SpawnError>
+    ) -> Result<JoinHandle<()>, SpawnError>
     where
         H: Fn(RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
         let config = self.config.clone();
+        let connection_cx = cx.clone();
         let request_counter = Arc::clone(&self.request_counter);
         let connection_counter = Arc::clone(&self.connection_counter);
 
-        scope.spawn_registered(state, cx, move |task_cx| async move {
+        handle.try_spawn(async move {
             let result = process_connection(
-                &task_cx,
+                &connection_cx,
                 &request_counter,
                 stream,
                 peer_addr,
@@ -3691,7 +3718,7 @@ impl TcpServer {
             // Handle inline (single-threaded accept loop).
             //
             // For concurrent connection handling with structured concurrency, use
-            // `TcpServer::serve_concurrent()` which spawns tasks via asupersync `Scope`.
+            // `TcpServer::serve_concurrent()` which spawns tasks via `RuntimeHandle`.
             let request_id = self.next_request_id();
             let request_budget = Budget::new().with_deadline(self.config.request_timeout);
 
@@ -3809,7 +3836,10 @@ fn is_fatal_accept_error(e: &io::Error) -> bool {
 /// Reads data from a TCP stream into a buffer.
 ///
 /// Returns the number of bytes read, or 0 if the connection was closed.
-async fn read_into_buffer(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<usize> {
+///
+/// This is a thin wrapper around [`AsyncRead::poll_read`] exposed for use in
+/// custom connection handlers that need low-level stream I/O.
+pub async fn read_into_buffer(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<usize> {
     use std::future::poll_fn;
 
     poll_fn(|cx| {
@@ -4427,7 +4457,8 @@ async fn write_raw_response(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<
 /// Writes a response to a TCP stream.
 ///
 /// Handles both full (buffered) and streaming (chunked) responses.
-async fn write_response(stream: &mut TcpStream, response: ResponseWrite) -> io::Result<()> {
+/// Flushes the stream after all data has been written.
+pub async fn write_response(stream: &mut TcpStream, response: ResponseWrite) -> io::Result<()> {
     use std::future::poll_fn;
 
     match response {
@@ -4454,8 +4485,8 @@ async fn write_response(stream: &mut TcpStream, response: ResponseWrite) -> io::
     Ok(())
 }
 
-/// Writes all bytes to a stream.
-async fn write_all(stream: &mut TcpStream, mut buf: &[u8]) -> io::Result<()> {
+/// Writes all bytes to a stream, looping until the entire buffer is consumed.
+pub async fn write_all(stream: &mut TcpStream, mut buf: &[u8]) -> io::Result<()> {
     use std::future::poll_fn;
 
     while !buf.is_empty() {
@@ -5541,6 +5572,32 @@ mod tests {
             let remaining = server.drain().await;
             assert_eq!(remaining, 3);
             assert!(server.is_draining());
+        });
+    }
+
+    #[test]
+    fn cleanup_completed_handles_prunes_finished_runtime_tasks() {
+        block_on(async {
+            let server = TcpServer::default();
+            let join = Runtime::current_handle()
+                .expect("cleanup test should run inside a runtime")
+                .spawn(async {});
+
+            server
+                .connection_handles
+                .lock()
+                .expect("connection handle mutex should not be poisoned")
+                .push(join);
+
+            asupersync::runtime::yield_now().await;
+            server.cleanup_completed_handles();
+
+            let remaining = server
+                .connection_handles
+                .lock()
+                .expect("connection handle mutex should not be poisoned")
+                .len();
+            assert_eq!(remaining, 0);
         });
     }
 
