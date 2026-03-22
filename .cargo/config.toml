@@ -4,6 +4,4 @@
 
 [patch.crates-io]
 rich_rust = { path = "../rich_rust" }
-
-[patch."https://github.com/Dicklesworthstone/asupersync.git"]
 asupersync = { path = "../asupersync" }
