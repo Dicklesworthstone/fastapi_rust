@@ -33,3 +33,22 @@ test_screenshot.png
 
 # Agent progress tracking files (ephemeral)
 claude-upgrade-progress.json
+
+# Compiler output
+a.out
+
+# Codex CLI ephemeral directories
+.codex-local-check/
+.codex-bench/
+.codex-tmp/
+
+# ACFS ephemeral patterns
+.agent-mail-project-id
+.agent-mail.yaml
+*.mcp.json
+*.mcp.json.*.bak
+storage.sqlite3
+storage.sqlite3-*
+*.sqlite3.bak
+core
+core.*
