@@ -21,7 +21,7 @@ homepage = "https://github.com/Dicklesworthstone/fastapi_rust"
 
 [workspace.dependencies]
 # Runtime (our own) - uses crates.io in CI/publishing; override with path in .cargo/config.toml for local dev
-asupersync = { version = "0.2.9" }
+asupersync = { version = "0.3.0" }
 
 # Serialization (only these)
 serde = { version = "1", features = ["derive"] }
