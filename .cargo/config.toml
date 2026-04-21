@@ -1,7 +1,0 @@
-# Local development overrides
-# This file overrides registry dependencies with local paths for faster iteration.
-# CI and publishing use the crates.io versions from Cargo.toml.
-
-[patch.crates-io]
-rich_rust = { path = "../rich_rust" }
-asupersync = { path = "../asupersync" }

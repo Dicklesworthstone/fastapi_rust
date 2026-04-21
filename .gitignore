@@ -4,6 +4,11 @@ legacy_fastapi/
 # Rust build artifacts
 /target/
 
+# Local-only cargo config (contains [patch.crates-io] sibling-path overrides
+# for dev loops; CI uses the crates.io versions from Cargo.toml).
+# See AGENTS.md for details.
+.cargo/config.toml
+
 # IDE
 .idea/
 .vscode/
