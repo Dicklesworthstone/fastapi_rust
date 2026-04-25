@@ -26,6 +26,7 @@ Thumbs.db
 # Source images (webp versions are committed instead)
 *.png
 ._*.png
+!gh_og_share_image.png
 
 # Ephemeral/temporary files (agent workflow artifacts)
 RESEARCH_FINDINGS.md
