@@ -319,38 +319,26 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// Generate random salt bytes from the OS entropy source.
 ///
-/// Uses `/dev/urandom` on Unix systems for cryptographically secure randomness.
-/// Falls back to entropy mixing from multiple sources if `/dev/urandom` is unavailable.
+/// Uses `getrandom`, which dispatches to `getrandom(2)` / `/dev/urandom` on
+/// Unix and `BCryptGenRandom` on Windows, so all supported targets receive
+/// cryptographically secure entropy.
 fn generate_salt(len: usize) -> Vec<u8> {
-    // Try /dev/urandom first (available on Linux, macOS, BSDs)
-    if let Ok(bytes) = read_urandom(len) {
-        return bytes;
-    }
-
-    // Fallback: mix multiple entropy sources via SHA-256
-    fallback_salt(len)
-}
-
-/// Read `len` bytes from `/dev/urandom`.
-fn read_urandom(len: usize) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-    let mut f = std::fs::File::open("/dev/urandom")?;
     let mut buf = vec![0u8; len];
-    f.read_exact(&mut buf)?;
-    Ok(buf)
+    if let Err(err) = getrandom::fill(&mut buf) {
+        unavailable_csprng(err);
+    }
+    buf
 }
 
-/// Fallback when `/dev/urandom` is unavailable.
-///
 /// # Panics
 ///
-/// Always panics. This function is only called when `/dev/urandom` is unavailable,
-/// which indicates a severely misconfigured or compromised system. Password hashing
+/// Always panics. Reached only when the OS CSPRNG is unavailable, which
+/// indicates a severely misconfigured or compromised system. Password hashing
 /// MUST use a CSPRNG - there is no safe way to generate salts without one.
 #[cold]
-fn fallback_salt(_len: usize) -> Vec<u8> {
+fn unavailable_csprng(err: getrandom::Error) -> ! {
     panic!(
-        "FATAL: Cryptographically secure random source (/dev/urandom) is unavailable. \
+        "FATAL: OS cryptographically secure random source is unavailable ({err}). \
          Password hashing requires a CSPRNG for salt generation. \
          Cannot safely generate password hashes without cryptographic entropy."
     );

@@ -18,6 +18,10 @@ fastapi-openapi = { workspace = true }
 # Testing utilities (used by TestClient for sync execution)
 futures-executor = "0.3"
 
+# Cross-platform OS CSPRNG (used for password salts and CSRF tokens; replaces
+# the previous /dev/urandom-only implementation that panicked on Windows).
+getrandom = "0.3"
+
 # Optional regex support for testing assertions
 regex = { version = "1.12", optional = true }
 

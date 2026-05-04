@@ -2080,31 +2080,24 @@ impl CsrfToken {
 
     /// Generates a new unique CSRF token using cryptographic randomness.
     ///
-    /// Uses `/dev/urandom` for secure random bytes.
+    /// Pulls 32 random bytes from the OS CSPRNG via `getrandom` (dispatches to
+    /// `getrandom(2)` / `/dev/urandom` on Unix and `BCryptGenRandom` on Windows).
     ///
     /// # Panics
     ///
-    /// Panics if `/dev/urandom` is unavailable. CSRF tokens MUST be
+    /// Panics if the OS CSPRNG is unavailable. CSRF tokens MUST be
     /// cryptographically unpredictable - there is no safe fallback.
     #[must_use]
     pub fn generate() -> Self {
-        // CSRF tokens must be cryptographically secure - no weak fallback
-        let bytes = Self::read_urandom(32).unwrap_or_else(|_| {
+        let mut bytes = [0u8; 32];
+        if let Err(err) = getrandom::fill(&mut bytes) {
             panic!(
-                "FATAL: Cryptographically secure random source (/dev/urandom) is unavailable. \
+                "FATAL: OS cryptographically secure random source is unavailable ({err}). \
                  CSRF token generation requires a CSPRNG. Cannot safely generate CSRF tokens \
                  without cryptographic entropy."
             );
-        });
+        }
         Self(Self::bytes_to_hex(&bytes))
-    }
-
-    fn read_urandom(len: usize) -> std::io::Result<Vec<u8>> {
-        use std::io::Read;
-        let mut f = std::fs::File::open("/dev/urandom")?;
-        let mut buf = vec![0u8; len];
-        f.read_exact(&mut buf)?;
-        Ok(buf)
     }
 
     fn bytes_to_hex(bytes: &[u8]) -> String {
