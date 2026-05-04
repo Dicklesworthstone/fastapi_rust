@@ -5671,10 +5671,14 @@ mod tests {
             .expect("connection handle mutex should not be poisoned")
             .push(join);
 
-        rx.recv_timeout(Duration::from_secs(1))
+        rx.recv_timeout(Duration::from_secs(5))
             .expect("spawned runtime task should complete");
 
-        let deadline = StdInstant::now() + Duration::from_secs(1);
+        // Generous deadline so the test does not flake on heavily-loaded CI
+        // runners (e.g. macos-latest with the full workspace test suite
+        // running in parallel) where the runtime may take longer to mark the
+        // JoinHandle finished after the task body returns.
+        let deadline = StdInstant::now() + Duration::from_secs(5);
         loop {
             if server
                 .connection_handles

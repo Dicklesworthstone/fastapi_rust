@@ -3517,10 +3517,20 @@ mod tests {
 // =============================================================================
 
 use std::io::{Read as _, Write as _};
-use std::net::{SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream};
 use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
+
+/// Sends a clean FIN on the write side after the HTTP response has been
+/// flushed. macOS will RST the socket if both ends drop without an explicit
+/// shutdown while data is still buffered in the receive queue, which surfaces
+/// to clients as `ECONNRESET` on the next `read`. Calling
+/// `shutdown(Shutdown::Write)` here makes the close graceful on every
+/// supported platform.
+fn graceful_close(stream: &StdTcpStream) {
+    let _ = stream.shutdown(Shutdown::Write);
+}
 
 /// A recorded request from the mock server.
 ///
@@ -3901,6 +3911,7 @@ impl MockServer {
         let response_bytes = response.to_http_response();
         let _ = stream.write_all(&response_bytes);
         let _ = stream.flush();
+        graceful_close(&stream);
     }
 
     /// Parses an HTTP request from raw bytes.
@@ -4440,6 +4451,7 @@ impl TestServer {
             let bad_request = b"HTTP/1.1 400 Bad Request\r\ncontent-length: 11\r\n\r\nBad Request";
             let _ = stream.write_all(bad_request);
             let _ = stream.flush();
+            graceful_close(&stream);
             return;
         };
 
@@ -4505,6 +4517,7 @@ impl TestServer {
         let response_bytes = Self::serialize_response(response);
         let _ = stream.write_all(&response_bytes);
         let _ = stream.flush();
+        graceful_close(&stream);
     }
 
     /// Parses raw HTTP request bytes into structured components.
@@ -4683,6 +4696,7 @@ impl TestServer {
             b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 19\r\n\r\nService Unavailable";
         let _ = stream.write_all(response);
         let _ = stream.flush();
+        graceful_close(&stream);
     }
 
     /// Returns a reference to the server's shutdown controller.
