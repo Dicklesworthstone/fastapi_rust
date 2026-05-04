@@ -548,7 +548,7 @@ mod response_model_validation {
         let filtered = config.filter_json(value).unwrap();
 
         assert!(filtered.get("user").is_some());
-        assert!(filtered["user"]["id"] == 1);
+        assert_eq!(filtered["user"]["id"], 1);
         assert!(filtered.get("password").is_none());
     }
 

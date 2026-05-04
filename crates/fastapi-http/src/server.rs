@@ -535,10 +535,9 @@ fn parse_host_header(value: &str) -> Option<HostHeader> {
         let rest = &value[end + 1..];
         let port = if rest.is_empty() {
             None
-        } else if let Some(port_str) = rest.strip_prefix(':') {
-            parse_port(port_str)
         } else {
-            return None;
+            let port_str = rest.strip_prefix(':')?;
+            parse_port(port_str)
         };
         return Some(HostHeader {
             host: host.to_ascii_lowercase(),
@@ -711,8 +710,8 @@ impl From<http2::Http2Error> for ServerError {
 /// Processes a connection with the given handler.
 ///
 /// This is the unified connection handling logic used by all server modes.
-/// It runs the parse-dispatch-write loop for HTTP/1.1 (and delegates to
-/// [`process_connection_http2`] when h2c prior-knowledge is detected).
+/// It runs the parse-dispatch-write loop for HTTP/1.1 (and delegates to the
+/// internal HTTP/2 handler when h2c prior-knowledge is detected).
 ///
 /// The function is public so that embedders can build custom accept loops
 /// while reusing the core per-connection logic.

@@ -1779,16 +1779,10 @@ mod tests {
 
     #[test]
     fn async_content_length_stream_from_buffer() {
-        use std::sync::Arc;
-        use std::task::{Wake, Waker};
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
+        use std::task::Waker;
 
         fn noop_waker() -> Waker {
-            Waker::from(Arc::new(NoopWaker))
+            Waker::noop().clone()
         }
 
         // Create a mock reader that won't be used (buffer is complete)
@@ -1851,16 +1845,10 @@ mod tests {
     #[test]
     fn async_content_length_stream_enforces_max_size() {
         use std::io::Cursor;
-        use std::sync::Arc;
-        use std::task::{Wake, Waker};
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
+        use std::task::Waker;
 
         fn noop_waker() -> Waker {
-            Waker::from(Arc::new(NoopWaker))
+            Waker::noop().clone()
         }
 
         let initial = b"123456".to_vec();
@@ -1904,16 +1892,10 @@ mod tests {
 
     #[test]
     fn async_chunked_stream_simple() {
-        use std::sync::Arc;
-        use std::task::{Wake, Waker};
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
+        use std::task::Waker;
 
         fn noop_waker() -> Waker {
-            Waker::from(Arc::new(NoopWaker))
+            Waker::noop().clone()
         }
 
         struct EmptyReader;
@@ -1954,16 +1936,10 @@ mod tests {
 
     #[test]
     fn async_chunked_stream_multiple_chunks() {
-        use std::sync::Arc;
-        use std::task::{Wake, Waker};
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
+        use std::task::Waker;
 
         fn noop_waker() -> Waker {
-            Waker::from(Arc::new(NoopWaker))
+            Waker::noop().clone()
         }
 
         struct EmptyReader;

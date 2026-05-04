@@ -579,17 +579,10 @@ impl StreamingResponseExt for fastapi_core::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::task::{Wake, Waker};
-
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::Waker;
 
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        Waker::noop().clone()
     }
 
     #[test]
