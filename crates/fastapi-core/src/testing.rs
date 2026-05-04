@@ -3820,6 +3820,12 @@ impl MockServer {
 
             match listener.accept() {
                 Ok((stream, _peer)) => {
+                    // macOS accepts inherit the listener's non-blocking flag — force
+                    // the accepted stream back to blocking mode so the synchronous
+                    // request/response flow in `handle_connection` doesn't see
+                    // `WouldBlock` on the very first read.
+                    let _ = stream.set_nonblocking(false);
+
                     // Handle the connection
                     let requests = Arc::clone(&requests);
                     let responses = Arc::clone(&responses);
@@ -4408,6 +4414,13 @@ impl TestServer {
                 Ok((stream, _peer)) => {
                     // Track in-flight requests
                     let _guard = controller.track_request();
+
+                    // macOS accepts inherit the listener's non-blocking flag, so we must
+                    // force the new stream back to blocking mode before doing the
+                    // request-then-response synchronous I/O dance below; otherwise the
+                    // first `read` returns `WouldBlock`, we silently drop the stream,
+                    // and the client sees an empty response.
+                    let _ = stream.set_nonblocking(false);
 
                     // If shutting down, reject with 503
                     if controller.is_shutting_down() {
