@@ -21,12 +21,15 @@ futures-executor = "0.3"
 # Optional regex support for testing assertions
 regex = { version = "1.12", optional = true }
 
+# Optional gzip backend for the compression middleware (gated on the `compression` feature).
+flate2 = { version = "1", optional = true }
+
 [features]
 default = []
 # Enable regex support in testing assertions
 regex = ["dep:regex"]
-# Reserved for future use (avoids `unexpected_cfgs` warnings in code gated by this feature).
-compression = []
+# Enable the gzip-based compression middleware (pulls in flate2).
+compression = ["dep:flate2"]
 
 [dev-dependencies]
 serial_test = "3.3.1"
