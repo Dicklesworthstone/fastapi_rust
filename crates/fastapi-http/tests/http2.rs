@@ -225,10 +225,19 @@ fn priority_payload(dependency_stream_id: u32, weight: u8) -> [u8; 5] {
 
 fn assert_connection_closed(stream: &mut TcpStream) {
     let mut probe = [0u8; 1];
-    let n = stream
-        .read(&mut probe)
-        .expect("read after protocol violation");
-    assert_eq!(n, 0, "expected peer connection close");
+    match stream.read(&mut probe) {
+        // Graceful FIN — what Linux/macOS produce when the server closes
+        // after surfacing a protocol violation.
+        Ok(0) => {}
+        Ok(n) => panic!("expected peer connection close, got {n} bytes: {probe:?}"),
+        // Windows surfaces an abortive close as `ECONNRESET` rather than EOF
+        // when the server drops the socket without first half-closing. Either
+        // outcome means the peer hung up, which is what this assertion exists
+        // to verify.
+        Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => {}
+        Err(err) if err.kind() == std::io::ErrorKind::ConnectionAborted => {}
+        Err(err) => panic!("read after protocol violation: {err:?}"),
+    }
 }
 
 #[test]

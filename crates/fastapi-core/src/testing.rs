@@ -6474,8 +6474,10 @@ mod snapshot_tests {
 #[cfg(test)]
 mod mock_server_tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_starts_and_responds() {
         let server = MockServer::start();
         server.mock_response("/hello", MockResponse::ok().body_str("Hello, World!"));
@@ -6494,6 +6496,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_records_requests() {
         let server = MockServer::start();
 
@@ -6516,6 +6519,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_handles_post_with_body() {
         let server = MockServer::start();
         server.mock_response(
@@ -6545,6 +6549,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_pattern_matching() {
         let server = MockServer::start();
         server.mock_response("/api/*", MockResponse::ok().body_str("API Response"));
@@ -6560,6 +6565,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_default_response() {
         let server = MockServer::start();
 
@@ -6574,6 +6580,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_url_helpers() {
         let server = MockServer::start();
 
@@ -6585,6 +6592,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_clear_requests() {
         let server = MockServer::start();
 
@@ -6604,6 +6612,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_wait_for_requests() {
         let server = MockServer::start();
 
@@ -6623,6 +6632,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_assert_helpers() {
         let server = MockServer::start();
 
@@ -6641,6 +6651,7 @@ mod mock_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn mock_server_query_string_parsing() {
         let server = MockServer::start();
 
@@ -7256,6 +7267,7 @@ impl<'a, H: Handler + 'static> IntegrationTestContext<'a, H> {
 mod test_server_tests {
     use super::*;
     use crate::app::App;
+    use serial_test::serial;
     use std::net::TcpStream as StdTcpStreamAlias;
 
     fn make_test_app() -> App {
@@ -7293,17 +7305,31 @@ mod test_server_tests {
     fn send_request(addr: SocketAddr, request: &[u8]) -> String {
         let mut stream = StdTcpStreamAlias::connect(addr).expect("Failed to connect to TestServer");
         stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .expect("set_read_timeout");
         stream.write_all(request).expect("Failed to write request");
         stream.flush().expect("Failed to flush");
 
-        let mut buf = vec![0u8; 65536];
-        let n = stream.read(&mut buf).expect("Failed to read response");
-        String::from_utf8_lossy(&buf[..n]).to_string()
+        // Drain to EOF: the server sends FIN after writing the full response
+        // (see `graceful_close`), so reading until 0 reliably collects the
+        // payload on every supported platform without relying on a single
+        // `read` call that may return only the headers.
+        let mut out = Vec::with_capacity(4096);
+        let mut buf = [0u8; 8192];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(err) => panic!("Failed to read response: {err:?}"),
+            }
+        }
+        String::from_utf8_lossy(&out).to_string()
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_starts_and_responds() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7321,6 +7347,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_json_response() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7336,6 +7363,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_post_with_body() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7349,6 +7377,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_logs_requests() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7367,6 +7396,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_request_count() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7386,6 +7416,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_clear_logs() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7401,6 +7432,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_url_helpers() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7412,6 +7444,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_shutdown() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7427,6 +7460,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_config_no_logging() {
         let app = make_test_app();
         let config = TestServerConfig::new().log_requests(false);
@@ -7442,6 +7476,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_bad_request() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7453,6 +7488,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_content_length_header() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7470,6 +7506,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_multiple_requests_sequential() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7486,6 +7523,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_log_entry_has_timing() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7506,6 +7544,7 @@ mod test_server_tests {
     // =========================================================================
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_shutdown_controller_available() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7517,6 +7556,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_shutdown_triggers_controller() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7537,6 +7577,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_requests_complete_before_shutdown() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7560,6 +7601,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_in_flight_tracking() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7590,6 +7632,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_in_flight_guard_tracks_correctly() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7612,6 +7655,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_shutdown_hooks_executed() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7639,6 +7683,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_multiple_shutdown_hooks_lifo() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7670,6 +7715,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_shutdown_controller_phase_progression() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7716,6 +7762,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_receiver_notified_on_shutdown() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7729,6 +7776,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_forced_shutdown() {
         let app = make_test_app();
         let server = TestServer::start(app);
@@ -7746,6 +7794,7 @@ mod test_server_tests {
     }
 
     #[test]
+    #[serial(testing_network)]
     fn test_server_requests_work_before_shutdown_signal() {
         let app = make_test_app();
         let server = TestServer::start(app);
