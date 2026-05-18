@@ -11,6 +11,13 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+        exclude-patterns:
+          # dtolnay/rust-toolchain "version" is the Rust toolchain pin
+          # (e.g. @1.85 = MSRV check), not an action version. Bumping it
+          # silently relaxes MSRV. Update intentionally, not via dependabot.
+          - "dtolnay/rust-toolchain"
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
     commit-message:
       prefix: "ci"
     labels:
