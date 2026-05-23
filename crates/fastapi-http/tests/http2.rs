@@ -1250,16 +1250,14 @@ fn http2_app_path_emits_window_updates_for_large_body() {
     while !done {
         let (ftype, flags, sid, payload) = read_frame(&mut stream);
         match ftype {
-            0x8 => {
+            0x8 if payload.len() >= 4 => {
                 // WINDOW_UPDATE
-                if payload.len() >= 4 {
-                    let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
-                        & 0x7FFF_FFFF;
-                    if sid == 0 {
-                        conn_window_increments += inc;
-                    } else {
-                        stream_window_increments += inc;
-                    }
+                let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                    & 0x7FFF_FFFF;
+                if sid == 0 {
+                    conn_window_increments += inc;
+                } else {
+                    stream_window_increments += inc;
                 }
             }
             0x1 => got_headers = true,
@@ -1346,15 +1344,13 @@ fn http2_handler_path_emits_window_updates_for_large_body() {
     while !done {
         let (ftype, flags, sid, payload) = read_frame(&mut stream);
         match ftype {
-            0x8 => {
-                if payload.len() >= 4 {
-                    let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
-                        & 0x7FFF_FFFF;
-                    if sid == 0 {
-                        conn_window_increments += inc;
-                    } else {
-                        stream_window_increments += inc;
-                    }
+            0x8 if payload.len() >= 4 => {
+                let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                    & 0x7FFF_FFFF;
+                if sid == 0 {
+                    conn_window_increments += inc;
+                } else {
+                    stream_window_increments += inc;
                 }
             }
             0x1 => got_headers = true,
@@ -1430,15 +1426,13 @@ fn http2_closure_path_emits_window_updates_for_large_body() {
     while !done {
         let (ftype, flags, sid, payload) = read_frame(&mut stream);
         match ftype {
-            0x8 => {
-                if payload.len() >= 4 {
-                    let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
-                        & 0x7FFF_FFFF;
-                    if sid == 0 {
-                        conn_window_increments += inc;
-                    } else {
-                        stream_window_increments += inc;
-                    }
+            0x8 if payload.len() >= 4 => {
+                let inc = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                    & 0x7FFF_FFFF;
+                if sid == 0 {
+                    conn_window_increments += inc;
+                } else {
+                    stream_window_increments += inc;
                 }
             }
             0x1 => got_headers = true,

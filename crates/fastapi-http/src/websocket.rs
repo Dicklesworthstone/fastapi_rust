@@ -715,13 +715,12 @@ async fn read_message(
 
         // Data frame handling
         match frame.opcode {
-            Opcode::Continuation => {
-                if message_opcode.is_none() {
-                    return Err(WebSocketError::Protocol(
-                        "continuation frame without initial frame".into(),
-                    ));
-                }
+            Opcode::Continuation if message_opcode.is_none() => {
+                return Err(WebSocketError::Protocol(
+                    "continuation frame without initial frame".into(),
+                ));
             }
+            Opcode::Continuation => {}
             Opcode::Text | Opcode::Binary => {
                 if message_opcode.is_some() {
                     return Err(WebSocketError::Protocol(

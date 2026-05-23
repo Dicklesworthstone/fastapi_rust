@@ -4076,13 +4076,13 @@ fn apply_http2_settings_with_fc(
                 }
                 *max_frame_size = value;
             }
+            0x2 if value > 1 => {
+                return Err(http2::Http2Error::Protocol(
+                    "SETTINGS_ENABLE_PUSH must be 0 or 1",
+                ));
+            }
             0x2 => {
                 // SETTINGS_ENABLE_PUSH (RFC 7540 §6.5.2): must be 0 or 1.
-                if value > 1 {
-                    return Err(http2::Http2Error::Protocol(
-                        "SETTINGS_ENABLE_PUSH must be 0 or 1",
-                    ));
-                }
                 // We don't implement server push, so just validate.
             }
             0x4 => {
