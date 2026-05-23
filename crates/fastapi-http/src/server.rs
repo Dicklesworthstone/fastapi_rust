@@ -89,6 +89,19 @@ fn current_time() -> Time {
     }
 }
 
+fn request_deadline_at(now: Time, request_timeout: Time) -> Time {
+    Time::from_nanos(now.as_nanos().saturating_add(request_timeout.as_nanos()))
+}
+
+/// Computes an absolute request deadline from a configured timeout duration.
+///
+/// `ServerConfig::request_timeout` stores a timeout magnitude as `Time`. Apply
+/// it relative to the current runtime clock; using it directly as a deadline
+/// makes every request expire once process uptime exceeds the timeout.
+fn request_deadline(request_timeout: Time) -> Time {
+    request_deadline_at(current_time(), request_timeout)
+}
+
 /// Default request timeout in seconds.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -788,7 +801,7 @@ where
 
         // Generate unique request ID for this request with timeout budget
         let request_id = request_counter.fetch_add(1, Ordering::Relaxed);
-        let request_budget = Budget::new().with_deadline(config.request_timeout);
+        let request_budget = Budget::new().with_deadline(request_deadline(config.request_timeout));
         let request_cx = Cx::for_testing_with_budget(request_budget);
         let ctx = RequestContext::new(request_cx, request_id);
 
@@ -1152,7 +1165,8 @@ where
                 }
 
                 let request_id = request_counter.fetch_add(1, Ordering::Relaxed);
-                let request_budget = Budget::new().with_deadline(config.request_timeout);
+                let request_budget =
+                    Budget::new().with_deadline(request_deadline(config.request_timeout));
                 let request_cx = Cx::for_testing_with_budget(request_budget);
                 let ctx = RequestContext::new(request_cx, request_id);
 
@@ -1868,7 +1882,8 @@ impl TcpServer {
             ));
 
             let request_id = self.next_request_id();
-            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_budget =
+                Budget::new().with_deadline(request_deadline(self.config.request_timeout));
             let request_cx = Cx::for_testing_with_budget(request_budget);
             let ctx = RequestContext::new(request_cx, request_id);
 
@@ -2466,7 +2481,8 @@ impl TcpServer {
             let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
 
             // Per-request budget for HTTP requests.
-            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_budget =
+                Budget::new().with_deadline(request_deadline(self.config.request_timeout));
             let request_cx = Cx::for_testing_with_budget(request_budget);
             let overrides = app.dependency_overrides();
             let ctx = RequestContext::with_overrides_and_body_limit(
@@ -2949,7 +2965,8 @@ impl TcpServer {
                     }
 
                     let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
-                    let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+                    let request_budget =
+                        Budget::new().with_deadline(request_deadline(self.config.request_timeout));
                     let request_cx = Cx::for_testing_with_budget(request_budget);
                     let overrides = app.dependency_overrides();
                     let ctx = RequestContext::with_overrides_and_body_limit(
@@ -3501,7 +3518,8 @@ impl TcpServer {
                     }
 
                     let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
-                    let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+                    let request_budget =
+                        Budget::new().with_deadline(request_deadline(self.config.request_timeout));
                     let request_cx = Cx::for_testing_with_budget(request_budget);
 
                     let overrides = handler
@@ -3649,7 +3667,8 @@ impl TcpServer {
 
             // Create request context
             let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
-            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_budget =
+                Budget::new().with_deadline(request_deadline(self.config.request_timeout));
             let request_cx = Cx::for_testing_with_budget(request_budget);
             let ctx = RequestContext::new(request_cx, request_id);
 
@@ -3793,7 +3812,8 @@ impl TcpServer {
             // For concurrent connection handling with structured concurrency, use
             // `TcpServer::serve_concurrent()` which spawns tasks via `RuntimeHandle`.
             let request_id = self.next_request_id();
-            let request_budget = Budget::new().with_deadline(self.config.request_timeout);
+            let request_budget =
+                Budget::new().with_deadline(request_deadline(self.config.request_timeout));
 
             // Create a RequestContext for this request with the configured timeout budget.
             //
@@ -5315,10 +5335,13 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn timeout_budget_created_with_config_deadline() {
+    fn timeout_budget_created_relative_to_current_time() {
         let config = ServerConfig::new("127.0.0.1:8080").with_request_timeout_secs(45);
-        let budget = Budget::new().with_deadline(config.request_timeout);
-        assert_eq!(budget.deadline, Some(Time::from_secs(45)));
+        let budget = Budget::new().with_deadline(request_deadline_at(
+            Time::from_secs(90),
+            config.request_timeout,
+        ));
+        assert_eq!(budget.deadline, Some(Time::from_secs(135)));
     }
 
     #[test]
