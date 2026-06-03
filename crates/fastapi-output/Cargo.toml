@@ -30,7 +30,7 @@ full = ["rich", "rich_rust/full"]
 
 [dev-dependencies]
 # For testing
-serial_test = "3.3"
+serial_test = "3.5"
 proptest = "1"
 insta = { version = "1.46", features = ["redactions"] }
 
