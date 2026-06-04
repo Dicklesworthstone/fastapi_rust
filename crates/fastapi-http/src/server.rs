@@ -1549,6 +1549,18 @@ impl TcpServer {
         }
     }
 
+    fn clone_for_connection_task(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            request_counter: Arc::clone(&self.request_counter),
+            connection_counter: Arc::clone(&self.connection_counter),
+            draining: Arc::clone(&self.draining),
+            connection_handles: Mutex::new(Vec::new()),
+            shutdown_controller: Arc::clone(&self.shutdown_controller),
+            metrics_counters: Arc::clone(&self.metrics_counters),
+        }
+    }
+
     /// Returns the server configuration.
     #[must_use]
     pub fn config(&self) -> &ServerConfig {
@@ -1990,6 +2002,27 @@ impl TcpServer {
         self.accept_loop_app(cx, listener, app).await
     }
 
+    /// Runs the server for a concrete [`App`] with concurrent connection handling.
+    ///
+    /// This keeps the same app-aware request path as [`Self::serve_app`], but each accepted
+    /// connection is spawned on the current asupersync runtime instead of being handled inline by
+    /// the accept loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside of an asupersync runtime context (i.e. when
+    /// [`Runtime::current_handle()`] returns `None`).
+    pub async fn serve_app_concurrent(&self, cx: &Cx, app: Arc<App>) -> Result<(), ServerError> {
+        let bind_addr = self.config.bind_addr.clone();
+        let listener = TcpListener::bind(bind_addr).await?;
+        let local_addr = listener.local_addr()?;
+
+        cx.trace(&format!(
+            "Server listening on {local_addr} (concurrent app mode)"
+        ));
+        self.accept_loop_app_concurrent(cx, listener, app).await
+    }
+
     /// Runs the server on a specific listener with a Handler trait object.
     pub async fn serve_on_handler(
         &self,
@@ -2012,6 +2045,22 @@ impl TcpServer {
         app: Arc<App>,
     ) -> Result<(), ServerError> {
         self.accept_loop_app(cx, listener, app).await
+    }
+
+    /// Runs the server on a specific listener for a concrete [`App`] with concurrent connection
+    /// handling.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside of an asupersync runtime context (i.e. when
+    /// [`Runtime::current_handle()`] returns `None`).
+    pub async fn serve_on_app_concurrent(
+        &self,
+        cx: &Cx,
+        listener: TcpListener,
+        app: Arc<App>,
+    ) -> Result<(), ServerError> {
+        self.accept_loop_app_concurrent(cx, listener, app).await
     }
 
     async fn accept_loop_app(
@@ -2081,6 +2130,91 @@ impl TcpServer {
 
             if let Err(e) = result {
                 cx.trace(&format!("Connection error from {peer_addr}: {e}"));
+            }
+        }
+    }
+
+    async fn accept_loop_app_concurrent(
+        &self,
+        cx: &Cx,
+        listener: TcpListener,
+        app: Arc<App>,
+    ) -> Result<(), ServerError> {
+        let runtime_handle = Runtime::current_handle()
+            .expect("serve_app_concurrent must be called inside an asupersync runtime");
+        let accept_poll_interval = Duration::from_millis(50);
+
+        loop {
+            self.cleanup_completed_handles(cx).await;
+
+            if cx.is_cancel_requested() || self.is_draining() {
+                cx.trace("Server shutting down, draining app connections");
+                self.drain_connection_tasks(cx).await;
+                return Ok(());
+            }
+
+            let accept_future = Box::pin(listener.accept());
+            let (mut stream, peer_addr) =
+                match timeout(current_time(), accept_poll_interval, accept_future).await {
+                    Ok(Ok(conn)) => conn,
+                    Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    Ok(Err(e)) => {
+                        cx.trace(&format!("Accept error: {e}"));
+                        if is_fatal_accept_error(&e) {
+                            return Err(ServerError::Io(e));
+                        }
+                        continue;
+                    }
+                    Err(_elapsed) => continue,
+                };
+
+            if !self.try_acquire_connection() {
+                cx.trace(&format!(
+                    "Connection limit reached ({}), rejecting {peer_addr}",
+                    self.config.max_connections
+                ));
+
+                let response = Response::with_status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header("connection", b"close".to_vec())
+                    .body(fastapi_core::ResponseBody::Bytes(
+                        b"503 Service Unavailable: connection limit reached".to_vec(),
+                    ));
+                let mut writer = crate::response::ResponseWriter::new();
+                let response_bytes = writer.write(response);
+                let _ = write_response(&mut stream, response_bytes).await;
+                continue;
+            }
+
+            if self.config.tcp_nodelay {
+                let _ = stream.set_nodelay(true);
+            }
+
+            cx.trace(&format!(
+                "Accepted connection from {peer_addr} ({}/{})",
+                self.current_connections(),
+                if self.config.max_connections == 0 {
+                    "∞".to_string()
+                } else {
+                    self.config.max_connections.to_string()
+                }
+            ));
+
+            match self.spawn_connection_app_task(
+                &runtime_handle,
+                cx,
+                stream,
+                peer_addr,
+                Arc::clone(&app),
+            ) {
+                Ok(handle) => {
+                    if let Ok(mut handles) = self.connection_handles.lock() {
+                        handles.push(handle);
+                    }
+                    self.cleanup_completed_handles(cx).await;
+                }
+                Err(e) => {
+                    cx.trace(&format!("Failed to spawn app connection task: {e:?}"));
+                }
             }
         }
     }
@@ -2336,6 +2470,31 @@ impl TcpServer {
 
             if let Err(e) = result {
                 // Current default: print to stderr. A structured sink can be wired via fastapi-core::logging.
+                eprintln!("Connection error from {peer_addr}: {e}");
+            }
+        })
+    }
+
+    fn spawn_connection_app_task(
+        &self,
+        handle: &RuntimeHandle,
+        cx: &Cx,
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+        app: Arc<App>,
+    ) -> Result<JoinHandle<()>, SpawnError> {
+        let server = self.clone_for_connection_task();
+        let connection_cx = cx.clone();
+        let connection_counter = Arc::clone(&self.connection_counter);
+        let connection_slot = ConnectionSlotGuard::new(connection_counter);
+
+        handle.try_spawn(async move {
+            let _connection_slot = connection_slot;
+            let result = server
+                .handle_connection_app(&connection_cx, stream, peer_addr, app.as_ref())
+                .await;
+
+            if let Err(e) = result {
                 eprintln!("Connection error from {peer_addr}: {e}");
             }
         })
@@ -5462,6 +5621,29 @@ mod tests {
         // After release, can acquire again
         server.release_connection();
         assert!(server.try_acquire_connection());
+    }
+
+    #[test]
+    fn app_connection_task_clone_shares_counters_but_not_handle_registry() {
+        let server = TcpServer::new(ServerConfig::new("127.0.0.1:0").with_max_connections(4));
+
+        assert!(server.try_acquire_connection());
+        let task_server = server.clone_for_connection_task();
+
+        assert_eq!(task_server.current_connections(), 1);
+        assert_eq!(server.current_connections(), 1);
+        assert_eq!(task_server.metrics().total_accepted, 1);
+        assert_eq!(
+            task_server
+                .connection_handles
+                .lock()
+                .expect("task handle registry should not be poisoned")
+                .len(),
+            0
+        );
+
+        task_server.release_connection();
+        assert_eq!(server.current_connections(), 0);
     }
 
     #[test]
