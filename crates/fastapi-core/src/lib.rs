@@ -67,6 +67,7 @@ mod request;
 mod response;
 pub mod routing;
 pub mod shutdown;
+#[cfg(feature = "testing")]
 pub mod testing;
 pub mod validation;
 pub mod websocket;
@@ -129,6 +130,7 @@ pub use asupersync::{Budget, Cx, Outcome, RegionId, TaskId};
 pub use password::{Algorithm, HashConfig, PasswordHasher, SecureCompare, constant_time_eq};
 
 // Re-export testing utilities
+#[cfg(feature = "testing")]
 pub use testing::{
     CookieJar, FixtureGuard, IntegrationTest, RequestBuilder, TestClient, TestFixture,
     TestResponse, json_contains,
@@ -138,6 +140,7 @@ pub use testing::{
 // Note: The macros assert_status!, assert_header!, assert_body_contains!,
 // assert_json!, and assert_body_matches! are automatically exported at the crate root
 // due to #[macro_export]. Users can import them with `use fastapi_core::assert_status;`
+// They are available when the `testing` feature is enabled.
 
 // Re-export logging utilities
 pub use logging::{AutoSpan, LogConfig, LogEntry, LogLevel, Span};

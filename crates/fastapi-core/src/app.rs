@@ -1453,12 +1453,14 @@ impl App {
     ///
     /// This takes `Arc<Self>` so tests can keep using shared `Arc<App>` values
     /// without extra boilerplate.
+    #[cfg(feature = "testing")]
     #[must_use]
     pub fn test_client(self: Arc<Self>) -> crate::testing::TestClient<Arc<Self>> {
         crate::testing::TestClient::new(self)
     }
 
     /// Create an in-process test client with a deterministic seed.
+    #[cfg(feature = "testing")]
     #[must_use]
     pub fn test_client_with_seed(
         self: Arc<Self>,

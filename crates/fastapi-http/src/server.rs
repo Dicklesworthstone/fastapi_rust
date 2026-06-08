@@ -102,6 +102,12 @@ fn request_deadline(request_timeout: Time) -> Time {
     request_deadline_at(current_time(), request_timeout)
 }
 
+fn request_cx_from_parent(parent: &Cx, _budget: Budget) -> Cx {
+    // asupersync 0.3.4 moved ambient constructors behind test-internals; production
+    // request contexts must inherit the runtime-bound server context.
+    parent.clone()
+}
+
 /// Default request timeout in seconds.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -802,7 +808,7 @@ where
         // Generate unique request ID for this request with timeout budget
         let request_id = request_counter.fetch_add(1, Ordering::Relaxed);
         let request_budget = Budget::new().with_deadline(request_deadline(config.request_timeout));
-        let request_cx = Cx::for_testing_with_budget(request_budget);
+        let request_cx = request_cx_from_parent(cx, request_budget);
         let ctx = RequestContext::new(request_cx, request_id);
 
         // Validate Host header
@@ -1167,7 +1173,7 @@ where
                 let request_id = request_counter.fetch_add(1, Ordering::Relaxed);
                 let request_budget =
                     Budget::new().with_deadline(request_deadline(config.request_timeout));
-                let request_cx = Cx::for_testing_with_budget(request_budget);
+                let request_cx = request_cx_from_parent(cx, request_budget);
                 let ctx = RequestContext::new(request_cx, request_id);
 
                 if let Err(err) = validate_host_header(&request, config) {
@@ -1896,7 +1902,7 @@ impl TcpServer {
             let request_id = self.next_request_id();
             let request_budget =
                 Budget::new().with_deadline(request_deadline(self.config.request_timeout));
-            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let request_cx = request_cx_from_parent(cx, request_budget);
             let ctx = RequestContext::new(request_cx, request_id);
 
             // Handle connection inline (single-threaded mode)
@@ -2642,7 +2648,7 @@ impl TcpServer {
             // Per-request budget for HTTP requests.
             let request_budget =
                 Budget::new().with_deadline(request_deadline(self.config.request_timeout));
-            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let request_cx = request_cx_from_parent(cx, request_budget);
             let overrides = app.dependency_overrides();
             let ctx = RequestContext::with_overrides_and_body_limit(
                 request_cx,
@@ -2741,7 +2747,7 @@ impl TcpServer {
                 let buffered = parser.take_buffered();
 
                 // WebSocket connections are long-lived; do not inherit the per-request deadline.
-                let ws_root_cx = Cx::for_testing_with_budget(Budget::new());
+                let ws_root_cx = request_cx_from_parent(cx, Budget::new());
                 let ws_ctx = RequestContext::with_overrides_and_body_limit(
                     ws_root_cx,
                     request_id,
@@ -3126,7 +3132,7 @@ impl TcpServer {
                     let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
                     let request_budget =
                         Budget::new().with_deadline(request_deadline(self.config.request_timeout));
-                    let request_cx = Cx::for_testing_with_budget(request_budget);
+                    let request_cx = request_cx_from_parent(cx, request_budget);
                     let overrides = app.dependency_overrides();
                     let ctx = RequestContext::with_overrides_and_body_limit(
                         request_cx,
@@ -3679,7 +3685,7 @@ impl TcpServer {
                     let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
                     let request_budget =
                         Budget::new().with_deadline(request_deadline(self.config.request_timeout));
-                    let request_cx = Cx::for_testing_with_budget(request_budget);
+                    let request_cx = request_cx_from_parent(cx, request_budget);
 
                     let overrides = handler
                         .dependency_overrides()
@@ -3828,7 +3834,7 @@ impl TcpServer {
             let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
             let request_budget =
                 Budget::new().with_deadline(request_deadline(self.config.request_timeout));
-            let request_cx = Cx::for_testing_with_budget(request_budget);
+            let request_cx = request_cx_from_parent(cx, request_budget);
             let ctx = RequestContext::new(request_cx, request_id);
 
             // Validate Host header
@@ -3974,11 +3980,8 @@ impl TcpServer {
             let request_budget =
                 Budget::new().with_deadline(request_deadline(self.config.request_timeout));
 
-            // Create a RequestContext for this request with the configured timeout budget.
-            //
-            // Note: today this uses a testing context budget helper; the intent is to
-            // construct request contexts as children of a per-connection region.
-            let request_cx = Cx::for_testing_with_budget(request_budget);
+            // Create a RequestContext for this request from the runtime-bound context.
+            let request_cx = request_cx_from_parent(cx, request_budget);
             let ctx = RequestContext::new(request_cx, request_id);
 
             // Handle the connection and release the slot when done.
@@ -6396,8 +6399,12 @@ impl AppServeExt for App {
             // Wrap app in Arc for sharing.
             let app = Arc::new(self);
 
-            // Create a root Cx for the server
-            let cx = Cx::for_testing();
+            let cx = Cx::current().ok_or_else(|| {
+                ServeError::Server(ServerError::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    "fastapi App::serve must run inside an asupersync runtime",
+                )))
+            })?;
 
             // Print startup banner
             let bind_addr = &server.config().bind_addr;

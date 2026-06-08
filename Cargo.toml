@@ -21,7 +21,7 @@ homepage = "https://github.com/Dicklesworthstone/fastapi_rust"
 
 [workspace.dependencies]
 # Runtime (our own) - uses crates.io in CI/publishing; override with path in .cargo/config.toml for local dev
-asupersync = { version = "0.3.1" }
+asupersync = { version = "=0.3.4" }
 
 # Serialization (only these)
 serde = { version = "1", features = ["derive"] }
@@ -29,7 +29,7 @@ serde_json = "1"
 
 # Internal crates
 fastapi = { path = "crates/fastapi", version = "0.3.0" }
-fastapi-core = { path = "crates/fastapi-core", version = "0.3.0" }
+fastapi-core = { path = "crates/fastapi-core", version = "0.3.0", default-features = false }
 fastapi-http = { path = "crates/fastapi-http", version = "0.3.0" }
 fastapi-router = { path = "crates/fastapi-router", version = "0.3.0" }
 fastapi-macros = { path = "crates/fastapi-macros", version = "0.3.0" }

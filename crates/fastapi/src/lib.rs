@@ -71,6 +71,7 @@
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `output` | **yes** | Rich console output with agent detection (includes `fastapi-output/rich`) |
+//! | `testing` | **yes** | TestClient, assertion macros, and deterministic in-process testing helpers |
 //! | `output-plain` | no | Plain-text-only output (smaller binary, no ANSI codes) |
 //! | `full` | no | All output features including every theme and component |
 //!
@@ -81,6 +82,7 @@
 //! | Feature | Description |
 //! |---------|-------------|
 //! | `regex` | Regex support in testing assertions |
+//! | `testing` | TestClient and assertion helpers backed by asupersync test internals |
 //! | `compression` | Response compression middleware (gzip via flate2) |
 //! | `proptest` | Property-based testing support |
 
@@ -304,6 +306,7 @@ pub use fastapi_core::{
 };
 
 // Re-export testing utilities
+#[cfg(feature = "testing")]
 pub use fastapi_core::{CookieJar, RequestBuilder, TestClient, TestResponse};
 pub use fastapi_macros::{JsonSchema, Validate, delete, get, head, options, patch, post, put};
 pub use fastapi_openapi::{OpenApi, OpenApiBuilder, SchemaRegistry};
@@ -401,6 +404,7 @@ pub mod prelude {
 }
 
 /// Testing utilities module.
+#[cfg(feature = "testing")]
 pub mod testing {
     pub use fastapi_core::testing::{CookieJar, RequestBuilder, TestClient, TestResponse};
 }

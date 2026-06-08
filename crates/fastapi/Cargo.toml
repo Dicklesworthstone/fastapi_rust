@@ -26,10 +26,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
-default = ["output"]
+default = ["output", "testing"]
 output = ["dep:fastapi-output", "fastapi-output/rich"]
 output-plain = ["dep:fastapi-output"]
 full = ["output", "fastapi-output/full"]
+testing = ["fastapi-core/testing"]
 
 [lints]
 workspace = true

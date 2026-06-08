@@ -29,7 +29,9 @@ regex = { version = "1.12", optional = true }
 flate2 = { version = "1", optional = true }
 
 [features]
-default = []
+default = ["testing"]
+# TestClient and assertion helpers require asupersync's test-only Cx constructors.
+testing = ["asupersync/test-internals"]
 # Enable regex support in testing assertions
 regex = ["dep:regex"]
 # Enable the gzip-based compression middleware (pulls in flate2).
