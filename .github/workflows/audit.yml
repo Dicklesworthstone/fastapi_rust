@@ -31,8 +31,25 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run security audit
-        # Don't fail on unmaintained crate warnings (bincode via asupersync)
-        run: cargo audit --ignore RUSTSEC-2025-0141
+        # Ignored advisories all originate from `syntect`, an OPTIONAL transitive
+        # dependency pulled in ONLY via `rich_rust/full` (fastapi's opt-in `full`
+        # feature). It is NOT compiled in default builds. Even when enabled,
+        # syntect uses these crates solely to parse its own bundled theme/syntax
+        # definition files (trusted, ship-with-syntect data) — never HTTP request
+        # bodies or any attacker-controlled input — so the XML-parsing DoS
+        # advisories below are not reachable/exploitable here. There is no upstream
+        # fix path: plist 1.9.0 (latest) pins quick-xml ^0.39.2, so quick-xml
+        # cannot be bumped to the patched >=0.41.0 without a new syntect/plist
+        # release. Re-audit and drop these ignores once syntect updates.
+        #   RUSTSEC-2026-0194 / 0195: quick-xml DoS (via syntect -> plist)
+        #   RUSTSEC-2025-0141:        bincode unmaintained (via syntect)
+        #   RUSTSEC-2024-0320:        yaml-rust unmaintained (via syntect)
+        run: >-
+          cargo audit
+          --ignore RUSTSEC-2026-0194
+          --ignore RUSTSEC-2026-0195
+          --ignore RUSTSEC-2025-0141
+          --ignore RUSTSEC-2024-0320
 
       - name: Create issue on failure
         if: failure() && github.event_name == 'schedule'
