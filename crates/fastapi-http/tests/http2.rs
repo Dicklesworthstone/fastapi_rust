@@ -1472,9 +1472,9 @@ fn http2_closure_path_emits_window_updates_for_large_body() {
 /// Helper: perform H2C handshake with a custom SETTINGS_INITIAL_WINDOW_SIZE.
 fn h2_handshake_with_window(stream: &mut TcpStream, initial_window_size: u32) {
     stream.write_all(PREFACE).expect("write preface");
-    // Client SETTINGS with INITIAL_WINDOW_SIZE (id=0x3).
+    // Client SETTINGS with INITIAL_WINDOW_SIZE (id=0x4).
     let mut settings_payload = [0u8; 6];
-    settings_payload[0..2].copy_from_slice(&0x0003u16.to_be_bytes());
+    settings_payload[0..2].copy_from_slice(&0x0004u16.to_be_bytes());
     settings_payload[2..6].copy_from_slice(&initial_window_size.to_be_bytes());
     write_frame(stream, 0x4, 0x0, 0, &settings_payload);
 
@@ -1491,10 +1491,10 @@ fn h2_handshake_with_window_and_max_frame(
     max_frame_size: u32,
 ) {
     stream.write_all(PREFACE).expect("write preface");
-    // Client SETTINGS with INITIAL_WINDOW_SIZE (id=0x3) and
+    // Client SETTINGS with INITIAL_WINDOW_SIZE (id=0x4) and
     // MAX_FRAME_SIZE (id=0x5).
     let mut settings_payload = Vec::with_capacity(12);
-    settings_payload.extend_from_slice(&0x0003u16.to_be_bytes());
+    settings_payload.extend_from_slice(&0x0004u16.to_be_bytes());
     settings_payload.extend_from_slice(&initial_window_size.to_be_bytes());
     settings_payload.extend_from_slice(&0x0005u16.to_be_bytes());
     settings_payload.extend_from_slice(&max_frame_size.to_be_bytes());

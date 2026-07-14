@@ -4183,6 +4183,13 @@ async fn sniff_protocol(
     Ok((SniffedProtocol::Http2PriorKnowledge, buffered))
 }
 
+const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x1;
+const SETTINGS_ENABLE_PUSH: u16 = 0x2;
+const SETTINGS_MAX_CONCURRENT_STREAMS: u16 = 0x3;
+const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x4;
+const SETTINGS_MAX_FRAME_SIZE: u16 = 0x5;
+const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 0x6;
+
 fn apply_http2_settings(
     hpack: &mut http2::HpackDecoder,
     max_frame_size: &mut u32,
@@ -4208,12 +4215,15 @@ fn apply_http2_settings_with_fc(
         let id = u16::from_be_bytes([chunk[0], chunk[1]]);
         let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
         match id {
-            0x1 => {
+            SETTINGS_HEADER_TABLE_SIZE => {
                 // SETTINGS_HEADER_TABLE_SIZE — cap to prevent memory exhaustion.
                 let capped = (value as usize).min(MAX_HPACK_TABLE_SIZE);
                 hpack.set_dynamic_table_max_size(capped);
             }
-            0x3 => {
+            SETTINGS_MAX_CONCURRENT_STREAMS => {
+                // Informational until the server supports multiplexed streams.
+            }
+            SETTINGS_INITIAL_WINDOW_SIZE => {
                 // SETTINGS_INITIAL_WINDOW_SIZE (RFC 7540 §6.5.2)
                 // Must not exceed 2^31 - 1.
                 if value > 0x7FFF_FFFF {
@@ -4222,14 +4232,13 @@ fn apply_http2_settings_with_fc(
                     ));
                 }
                 if let Some(ref mut fc) = flow_control {
-                    fc.set_initial_window_size(value);
-                    // The peer's INITIAL_WINDOW_SIZE also controls the send
-                    // window for streams the peer will receive data on (our
-                    // response streams).
+                    // The peer's INITIAL_WINDOW_SIZE controls the send window
+                    // for streams the peer will receive data on (our response
+                    // streams). It must not alter our receive-side threshold.
                     fc.set_peer_initial_window_size(value);
                 }
             }
-            0x5 => {
+            SETTINGS_MAX_FRAME_SIZE => {
                 // SETTINGS_MAX_FRAME_SIZE (RFC 7540: 16384..=16777215)
                 if !(16_384..=16_777_215).contains(&value) {
                     return Err(http2::Http2Error::Protocol(
@@ -4238,20 +4247,16 @@ fn apply_http2_settings_with_fc(
                 }
                 *max_frame_size = value;
             }
-            0x2 if value > 1 => {
+            SETTINGS_ENABLE_PUSH if value > 1 => {
                 return Err(http2::Http2Error::Protocol(
                     "SETTINGS_ENABLE_PUSH must be 0 or 1",
                 ));
             }
-            0x2 => {
+            SETTINGS_ENABLE_PUSH => {
                 // SETTINGS_ENABLE_PUSH (RFC 7540 §6.5.2): must be 0 or 1.
                 // We don't implement server push, so just validate.
             }
-            0x4 => {
-                // SETTINGS_MAX_CONCURRENT_STREAMS: informational for now.
-                // We don't multiplex streams yet, so just accept the value.
-            }
-            0x6 => {
+            SETTINGS_MAX_HEADER_LIST_SIZE => {
                 // SETTINGS_MAX_HEADER_LIST_SIZE
                 hpack.set_max_header_list_size(value as usize);
             }
@@ -4402,7 +4407,7 @@ fn apply_peer_settings_for_send(
         let id = u16::from_be_bytes([chunk[0], chunk[1]]);
         let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
 
-        if id == 0x3 {
+        if id == SETTINGS_INITIAL_WINDOW_SIZE {
             // SETTINGS_INITIAL_WINDOW_SIZE applies to all existing stream send windows.
             if value > 0x7FFF_FFFF {
                 return Err(http2::Http2Error::Protocol(
@@ -4962,6 +4967,77 @@ mod tests {
     }
 
     #[test]
+    fn settings_max_concurrent_streams_is_informational() {
+        let payload = [0x00, 0x03, 0xFF, 0xFF, 0xFF, 0xFF];
+        let mut hpack = http2::HpackDecoder::new();
+        let mut max_frame_size = 16_384u32;
+        let mut flow_control = http2::H2FlowControl::new();
+        flow_control.set_initial_window_size(12_345);
+        flow_control.set_peer_initial_window_size(23_456);
+
+        apply_http2_settings_with_fc(
+            &mut hpack,
+            &mut max_frame_size,
+            Some(&mut flow_control),
+            &payload,
+        )
+        .expect("SETTINGS_MAX_CONCURRENT_STREAMS is informational");
+
+        assert_eq!(flow_control.initial_window_size(), 12_345);
+        assert_eq!(flow_control.peer_initial_window_size(), 23_456);
+        assert_eq!(max_frame_size, 16_384);
+    }
+
+    #[test]
+    fn settings_initial_window_size_updates_peer_send_window_only() {
+        let payload = [0x00, 0x04, 0x00, 0x01, 0x11, 0x70]; // id=4, value=70000
+        let mut hpack = http2::HpackDecoder::new();
+        let mut max_frame_size = 16_384u32;
+        let mut flow_control = http2::H2FlowControl::new();
+        flow_control.set_initial_window_size(12_345);
+
+        apply_http2_settings_with_fc(
+            &mut hpack,
+            &mut max_frame_size,
+            Some(&mut flow_control),
+            &payload,
+        )
+        .expect("valid SETTINGS_INITIAL_WINDOW_SIZE should apply");
+
+        assert_eq!(
+            flow_control.initial_window_size(),
+            12_345,
+            "peer settings must not alter the server receive threshold"
+        );
+        assert_eq!(flow_control.peer_initial_window_size(), 70_000);
+    }
+
+    #[test]
+    fn settings_initial_window_size_rejects_value_above_maximum() {
+        let payload = [0x00, 0x04, 0x80, 0x00, 0x00, 0x00];
+        let mut hpack = http2::HpackDecoder::new();
+        let mut max_frame_size = 16_384u32;
+        let mut flow_control = http2::H2FlowControl::new();
+
+        let err = apply_http2_settings_with_fc(
+            &mut hpack,
+            &mut max_frame_size,
+            Some(&mut flow_control),
+            &payload,
+        )
+        .expect_err("SETTINGS_INITIAL_WINDOW_SIZE above 2^31 - 1 must fail");
+
+        assert!(
+            err.to_string()
+                .contains("SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum")
+        );
+        assert_eq!(
+            flow_control.peer_initial_window_size(),
+            http2::DEFAULT_INITIAL_WINDOW_SIZE
+        );
+    }
+
+    #[test]
     fn rst_stream_payload_validation_accepts_valid_payload() {
         let payload = 8u32.to_be_bytes();
         assert!(validate_rst_stream_payload(1, &payload).is_ok());
@@ -5182,7 +5258,7 @@ mod tests {
         let mut stream_window = 50i64;
         let mut peer_max_frame_size = 16_384u32;
 
-        let payload = [0x00, 0x03, 0x00, 0x01, 0x11, 0x70]; // id=3, value=70000
+        let payload = [0x00, 0x04, 0x00, 0x01, 0x11, 0x70]; // id=4, value=70000
         apply_peer_settings_for_send(
             &mut flow_control,
             &mut stream_window,
@@ -5219,7 +5295,7 @@ mod tests {
         let mut flow_control = http2::H2FlowControl::new();
         let mut stream_window = 0i64;
         let mut peer_max_frame_size = 16_384u32;
-        let payload = [0x00, 0x03, 0x80, 0x00, 0x00, 0x00]; // id=3, value=2^31
+        let payload = [0x00, 0x04, 0x80, 0x00, 0x00, 0x00]; // id=4, value=2^31
         let err = apply_peer_settings_for_send(
             &mut flow_control,
             &mut stream_window,
@@ -5245,7 +5321,7 @@ mod tests {
         let new_initial: u32 = 0x7FFF_FFFF;
         let payload = [
             0x00,
-            0x03,
+            0x04,
             new_initial.to_be_bytes()[0],
             new_initial.to_be_bytes()[1],
             new_initial.to_be_bytes()[2],
