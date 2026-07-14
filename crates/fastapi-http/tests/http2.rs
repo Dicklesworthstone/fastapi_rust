@@ -1,4 +1,4 @@
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::runtime::{RuntimeBuilder, reactor::create_reactor};
 use fastapi_core::{App, Request, RequestContext, Response, ResponseBody};
 use fastapi_http::{ServerConfig, TcpServer};
 use std::io::{Read, Write};
@@ -7,6 +7,18 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+fn http2_test_runtime() -> asupersync::runtime::Runtime {
+    let reactor = create_reactor().expect("HTTP/2 test reactor must build");
+    RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("HTTP/2 test runtime must build")
+}
+
+fn runtime_cx() -> asupersync::Cx {
+    asupersync::Cx::current().expect("HTTP/2 test runtime must install an ambient Cx")
+}
 
 fn write_frame(stream: &mut TcpStream, frame_type: u8, flags: u8, stream_id: u32, payload: &[u8]) {
     assert!(stream_id & 0x8000_0000 == 0, "reserved bit must be clear");
@@ -53,11 +65,9 @@ fn spawn_server(app: App) -> (Arc<TcpServer>, SocketAddr, std::thread::JoinHandl
         let server = Arc::clone(&server);
         let app = Arc::clone(&app);
         std::thread::spawn(move || {
-            let rt = RuntimeBuilder::current_thread()
-                .build()
-                .expect("test runtime must build");
+            let rt = http2_test_runtime();
             rt.block_on(async move {
-                let cx = asupersync::Cx::for_testing();
+                let cx = runtime_cx();
                 let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind must succeed");
@@ -86,11 +96,9 @@ fn spawn_server_handler(
         let server = Arc::clone(&server);
         let handler = Arc::clone(handler);
         std::thread::spawn(move || {
-            let rt = RuntimeBuilder::current_thread()
-                .build()
-                .expect("test runtime must build");
+            let rt = http2_test_runtime();
             rt.block_on(async move {
-                let cx = asupersync::Cx::for_testing();
+                let cx = runtime_cx();
                 let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind must succeed");
@@ -116,11 +124,9 @@ fn spawn_server_closure() -> (Arc<TcpServer>, SocketAddr, std::thread::JoinHandl
     let server_thread = {
         let server = Arc::clone(&server);
         std::thread::spawn(move || {
-            let rt = RuntimeBuilder::current_thread()
-                .build()
-                .expect("test runtime must build");
+            let rt = http2_test_runtime();
             rt.block_on(async move {
-                let cx = asupersync::Cx::for_testing();
+                let cx = runtime_cx();
                 let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind must succeed");
@@ -1532,6 +1538,78 @@ fn read_data_with_window_updates(stream: &mut TcpStream, stream_id: u32) -> Vec<
         }
     }
     body
+}
+
+#[test]
+fn http2_runtime_reactor_supports_slow_reader_through_response_write_boundary() {
+    let expected: Vec<u8> = (0u8..=255).cycle().take(32_768).collect();
+    let response_body = expected.clone();
+    let app = App::builder()
+        .get("/", move |_ctx: &RequestContext, _req: &mut Request| {
+            let body = response_body.clone();
+            async move { Response::ok().body(ResponseBody::Bytes(body)) }
+        })
+        .build();
+    let (server, addr, server_thread) = spawn_server(app);
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+
+    // One byte of stream credit forces the response writer to park after its
+    // first DATA frame. Delaying all response reads exercises the reactor-backed
+    // handshake and writer path with a slow client instead of a lockstep reader.
+    h2_handshake_with_window(&mut stream, 1);
+    let header_block: [u8; 17] = [
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+    write_frame(&mut stream, 0x1, 0x5, 1, &header_block);
+
+    let response_headers = read_header_block(&mut stream, 1);
+    assert!(!response_headers.is_empty(), "expected response HEADERS");
+
+    let first_data = loop {
+        let (ty, flags, sid, payload) = read_frame(&mut stream);
+        if ty == 0x0 && sid == 1 {
+            assert_eq!(payload.len(), 1, "tiny peer window must limit first DATA");
+            assert_eq!(
+                flags & 0x1,
+                0,
+                "response writer must remain parked before the final DATA"
+            );
+            break payload;
+        }
+    };
+
+    // The one-byte DATA frame synchronizes with the response writer. Keep the
+    // stream window exhausted long enough for a loaded worker to observe the
+    // slow reader, then prove no additional frame was queued without credit.
+    std::thread::sleep(Duration::from_millis(100));
+    stream
+        .set_nonblocking(true)
+        .expect("set nonblocking for stalled-writer probe");
+    let mut pending = [0u8; 1];
+    let peek = stream.peek(&mut pending);
+    stream
+        .set_nonblocking(false)
+        .expect("restore blocking mode after stalled-writer probe");
+    assert!(
+        matches!(peek, Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock),
+        "server must not queue another frame while stream credit is exhausted: {peek:?}"
+    );
+
+    let remaining = u32::try_from(expected.len() - first_data.len()).expect("remaining body size");
+    write_frame(&mut stream, 0x8, 0, 1, &window_update_payload(remaining));
+    let mut actual = first_data;
+    actual.extend_from_slice(&read_data_body(&mut stream, 1));
+    assert_eq!(actual, expected);
+
+    let _ = stream.shutdown(Shutdown::Both);
+    server.shutdown();
+    drop(TcpStream::connect(addr));
+    server_thread.join().expect("server thread join");
 }
 
 #[test]
