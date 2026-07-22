@@ -3154,6 +3154,8 @@ impl KeyExtractor for CompositeKeyExtractor {
 struct TokenBucketState {
     tokens: f64,
     last_refill: Instant,
+    last_seen: Instant,
+    stale_after: Duration,
 }
 
 /// Fixed window state for a single key.
@@ -3161,6 +3163,8 @@ struct TokenBucketState {
 struct FixedWindowState {
     count: u64,
     window_start: Instant,
+    last_seen: Instant,
+    stale_after: Duration,
 }
 
 /// Sliding window state for a single key.
@@ -3169,27 +3173,115 @@ struct SlidingWindowState {
     current_count: u64,
     previous_count: u64,
     current_window_start: Instant,
+    last_seen: Instant,
+    stale_after: Duration,
+}
+
+/// Default maximum number of distinct keys retained by one rate-limit algorithm.
+pub const DEFAULT_RATE_LIMIT_MAX_KEYS: usize = 65_536;
+
+const RATE_LIMIT_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+struct BoundedRateLimitMap<T> {
+    entries: StdHashMap<String, T>,
+    last_sweep: Instant,
+}
+
+impl<T> BoundedRateLimitMap<T> {
+    fn new(now: Instant) -> Self {
+        Self {
+            entries: StdHashMap::new(),
+            last_sweep: now,
+        }
+    }
+
+    fn ensure_key<F, S>(
+        &mut self,
+        key: &str,
+        max_keys: usize,
+        now: Instant,
+        mut is_stale: S,
+        create: F,
+    ) -> bool
+    where
+        F: FnOnce() -> T,
+        S: FnMut(&T) -> bool,
+    {
+        if self.entries.contains_key(key) {
+            return true;
+        }
+
+        if self.entries.len() >= max_keys
+            && now.saturating_duration_since(self.last_sweep) >= RATE_LIMIT_SWEEP_INTERVAL
+        {
+            self.entries.retain(|_, state| !is_stale(state));
+            self.last_sweep = now;
+        }
+
+        if self.entries.len() >= max_keys {
+            return false;
+        }
+
+        self.entries.entry(key.to_string()).or_insert_with(create);
+        true
+    }
 }
 
 /// In-memory rate limit store.
 ///
-/// Uses a `HashMap` protected by a `Mutex` for thread-safe access.
+/// Uses bounded `HashMap`s protected by `Mutex`es for thread-safe access.
+/// Each algorithm retains at most `max_keys` distinct keys. When a map is full,
+/// stale entries are reclaimed no more than once per second; if a map
+/// remains full, unseen keys fail closed instead of evicting live buckets.
 /// Suitable for single-process deployments. For distributed systems,
 /// implement a custom store using Redis or similar.
 pub struct InMemoryRateLimitStore {
-    token_buckets: Mutex<StdHashMap<String, TokenBucketState>>,
-    fixed_windows: Mutex<StdHashMap<String, FixedWindowState>>,
-    sliding_windows: Mutex<StdHashMap<String, SlidingWindowState>>,
+    max_keys: usize,
+    token_buckets: Mutex<BoundedRateLimitMap<TokenBucketState>>,
+    fixed_windows: Mutex<BoundedRateLimitMap<FixedWindowState>>,
+    sliding_windows: Mutex<BoundedRateLimitMap<SlidingWindowState>>,
 }
 
 impl InMemoryRateLimitStore {
-    /// Create a new in-memory store.
+    /// Create a new in-memory store with [`DEFAULT_RATE_LIMIT_MAX_KEYS`] per algorithm.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_max_keys(DEFAULT_RATE_LIMIT_MAX_KEYS)
+    }
+
+    /// Create an in-memory store with an explicit per-algorithm key bound.
+    ///
+    /// A bound of zero fails closed for every keyed request.
+    #[must_use]
+    pub fn with_max_keys(max_keys: usize) -> Self {
+        let now = Instant::now();
         Self {
-            token_buckets: Mutex::new(StdHashMap::new()),
-            fixed_windows: Mutex::new(StdHashMap::new()),
-            sliding_windows: Mutex::new(StdHashMap::new()),
+            max_keys,
+            token_buckets: Mutex::new(BoundedRateLimitMap::new(now)),
+            fixed_windows: Mutex::new(BoundedRateLimitMap::new(now)),
+            sliding_windows: Mutex::new(BoundedRateLimitMap::new(now)),
+        }
+    }
+
+    fn cleanup_window(window: Duration) -> Duration {
+        if window.is_zero() {
+            RATE_LIMIT_SWEEP_INTERVAL
+        } else {
+            window
+        }
+    }
+
+    fn saturated_result(max_requests: u64, window: Duration) -> RateLimitResult {
+        let retry_window = Self::cleanup_window(window);
+        let reset_after_secs = retry_window
+            .as_secs()
+            .saturating_add(u64::from(retry_window.subsec_nanos() > 0))
+            .max(1);
+        RateLimitResult {
+            allowed: false,
+            limit: max_requests,
+            remaining: 0,
+            reset_after_secs,
         }
     }
 
@@ -3200,22 +3292,36 @@ impl InMemoryRateLimitStore {
         max_tokens: u64,
         refill_rate: f64,
         window: Duration,
+        now: Instant,
     ) -> RateLimitResult {
         let mut buckets = self.token_buckets.lock();
-        let now = Instant::now();
+        let cleanup_window = Self::cleanup_window(window);
 
-        let state = buckets
-            .entry(key.to_string())
-            .or_insert_with(|| TokenBucketState {
+        if !buckets.ensure_key(
+            key,
+            self.max_keys,
+            now,
+            |state| now.saturating_duration_since(state.last_seen) >= state.stale_after,
+            || TokenBucketState {
                 tokens: max_tokens as f64,
                 last_refill: now,
-            });
+                last_seen: now,
+                stale_after: cleanup_window,
+            },
+        ) {
+            return Self::saturated_result(max_tokens, window);
+        }
+        let Some(state) = buckets.entries.get_mut(key) else {
+            return Self::saturated_result(max_tokens, window);
+        };
 
         // Refill tokens based on elapsed time
         let elapsed = now.duration_since(state.last_refill);
         let refill = elapsed.as_secs_f64() * refill_rate;
         state.tokens = (state.tokens + refill).min(max_tokens as f64);
         state.last_refill = now;
+        state.last_seen = now;
+        state.stale_after = cleanup_window;
 
         if state.tokens >= 1.0 {
             state.tokens -= 1.0;
@@ -3245,16 +3351,28 @@ impl InMemoryRateLimitStore {
         key: &str,
         max_requests: u64,
         window: Duration,
+        now: Instant,
     ) -> RateLimitResult {
         let mut windows = self.fixed_windows.lock();
-        let now = Instant::now();
+        let cleanup_window = Self::cleanup_window(window);
 
-        let state = windows
-            .entry(key.to_string())
-            .or_insert_with(|| FixedWindowState {
+        if !windows.ensure_key(
+            key,
+            self.max_keys,
+            now,
+            |state| now.saturating_duration_since(state.last_seen) >= state.stale_after,
+            || FixedWindowState {
                 count: 0,
                 window_start: now,
-            });
+                last_seen: now,
+                stale_after: cleanup_window,
+            },
+        ) {
+            return Self::saturated_result(max_requests, window);
+        }
+        let Some(state) = windows.entries.get_mut(key) else {
+            return Self::saturated_result(max_requests, window);
+        };
 
         // Check if window has expired
         let elapsed = now.duration_since(state.window_start);
@@ -3262,6 +3380,8 @@ impl InMemoryRateLimitStore {
             state.count = 0;
             state.window_start = now;
         }
+        state.last_seen = now;
+        state.stale_after = cleanup_window;
 
         let remaining_time = window
             .checked_sub(now.duration_since(state.window_start))
@@ -3291,26 +3411,48 @@ impl InMemoryRateLimitStore {
         key: &str,
         max_requests: u64,
         window: Duration,
+        now: Instant,
     ) -> RateLimitResult {
         let mut windows = self.sliding_windows.lock();
-        let now = Instant::now();
+        let cleanup_window = Self::cleanup_window(window);
+        let stale_after = cleanup_window.saturating_add(cleanup_window);
 
-        let state = windows
-            .entry(key.to_string())
-            .or_insert_with(|| SlidingWindowState {
+        if !windows.ensure_key(
+            key,
+            self.max_keys,
+            now,
+            |state| now.saturating_duration_since(state.last_seen) >= state.stale_after,
+            || SlidingWindowState {
                 current_count: 0,
                 previous_count: 0,
                 current_window_start: now,
-            });
+                last_seen: now,
+                stale_after,
+            },
+        ) {
+            return Self::saturated_result(max_requests, window);
+        }
+        let Some(state) = windows.entries.get_mut(key) else {
+            return Self::saturated_result(max_requests, window);
+        };
 
         // Check if we need to rotate windows
         let elapsed = now.duration_since(state.current_window_start);
-        if elapsed >= window {
-            // Rotate: current becomes previous
-            state.previous_count = state.current_count;
+        if elapsed >= stale_after {
+            // After two windows, neither retained counter overlaps the live window.
+            state.previous_count = 0;
             state.current_count = 0;
             state.current_window_start = now;
+        } else if elapsed >= window {
+            state.previous_count = state.current_count;
+            state.current_count = 0;
+            state.current_window_start = state
+                .current_window_start
+                .checked_add(window)
+                .unwrap_or(now);
         }
+        state.last_seen = now;
+        state.stale_after = stale_after;
 
         // Calculate weighted count using the proportion of the previous window
         // that overlaps with the current sliding window
@@ -3343,8 +3485,34 @@ impl InMemoryRateLimitStore {
         }
     }
 
-    /// Check and consume a request against the rate limit.
     #[allow(clippy::cast_precision_loss)]
+    fn check_at(
+        &self,
+        key: &str,
+        algorithm: RateLimitAlgorithm,
+        max_requests: u64,
+        window: Duration,
+        now: Instant,
+    ) -> RateLimitResult {
+        if window.is_zero() {
+            return Self::saturated_result(max_requests, window);
+        }
+
+        match algorithm {
+            RateLimitAlgorithm::TokenBucket => {
+                let refill_rate = max_requests as f64 / window.as_secs_f64();
+                self.check_token_bucket(key, max_requests, refill_rate, window, now)
+            }
+            RateLimitAlgorithm::FixedWindow => {
+                self.check_fixed_window(key, max_requests, window, now)
+            }
+            RateLimitAlgorithm::SlidingWindow => {
+                self.check_sliding_window(key, max_requests, window, now)
+            }
+        }
+    }
+
+    /// Check and consume a request against the rate limit.
     pub fn check(
         &self,
         key: &str,
@@ -3352,16 +3520,7 @@ impl InMemoryRateLimitStore {
         max_requests: u64,
         window: Duration,
     ) -> RateLimitResult {
-        match algorithm {
-            RateLimitAlgorithm::TokenBucket => {
-                let refill_rate = max_requests as f64 / window.as_secs_f64();
-                self.check_token_bucket(key, max_requests, refill_rate, window)
-            }
-            RateLimitAlgorithm::FixedWindow => self.check_fixed_window(key, max_requests, window),
-            RateLimitAlgorithm::SlidingWindow => {
-                self.check_sliding_window(key, max_requests, window)
-            }
-        }
+        self.check_at(key, algorithm, max_requests, window, Instant::now())
     }
 }
 
@@ -3383,6 +3542,7 @@ impl Default for InMemoryRateLimitStore {
 /// | `max_requests` | 100 |
 /// | `window` | 60s |
 /// | `algorithm` | `TokenBucket` |
+/// | `max_keys` | 65,536 per algorithm |
 /// | `include_headers` | `true` |
 /// | `retry_message` | "Rate limit exceeded. Please retry later." |
 ///
@@ -3412,6 +3572,8 @@ pub struct RateLimitConfig {
     pub window: Duration,
     /// The algorithm to use.
     pub algorithm: RateLimitAlgorithm,
+    /// Maximum number of distinct keys retained by the selected algorithm.
+    pub max_keys: usize,
     /// Whether to include rate limit headers in responses.
     pub include_headers: bool,
     /// Custom message for 429 responses.
@@ -3424,6 +3586,7 @@ impl Default for RateLimitConfig {
             max_requests: 100,
             window: Duration::from_secs(60),
             algorithm: RateLimitAlgorithm::TokenBucket,
+            max_keys: DEFAULT_RATE_LIMIT_MAX_KEYS,
             include_headers: true,
             retry_message: "Rate limit exceeded. Please retry later.".to_string(),
         }
@@ -3485,6 +3648,15 @@ impl RateLimitBuilder {
         self
     }
 
+    /// Set the maximum number of distinct keys retained by the selected algorithm.
+    ///
+    /// A bound of zero fails closed for every keyed request.
+    #[must_use]
+    pub fn max_keys(mut self, max_keys: usize) -> Self {
+        self.config.max_keys = max_keys;
+        self
+    }
+
     /// Set the key extractor.
     #[must_use]
     pub fn key_extractor(mut self, extractor: impl KeyExtractor + 'static) -> Self {
@@ -3512,9 +3684,10 @@ impl RateLimitBuilder {
         let key_extractor = self
             .key_extractor
             .unwrap_or_else(|| Box::new(IpKeyExtractor));
+        let store = Arc::new(InMemoryRateLimitStore::with_max_keys(self.config.max_keys));
         RateLimitMiddleware {
             config: self.config,
-            store: Arc::new(InMemoryRateLimitStore::new()),
+            store,
             key_extractor: Arc::from(key_extractor),
         }
     }
@@ -12327,7 +12500,7 @@ mod rate_limit_tests {
     use super::*;
     use crate::request::Method;
     use crate::response::{ResponseBody, StatusCode};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn test_context() -> RequestContext {
         RequestContext::new(asupersync::Cx::for_testing(), 1)
@@ -12343,6 +12516,34 @@ mod rate_limit_tests {
         let ctx = test_context();
         let fut = mw.after(&ctx, req, resp);
         futures_executor::block_on(fut)
+    }
+
+    fn request_with_ip(key: &str) -> Request {
+        let mut req = Request::new(Method::Get, "/");
+        req.headers_mut()
+            .insert("x-forwarded-for", key.as_bytes().to_vec());
+        req
+    }
+
+    fn rate_limit_entry_keys(
+        store: &InMemoryRateLimitStore,
+        algorithm: RateLimitAlgorithm,
+    ) -> Vec<String> {
+        match algorithm {
+            RateLimitAlgorithm::TokenBucket => {
+                store.token_buckets.lock().entries.keys().cloned().collect()
+            }
+            RateLimitAlgorithm::FixedWindow => {
+                store.fixed_windows.lock().entries.keys().cloned().collect()
+            }
+            RateLimitAlgorithm::SlidingWindow => store
+                .sliding_windows
+                .lock()
+                .entries
+                .keys()
+                .cloned()
+                .collect(),
+        }
     }
 
     #[test]
@@ -12892,10 +13093,371 @@ mod rate_limit_tests {
     #[test]
     fn rate_limit_builder_defaults() {
         let mw = RateLimitMiddleware::builder().build();
+        assert_eq!(DEFAULT_RATE_LIMIT_MAX_KEYS, 65_536);
         assert_eq!(mw.config.max_requests, 100);
         assert_eq!(mw.config.window, Duration::from_secs(60));
         assert_eq!(mw.config.algorithm, RateLimitAlgorithm::TokenBucket);
+        assert_eq!(mw.config.max_keys, DEFAULT_RATE_LIMIT_MAX_KEYS);
+        assert_eq!(mw.store.max_keys, DEFAULT_RATE_LIMIT_MAX_KEYS);
         assert!(mw.config.include_headers);
+    }
+
+    #[test]
+    fn rate_limit_builder_applies_custom_key_bound() {
+        let mw = RateLimitMiddleware::builder().max_keys(7).build();
+        assert_eq!(mw.config.max_keys, 7);
+        assert_eq!(mw.store.max_keys, 7);
+    }
+
+    #[test]
+    fn rate_limit_store_bounds_every_algorithm_and_fails_closed() {
+        let window = Duration::from_secs(60);
+
+        for algorithm in [
+            RateLimitAlgorithm::TokenBucket,
+            RateLimitAlgorithm::FixedWindow,
+            RateLimitAlgorithm::SlidingWindow,
+        ] {
+            let store = InMemoryRateLimitStore::with_max_keys(2);
+            assert!(store.check("resident-a", algorithm, 10, window).allowed);
+            assert!(store.check("resident-b", algorithm, 10, window).allowed);
+
+            let saturated = store.check("unseen", algorithm, 10, window);
+            assert!(!saturated.allowed, "{algorithm:?} must fail closed");
+            assert_eq!(saturated.limit, 10);
+            assert_eq!(saturated.remaining, 0);
+            assert_eq!(saturated.reset_after_secs, 60);
+
+            let keys = rate_limit_entry_keys(&store, algorithm);
+            assert_eq!(keys.len(), 2, "{algorithm:?} exceeded its key bound");
+            assert!(keys.contains(&"resident-a".to_string()));
+            assert!(keys.contains(&"resident-b".to_string()));
+            assert!(!keys.contains(&"unseen".to_string()));
+        }
+    }
+
+    #[test]
+    fn saturated_retry_after_rounds_fractional_windows_up() {
+        let store = InMemoryRateLimitStore::with_max_keys(0);
+        let result = store.check(
+            "unseen",
+            RateLimitAlgorithm::FixedWindow,
+            10,
+            Duration::from_millis(1_500),
+        );
+        assert!(!result.allowed);
+        assert_eq!(result.reset_after_secs, 2);
+    }
+
+    #[test]
+    fn rate_limit_saturation_returns_429_without_resetting_resident_counter() {
+        for algorithm in [
+            RateLimitAlgorithm::TokenBucket,
+            RateLimitAlgorithm::FixedWindow,
+            RateLimitAlgorithm::SlidingWindow,
+        ] {
+            let mw = RateLimitMiddleware::builder()
+                .requests(2)
+                .per(Duration::from_secs(60))
+                .algorithm(algorithm)
+                .key_extractor(IpKeyExtractor)
+                .max_keys(1)
+                .build();
+
+            for _ in 0..2 {
+                let mut resident = request_with_ip("resident");
+                assert!(run_rate_limit_before(&mw, &mut resident).is_continue());
+            }
+
+            let mut unseen = request_with_ip("unseen");
+            let ControlFlow::Break(response) = run_rate_limit_before(&mw, &mut unseen) else {
+                panic!("{algorithm:?} unseen key must fail closed while saturated");
+            };
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert!(response.headers().iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("retry-after") && value.as_slice() == b"60"
+            }));
+
+            let mut resident = request_with_ip("resident");
+            assert!(
+                run_rate_limit_before(&mw, &mut resident).is_break(),
+                "{algorithm:?} resident counter must remain exhausted"
+            );
+
+            let keys = rate_limit_entry_keys(&mw.store, algorithm);
+            assert_eq!(keys, vec!["resident".to_string()]);
+        }
+    }
+
+    #[test]
+    fn rate_limit_store_reclaims_algorithm_specific_stale_entries() {
+        let window = Duration::from_secs(3_600);
+
+        for algorithm in [
+            RateLimitAlgorithm::TokenBucket,
+            RateLimitAlgorithm::FixedWindow,
+            RateLimitAlgorithm::SlidingWindow,
+        ] {
+            let store = InMemoryRateLimitStore::with_max_keys(1);
+            let start = Instant::now();
+            assert!(
+                store
+                    .check_at("stale", algorithm, 10, window, start)
+                    .allowed
+            );
+
+            let replacement_at = if algorithm == RateLimitAlgorithm::SlidingWindow {
+                start + Duration::from_secs(7_201)
+            } else {
+                start + Duration::from_secs(3_601)
+            };
+
+            assert!(
+                store
+                    .check_at("replacement", algorithm, 10, window, replacement_at)
+                    .allowed,
+                "{algorithm:?} should reclaim its stale entry"
+            );
+            assert_eq!(
+                rate_limit_entry_keys(&store, algorithm),
+                vec!["replacement".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn sliding_window_retains_entries_until_two_windows_are_inactive() {
+        let algorithm = RateLimitAlgorithm::SlidingWindow;
+        let window = Duration::from_secs(3_600);
+        let store = InMemoryRateLimitStore::with_max_keys(1);
+        let start = Instant::now();
+        assert!(
+            store
+                .check_at("resident", algorithm, 10, window, start)
+                .allowed
+        );
+
+        assert!(
+            !store
+                .check_at(
+                    "too-early",
+                    algorithm,
+                    10,
+                    window,
+                    start + Duration::from_secs(3_601),
+                )
+                .allowed
+        );
+        assert_eq!(
+            rate_limit_entry_keys(&store, algorithm),
+            vec!["resident".to_string()]
+        );
+
+        assert!(
+            store
+                .check_at(
+                    "replacement",
+                    algorithm,
+                    10,
+                    window,
+                    start + Duration::from_secs(7_202),
+                )
+                .allowed
+        );
+        assert_eq!(
+            rate_limit_entry_keys(&store, algorithm),
+            vec!["replacement".to_string()]
+        );
+    }
+
+    #[test]
+    fn sliding_window_preserves_fractional_progress_when_rotating() {
+        let algorithm = RateLimitAlgorithm::SlidingWindow;
+        let window = Duration::from_secs(100);
+        let store = InMemoryRateLimitStore::with_max_keys(1);
+        let start = Instant::now();
+
+        for _ in 0..10 {
+            assert!(
+                store
+                    .check_at("resident", algorithm, 10, window, start)
+                    .allowed
+            );
+        }
+        assert!(
+            !store
+                .check_at("resident", algorithm, 10, window, start)
+                .allowed
+        );
+
+        let half_into_next_window = store.check_at(
+            "resident",
+            algorithm,
+            10,
+            window,
+            start + Duration::from_secs(150),
+        );
+        assert!(half_into_next_window.allowed);
+        assert_eq!(half_into_next_window.remaining, 4);
+        assert_eq!(half_into_next_window.reset_after_secs, 50);
+    }
+
+    #[test]
+    fn cleanup_uses_each_resident_entry_retention_policy() {
+        let short_window = Duration::from_secs(1);
+        let long_window = Duration::from_secs(3_600);
+
+        for algorithm in [
+            RateLimitAlgorithm::TokenBucket,
+            RateLimitAlgorithm::FixedWindow,
+            RateLimitAlgorithm::SlidingWindow,
+        ] {
+            let store = InMemoryRateLimitStore::with_max_keys(1);
+            let start = Instant::now();
+            assert!(
+                store
+                    .check_at("long-lived", algorithm, 10, long_window, start)
+                    .allowed
+            );
+
+            let result = store.check_at(
+                "short-window-unseen",
+                algorithm,
+                10,
+                short_window,
+                start + Duration::from_secs(2),
+            );
+            assert!(
+                !result.allowed,
+                "{algorithm:?} must not evict a resident using the incoming short window"
+            );
+            assert_eq!(
+                rate_limit_entry_keys(&store, algorithm),
+                vec!["long-lived".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_reclaims_short_resident_despite_long_incoming_window() {
+        let short_window = Duration::from_secs(1);
+        let long_window = Duration::from_secs(3_600);
+
+        for algorithm in [
+            RateLimitAlgorithm::TokenBucket,
+            RateLimitAlgorithm::FixedWindow,
+            RateLimitAlgorithm::SlidingWindow,
+        ] {
+            let store = InMemoryRateLimitStore::with_max_keys(1);
+            let start = Instant::now();
+            assert!(
+                store
+                    .check_at("short-lived", algorithm, 10, short_window, start)
+                    .allowed
+            );
+
+            let result = store.check_at(
+                "long-window-replacement",
+                algorithm,
+                10,
+                long_window,
+                start + Duration::from_secs(3),
+            );
+            assert!(
+                result.allowed,
+                "{algorithm:?} must reclaim a stale resident independently of the incoming window"
+            );
+            assert_eq!(
+                rate_limit_entry_keys(&store, algorithm),
+                vec!["long-window-replacement".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn rate_limit_cleanup_is_throttled_to_one_sweep_per_second() {
+        let algorithm = RateLimitAlgorithm::SlidingWindow;
+        let window = Duration::from_secs(100);
+        let store = InMemoryRateLimitStore::with_max_keys(1);
+        let start = Instant::now();
+        assert!(
+            store
+                .check_at("stale", algorithm, 10, window, start)
+                .allowed
+        );
+
+        assert!(
+            !store
+                .check_at(
+                    "initial-sweep",
+                    algorithm,
+                    10,
+                    window,
+                    start + Duration::from_millis(199_500),
+                )
+                .allowed
+        );
+        assert!(
+            !store
+                .check_at(
+                    "first-unseen",
+                    algorithm,
+                    10,
+                    window,
+                    start + Duration::from_millis(200_100),
+                )
+                .allowed
+        );
+        assert!(
+            !store
+                .check_at(
+                    "second-unseen",
+                    algorithm,
+                    10,
+                    window,
+                    start + Duration::from_millis(200_400),
+                )
+                .allowed
+        );
+        assert_eq!(
+            rate_limit_entry_keys(&store, algorithm),
+            vec!["stale".to_string()]
+        );
+
+        assert!(
+            store
+                .check_at(
+                    "replacement",
+                    algorithm,
+                    10,
+                    window,
+                    start + Duration::from_millis(200_500),
+                )
+                .allowed
+        );
+        assert_eq!(
+            rate_limit_entry_keys(&store, algorithm),
+            vec!["replacement".to_string()]
+        );
+    }
+
+    #[test]
+    fn zero_window_fails_closed_without_retaining_keys() {
+        let store = InMemoryRateLimitStore::with_max_keys(1);
+
+        for algorithm in [
+            RateLimitAlgorithm::TokenBucket,
+            RateLimitAlgorithm::FixedWindow,
+            RateLimitAlgorithm::SlidingWindow,
+        ] {
+            let result = store.check("never-retained", algorithm, 10, Duration::ZERO);
+            assert!(
+                !result.allowed,
+                "{algorithm:?} zero window must fail closed"
+            );
+            assert_eq!(result.reset_after_secs, 1);
+            assert!(rate_limit_entry_keys(&store, algorithm).is_empty());
+        }
     }
 
     #[test]
