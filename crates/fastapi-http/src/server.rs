@@ -57,7 +57,7 @@ use asupersync::net::{TcpListener, TcpStream};
 use asupersync::runtime::{JoinHandle, Runtime, RuntimeHandle, SpawnError};
 use asupersync::signal::{GracefulOutcome, ShutdownController, ShutdownReceiver};
 use asupersync::stream::Stream;
-use asupersync::time::timeout;
+use asupersync::time::{timeout, timeout_at};
 use asupersync::{Budget, Cx, Time};
 use fastapi_core::app::App;
 use fastapi_core::{Method, Request, RequestContext, Response, StatusCode};
@@ -104,7 +104,14 @@ fn request_deadline(request_timeout: Time) -> Time {
 
 fn request_cx_from_parent(parent: &Cx, _budget: Budget) -> Cx {
     // asupersync 0.3.4 moved ambient constructors behind test-internals; production
-    // request contexts must inherit the runtime-bound server context.
+    // request contexts must inherit the runtime-bound server context, and no public
+    // API attaches a budget to an inherited Cx. The request deadline is therefore
+    // enforced at the call sites instead: the handler future races a
+    // `timeout_at(deadline, ..)` sleep (so an over-budget or stuck handler is
+    // dropped and answered with 504 at the deadline, not after it completes) and
+    // the same deadline is published on `RequestContext::deadline` for middleware.
+    // Dropping the raced future is how cancellation is delivered; this shared-state
+    // clone must never be cancel-marked, or the connection itself would be poisoned.
     parent.clone()
 }
 
@@ -807,9 +814,10 @@ where
 
         // Generate unique request ID for this request with timeout budget
         let request_id = request_counter.fetch_add(1, Ordering::Relaxed);
-        let request_budget = Budget::new().with_deadline(request_deadline(config.request_timeout));
+        let deadline = request_deadline_at(cx.now(), config.request_timeout);
+        let request_budget = Budget::new().with_deadline(deadline);
         let request_cx = request_cx_from_parent(cx, request_budget);
-        let ctx = RequestContext::new(request_cx, request_id);
+        let ctx = RequestContext::new(request_cx, request_id).with_deadline(deadline);
 
         // Validate Host header
         if let Err(err) = validate_host_header(&request, config) {
@@ -854,22 +862,28 @@ where
 
         let client_wants_keep_alive = should_keep_alive(&request);
         let at_max_requests = max_requests > 0 && requests_on_connection >= max_requests;
-        let server_will_keep_alive = client_wants_keep_alive && !at_max_requests;
+        let mut server_will_keep_alive = client_wants_keep_alive && !at_max_requests;
 
-        let request_start = Instant::now();
-        let timeout_duration = Duration::from_nanos(config.request_timeout.as_nanos());
-
-        // Call the handler
-        let response = handler(ctx, &mut request).await;
-
-        let mut response = if request_start.elapsed() > timeout_duration {
-            Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
-                fastapi_core::ResponseBody::Bytes(
-                    b"Gateway Timeout: request processing exceeded time limit".to_vec(),
-                ),
-            )
-        } else {
-            response
+        // Race the handler (including its middleware chain) against the request
+        // deadline. Losing the race drops the handler future, so no late
+        // response can be produced, published by middleware, or observed
+        // anywhere after the client has been told 504.
+        // Losing the race drops the handler future, which is how cancellation
+        // is delivered; the request Cx must NOT be cancel-marked here because
+        // it shares cancel state with this connection's Cx, and the 504 still
+        // has to be written on this connection.
+        let mut response = match timeout_at(deadline, handler(ctx, &mut request)).await {
+            Ok(response) => response,
+            Err(_elapsed) => {
+                // The abandoned handler may not have consumed the request
+                // body, so the connection cannot be reused safely.
+                server_will_keep_alive = false;
+                Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
+                    fastapi_core::ResponseBody::Bytes(
+                        b"Gateway Timeout: request processing exceeded time limit".to_vec(),
+                    ),
+                )
+            }
         };
 
         response = if server_will_keep_alive {
@@ -2646,8 +2660,8 @@ impl TcpServer {
             let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed);
 
             // Per-request budget for HTTP requests.
-            let request_budget =
-                Budget::new().with_deadline(request_deadline(self.config.request_timeout));
+            let deadline = request_deadline_at(cx.now(), self.config.request_timeout);
+            let request_budget = Budget::new().with_deadline(deadline);
             let request_cx = request_cx_from_parent(cx, request_budget);
             let overrides = app.dependency_overrides();
             let ctx = RequestContext::with_overrides_and_body_limit(
@@ -2655,7 +2669,8 @@ impl TcpServer {
                 request_id,
                 overrides,
                 app.config().max_body_size,
-            );
+            )
+            .with_deadline(deadline);
 
             // Validate Host header
             if let Err(err) = validate_host_header(&request, &self.config) {
@@ -2779,21 +2794,31 @@ impl TcpServer {
             }
 
             let client_wants_keep_alive = should_keep_alive(&request);
-            let server_will_keep_alive = client_wants_keep_alive
+            let mut server_will_keep_alive = client_wants_keep_alive
                 && (max_requests == 0 || requests_on_connection < max_requests);
 
-            let request_start = Instant::now();
-            let timeout_duration = Duration::from_nanos(self.config.request_timeout.as_nanos());
-
-            let response = app.handle(&ctx, &mut request).await;
-            let mut response = if request_start.elapsed() > timeout_duration {
-                Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
-                    fastapi_core::ResponseBody::Bytes(
-                        b"Gateway Timeout: request processing exceeded time limit".to_vec(),
-                    ),
-                )
-            } else {
-                response
+            // Race the handler (including its middleware chain) against the
+            // request deadline. Losing the race drops the handler future, so
+            // no late response can be produced, published by middleware (e.g.
+            // into a coalescing replay cache), or observed anywhere after the
+            // client has been told 504.
+            // Losing the race drops the handler future, which is how
+            // cancellation is delivered; the request Cx must NOT be
+            // cancel-marked here because it shares cancel state with this
+            // connection's Cx, and the 504 still has to be written on this
+            // connection.
+            let mut response = match timeout_at(deadline, app.handle(&ctx, &mut request)).await {
+                Ok(response) => response,
+                Err(_elapsed) => {
+                    // The abandoned handler may not have consumed the
+                    // request body, so the connection cannot be reused.
+                    server_will_keep_alive = false;
+                    Response::with_status(StatusCode::GATEWAY_TIMEOUT).body(
+                        fastapi_core::ResponseBody::Bytes(
+                            b"Gateway Timeout: request processing exceeded time limit".to_vec(),
+                        ),
+                    )
+                }
             };
 
             response = if server_will_keep_alive {

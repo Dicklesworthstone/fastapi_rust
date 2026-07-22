@@ -4,7 +4,7 @@
 //! capabilities for HTTP request handling.
 
 use asupersync::types::CancelReason;
-use asupersync::{Budget, Cx, Outcome, RegionId, TaskId};
+use asupersync::{Budget, Cx, Outcome, RegionId, TaskId, Time};
 use std::sync::Arc;
 
 use crate::dependency::{CleanupStack, DependencyCache, DependencyOverrides, ResolutionStack};
@@ -87,6 +87,15 @@ pub struct RequestContext {
     cleanup_stack: Arc<CleanupStack>,
     /// Body size limit configuration for this request.
     body_limit: BodyLimitConfig,
+    /// Absolute server deadline for this request, on the runtime clock.
+    ///
+    /// Set by the server from its configured request timeout. `None` means no
+    /// server deadline applies (e.g. WebSocket upgrades or tests that never
+    /// set one). Middleware with externally visible side effects (caches,
+    /// replay stores) should consult [`Self::deadline_exceeded`] before
+    /// publishing, because the server abandons the response once the deadline
+    /// passes.
+    deadline: Option<Time>,
 }
 
 impl RequestContext {
@@ -105,6 +114,7 @@ impl RequestContext {
             resolution_stack: Arc::new(ResolutionStack::new()),
             cleanup_stack: Arc::new(CleanupStack::new()),
             body_limit: BodyLimitConfig::default(),
+            deadline: None,
         }
     }
 
@@ -122,6 +132,7 @@ impl RequestContext {
             resolution_stack: Arc::new(ResolutionStack::new()),
             cleanup_stack: Arc::new(CleanupStack::new()),
             body_limit: BodyLimitConfig::new(max_body_size),
+            deadline: None,
         }
     }
 
@@ -136,6 +147,7 @@ impl RequestContext {
             resolution_stack: Arc::new(ResolutionStack::new()),
             cleanup_stack: Arc::new(CleanupStack::new()),
             body_limit: BodyLimitConfig::default(),
+            deadline: None,
         }
     }
 
@@ -155,7 +167,41 @@ impl RequestContext {
             resolution_stack: Arc::new(ResolutionStack::new()),
             cleanup_stack: Arc::new(CleanupStack::new()),
             body_limit: BodyLimitConfig::new(max_body_size),
+            deadline: None,
         }
+    }
+
+    /// Sets the absolute server deadline for this request.
+    ///
+    /// The deadline is on the runtime clock (the same clock as
+    /// [`Cx::now`]). The server sets it from its configured request timeout
+    /// before invoking the middleware chain and handler, and abandons the
+    /// response (returning 504 to the client) once it passes.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: Time) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Returns the absolute server deadline for this request, if one applies.
+    #[must_use]
+    pub fn deadline(&self) -> Option<Time> {
+        self.deadline
+    }
+
+    /// Returns true when the server deadline for this request has passed.
+    ///
+    /// Middleware with externally visible side effects (replay caches,
+    /// coalescers, stores) must check this before publishing a response: once
+    /// the deadline passes, the server no longer delivers the handler's
+    /// response to the client, so publishing it would let observers replay a
+    /// response the original caller never received.
+    ///
+    /// Returns false when no server deadline was set.
+    #[must_use]
+    pub fn deadline_exceeded(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| self.cx.now() >= deadline)
     }
 
     /// Returns the unique request identifier.
@@ -371,6 +417,32 @@ mod tests {
         let ctx = RequestContext::new(cx, 1);
         ctx.cx().set_cancel_requested(true);
         assert!(ctx.checkpoint().is_err());
+    }
+
+    #[test]
+    fn deadline_defaults_to_none_and_is_never_exceeded() {
+        let ctx = RequestContext::new(Cx::for_testing(), 1);
+        assert_eq!(ctx.deadline(), None);
+        assert!(!ctx.deadline_exceeded());
+    }
+
+    #[test]
+    fn with_deadline_exposes_the_server_deadline() {
+        let deadline = Time::from_secs(5);
+        let ctx = RequestContext::new(Cx::for_testing(), 1).with_deadline(deadline);
+        assert_eq!(ctx.deadline(), Some(deadline));
+    }
+
+    #[test]
+    fn deadline_exceeded_reflects_the_runtime_clock() {
+        // Time::ZERO is always in the past on the runtime/wall clock.
+        let past = RequestContext::new(Cx::for_testing(), 1).with_deadline(Time::ZERO);
+        assert!(past.deadline_exceeded());
+
+        // A deadline far beyond any realistic clock value is never exceeded.
+        let future =
+            RequestContext::new(Cx::for_testing(), 1).with_deadline(Time::from_nanos(u64::MAX));
+        assert!(!future.deadline_exceeded());
     }
 
     #[test]
