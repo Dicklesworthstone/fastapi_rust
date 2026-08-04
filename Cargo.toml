@@ -49,3 +49,6 @@ missing_const_for_fn = "allow"
 doc_link_with_quotes = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Trait contracts (FromRequest, Middleware, ...) mandate async signatures;
+# impls that happen not to await cannot drop `async` without desugaring.
+unused_async_trait_impl = "allow"

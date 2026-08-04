@@ -7297,9 +7297,7 @@ impl TimingHistogram {
     pub fn reset(&mut self) {
         self.sum = 0.0;
         self.count = 0;
-        for count in &mut self.bucket_counts {
-            *count = 0;
-        }
+        self.bucket_counts.fill(0);
     }
 }
 

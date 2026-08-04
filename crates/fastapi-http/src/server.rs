@@ -6501,8 +6501,7 @@ impl AppServeExt for App {
             let app = Arc::new(self);
 
             let cx = Cx::current().ok_or_else(|| {
-                ServeError::Server(ServerError::Io(io::Error::new(
-                    io::ErrorKind::Other,
+                ServeError::Server(ServerError::Io(io::Error::other(
                     "fastapi App::serve must run inside an asupersync runtime",
                 )))
             })?;
