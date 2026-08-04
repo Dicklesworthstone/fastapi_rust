@@ -18,7 +18,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full", "parsing"] }
+syn = { version = "3", features = ["full", "parsing"] }
 # Used at compile time to validate regex patterns in #[validate(regex = "...")]
 regex = "1"
 # Used at compile time to validate JSON examples in #[schema(example = "...")]
