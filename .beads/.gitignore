@@ -48,3 +48,9 @@ sync_base.jsonl
 
 # bv (beads viewer) lock file
 .bv.lock
+
+# br live write locks and frankensqlite VFS namespace sidecars
+*.lock
+*-fsqlite-ns-gate
+*-fsqlite-ns-use
+beads.db-fsqlite-ns-*

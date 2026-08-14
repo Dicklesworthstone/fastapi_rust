@@ -22,6 +22,12 @@ Thumbs.db
 
 # BV lock file (ephemeral)
 .beads/.bv.lock
+# br live write locks (.write.lock, .br-jsonl-write-*.lock, .br-db-write-*.lock)
+.beads/*.lock
+# frankensqlite VFS namespace sidecars (machine-local, next to any opened DB)
+.beads/beads.db-fsqlite-ns-*
+*-fsqlite-ns-gate
+*-fsqlite-ns-use
 
 # Source images (webp versions are committed instead)
 *.png
