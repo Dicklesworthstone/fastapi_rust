@@ -2030,7 +2030,7 @@ fn http2_server_settings_includes_max_concurrent_streams() {
         let (ty, flags, _sid, payload) = read_frame(&mut stream);
         if ty == 0x4 && (flags & 0x1) == 0 {
             // Parse settings pairs (6 bytes each: u16 id + u32 value).
-            for chunk in payload.chunks_exact(6) {
+            for chunk in payload.as_chunks::<6>().0 {
                 let id = u16::from_be_bytes([chunk[0], chunk[1]]);
                 let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
                 if id == 0x3 {

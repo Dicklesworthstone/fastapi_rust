@@ -6,6 +6,60 @@ This project is a Rust web framework inspired by Python's [FastAPI](https://fast
 
 Commit links point to `https://github.com/Dicklesworthstone/fastapi_rust/commit/<hash>`.
 
+Scope window: first commit (2026-01-17) through v0.4.1 (2026-08-20).
+
+Sources: git history and tags on `main`, GitHub Releases, and the crates.io
+version list for `fastapi-rust`. Dates are the local commit/tag dates; crates.io
+shows the same publishes in UTC (which can be one day later).
+
+## Version Timeline
+
+| Version | Date | Git tag | GitHub Release | crates.io | Notes |
+|---------|------|---------|----------------|-----------|-------|
+| 0.4.1 | 2026-08-20 | [v0.4.1](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.1) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.1) | [yes](https://crates.io/crates/fastapi-rust/0.4.1) | builds on stable 1.95; metadata/docs corrections |
+| 0.4.0 | 2026-08-20 | [v0.4.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.0) | [yes](https://crates.io/crates/fastapi-rust/0.4.0) | asupersync ^0.4.9 |
+| 0.3.1 | 2026-07-26 | no | no | [yes](https://crates.io/crates/fastapi-rust/0.3.1) | crates.io only |
+| 0.3.0 | 2026-04-21 | [v0.3.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.3.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.3.0) | [yes](https://crates.io/crates/fastapi-rust/0.3.0) | asupersync 0.3.0 |
+| 0.2.1 | 2026-03-22 | no | no | [yes](https://crates.io/crates/fastapi-rust/0.2.1) | crates.io only |
+| 0.2.0 | 2026-02-15 | [v0.2.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.2.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.2.0) | [yes](https://crates.io/crates/fastapi-rust/0.2.0) | |
+| 0.1.1 / 0.1.0 | 2026-02-05 | no | no | [yes](https://crates.io/crates/fastapi-rust/0.1.1) | initial crates.io publish |
+
+---
+
+## [v0.4.1] -- 2026-08-20
+
+**Stable-toolchain and metadata correction.** 0.4.0 shipped with two wrong
+claims: `rust-version = "1.85"` (the asupersync 0.4 graph needs rustc 1.95 via
+`sysinfo`) and a crates.io README whose dependency snippet (`fastapi = { git =
+... }`) cannot resolve. Both are fixed here, and the workspace now actually
+builds on stable Rust.
+
+### Changed
+
+- **asupersync is consumed with `default-features = false`.** asupersync's
+  default feature set includes `nightly-outcome-try` (`#![feature(try_trait_v2)]`),
+  which made every default-feature consumer nightly-only. fastapi uses none of
+  those features; dropping the defaults lets the whole workspace compile on
+  stable 1.95 (`cargo +1.95.0 check --workspace --all-features` verified).
+  Features are additive, so consumers that want them can still enable them on
+  their own `asupersync` dependency.
+- `rust-version` raised from the false `1.85` to the true floor `1.95`
+  (README badges, getting-started guide, and the `nightly.yml` MSRV job
+  follow). Router `if` nests collapsed into let-chains now that clippy knows
+  the MSRV allows them.
+- Workspace dependency alias corrected from `fastapi` to `fastapi-rust` (the
+  facade's real package name); README/getting-started dependency snippets now
+  show the published `fastapi-rust = "0.4.x"` form and `fastapi_rust::` import
+  paths.
+- CHANGELOG: version timeline added; the 0.3.0/0.3.1 history that was missing
+  is recorded below, and the items 0.4.0's notes mis-filed as "since 0.3.1"
+  are moved to the 0.3.1 entry where they shipped.
+
+### Representative commits
+
+- [`f1f8b46`](https://github.com/Dicklesworthstone/fastapi_rust/commit/f1f8b46) -- rust-version/docs/CI 1.85 -> 1.95
+- [`cf09bb0`](https://github.com/Dicklesworthstone/fastapi_rust/commit/cf09bb0) -- docs and workspace pin aligned with the `fastapi-rust` package name
+
 ---
 
 ## [v0.4.0] -- 2026-08-20
@@ -28,7 +82,11 @@ lets fastapi-rust share a single runtime with `fsqlite` 0.3.x and
   lint workspace-wide (its suggested `assert_eq!(v, [] as [T; 0])` form is less
   readable in tests); the `-D warnings` gate stays green on current nightly.
 
-### Also since 0.3.1
+### Representative commits
+
+- [`badcf8a`](https://github.com/Dicklesworthstone/fastapi_rust/commit/badcf8a) -- asupersync 0.3.9 -> 0.4.9, lints, lockfile, 0.4.0 bump
+
+### Also since 0.3.1 (unreleased until 0.4.0)
 
 - Nightly clippy fallout cleaned so the `-D warnings` gate stays green ([`eda766f`](https://github.com/Dicklesworthstone/fastapi_rust/commit/eda766f)).
 - Workspace/crate pin refreshes and `Cargo.lock` regeneration ([`078c279`](https://github.com/Dicklesworthstone/fastapi_rust/commit/078c279), [`27415d6`](https://github.com/Dicklesworthstone/fastapi_rust/commit/27415d6)).

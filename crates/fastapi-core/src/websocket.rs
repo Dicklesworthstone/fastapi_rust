@@ -520,7 +520,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut words = [0u32; 80];
         for (word_index, word) in words.iter_mut().take(16).enumerate() {
             let byte_index = word_index * 4;
@@ -625,7 +625,7 @@ fn base64_encode(data: &[u8]) -> String {
 
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
     let input = input.trim();
-    if input.len() % 4 != 0 {
+    if !input.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity((input.len() / 4) * 3);

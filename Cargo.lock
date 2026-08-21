@@ -101,7 +101,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be81588a09a28a312b09d4af71e8aa8c6736e1d670a69a42e6779e874fbad1bd"
 dependencies = [
  "aes-gcm",
- "asupersync-macros",
  "base64 0.23.1",
  "bincode-next",
  "chacha20poly1305",
@@ -149,17 +148,6 @@ dependencies = [
  "windows-sys",
  "xattr",
  "zeroize",
-]
-
-[[package]]
-name = "asupersync-macros"
-version = "0.4.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a14f9f162d8418e4e347f4965f42f41ca970f8e81be496e04ab4f79c94818c8"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
 ]
 
 [[package]]
@@ -795,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync",
  "fastapi-macros",
@@ -814,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-http"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync",
  "criterion",
@@ -823,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-macros"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -834,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-openapi"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "fastapi-router",
  "fastapi-types",
@@ -844,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-output"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "crossterm",
  "insta",
@@ -858,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-router"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "fastapi-types",
  "serde_json",
@@ -866,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-rust"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "fastapi-core",
  "fastapi-http",
@@ -880,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-types"
-version = "0.4.0"
+version = "0.4.1"
 
 [[package]]
 name = "fastrand"

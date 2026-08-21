@@ -21,10 +21,16 @@
 <div align="center">
 <h3>Quick Install</h3>
 
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/fastapi_rust/main/install.sh?$(date +%s)" | bash
+```
+
+**Or add to your project:**
+
 ```toml
 # Cargo.toml
 [dependencies]
-fastapi-rust = "0.4.0"
+fastapi-rust = "0.4.1"
 asupersync = "0.4"
 serde = { version = "1", features = ["derive"] }
 ```
@@ -224,7 +230,7 @@ goal tracked in Beads (see `bd-uz2s`).
 
 ```toml
 [dependencies]
-fastapi-rust = "0.4.0"
+fastapi-rust = "0.4.1"
 asupersync = "0.4"
 serde = { version = "1", features = ["derive"] }
 ```

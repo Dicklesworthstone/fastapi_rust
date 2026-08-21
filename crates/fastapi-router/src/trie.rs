@@ -992,13 +992,13 @@ impl Router {
         }
 
         // Allow HEAD when GET is registered.
-        if method == Method::Head {
-            if let Some(&idx) = node.routes.get(&Method::Get) {
-                return RouteLookup::Match(RouteMatch {
-                    route: &self.routes[idx],
-                    params,
-                });
-            }
+        if method == Method::Head
+            && let Some(&idx) = node.routes.get(&Method::Get)
+        {
+            return RouteLookup::Match(RouteMatch {
+                route: &self.routes[idx],
+                params,
+            });
         }
 
         if node.routes.is_empty() {
@@ -1177,20 +1177,20 @@ impl Router {
             }
 
             // Try parameter match
-            if let Some(child) = node.find_param() {
-                if let Some(ref info) = child.param {
-                    if info.converter == Converter::Path {
-                        let value = &path[start..last_end];
-                        params.push((info.name.as_str(), value));
-                        node = child;
-                        // Path converter consumes rest of path
-                        return Some((node, params));
-                    }
-                    if info.converter.matches(segment) {
-                        params.push((info.name.as_str(), segment));
-                        node = child;
-                        continue;
-                    }
+            if let Some(child) = node.find_param()
+                && let Some(ref info) = child.param
+            {
+                if info.converter == Converter::Path {
+                    let value = &path[start..last_end];
+                    params.push((info.name.as_str(), value));
+                    node = child;
+                    // Path converter consumes rest of path
+                    return Some((node, params));
+                }
+                if info.converter.matches(segment) {
+                    params.push((info.name.as_str(), segment));
+                    node = child;
+                    continue;
                 }
             }
 
@@ -1254,15 +1254,12 @@ fn validate_path_segments(
             name,
             converter: Converter::Path,
         } = segment
+            && idx + 1 != segments.len()
         {
-            if idx + 1 != segments.len() {
-                return Err(InvalidRouteError::new(
-                    path,
-                    format!(
-                        "wildcard '{{*{name}}}' or '{{{name}:path}}' must be the final segment"
-                    ),
-                ));
-            }
+            return Err(InvalidRouteError::new(
+                path,
+                format!("wildcard '{{*{name}}}' or '{{{name}:path}}' must be the final segment"),
+            ));
         }
     }
     Ok(())

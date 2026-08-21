@@ -4230,13 +4230,13 @@ fn apply_http2_settings_with_fc(
     payload: &[u8],
 ) -> Result<(), http2::Http2Error> {
     // SETTINGS payload is a sequence of (u16 id, u32 value) pairs.
-    if payload.len() % 6 != 0 {
+    if !payload.len().is_multiple_of(6) {
         return Err(http2::Http2Error::Protocol(
             "SETTINGS length must be a multiple of 6",
         ));
     }
 
-    for chunk in payload.chunks_exact(6) {
+    for chunk in payload.as_chunks::<6>().0 {
         let id = u16::from_be_bytes([chunk[0], chunk[1]]);
         let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
         match id {
@@ -4422,13 +4422,13 @@ fn apply_peer_settings_for_send(
     peer_max_frame_size: &mut u32,
     payload: &[u8],
 ) -> Result<(), http2::Http2Error> {
-    if payload.len() % 6 != 0 {
+    if !payload.len().is_multiple_of(6) {
         return Err(http2::Http2Error::Protocol(
             "SETTINGS length must be a multiple of 6",
         ));
     }
 
-    for chunk in payload.chunks_exact(6) {
+    for chunk in payload.as_chunks::<6>().0 {
         let id = u16::from_be_bytes([chunk[0], chunk[1]]);
         let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
 

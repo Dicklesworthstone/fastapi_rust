@@ -40,7 +40,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-fastapi-rust = "0.4.0"
+fastapi-rust = "0.4.1"
 asupersync = "0.4"
 serde = { version = "1", features = ["derive"] }
 ```
