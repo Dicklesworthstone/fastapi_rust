@@ -24,7 +24,7 @@
 ```toml
 # Cargo.toml
 [dependencies]
-fastapi-rust = "0.4.2"
+fastapi-rust = "0.4.3"
 asupersync = { version = "0.4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -69,23 +69,26 @@ struct Item {
 }
 
 #[get("/items/{id}")]
-async fn get_item(cx: &Cx, id: Path<i64>) -> Json<Item> {
-    cx.checkpoint()?;  // Cancellation-safe yield point
+async fn get_item(ctx: &RequestContext, id: Path<i64>) -> Result<Json<Item>, HttpError> {
+    ctx.checkpoint()?;  // Cancellation-safe yield point (cancelled -> 499)
 
-    Json(Item {
+    Ok(Json(Item {
         id: id.0,
         name: "Widget".into(),
         price: 29.99,
-    })
+    }))
 }
 
 #[post("/items")]
-async fn create_item(cx: &Cx, item: Json<Item>) -> Response {
+async fn create_item(_cx: &Cx, item: Json<Item>) -> Result<Json<Item>, HttpError> {
     // Automatic JSON deserialization with validation
     // Wrong Content-Type -> 415
     // Parse error -> 422 with detailed location
     // Payload too large -> 413
-    Response::created().json(&item.0)
+    if item.0.price < 0.0 {
+        return Err(HttpError::bad_request().with_detail("price must be non-negative"));
+    }
+    Ok(item)
 }
 
 #[get("/search")]
@@ -224,7 +227,7 @@ goal tracked in Beads (see `bd-uz2s`).
 
 ```toml
 [dependencies]
-fastapi-rust = "0.4.2"
+fastapi-rust = "0.4.3"
 asupersync = { version = "0.4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ```

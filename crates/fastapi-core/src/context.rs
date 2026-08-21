@@ -371,6 +371,22 @@ impl std::fmt::Display for CancelledError {
 
 impl std::error::Error for CancelledError {}
 
+/// Lets handlers write `ctx.checkpoint()?` inside a `Result<_, HttpError>`:
+/// a cancelled request maps to `499 Client Closed Request`, matching how the
+/// server reports an `Outcome::Cancelled` with a generic reason.
+impl From<CancelledError> for crate::error::HttpError {
+    fn from(_: CancelledError) -> Self {
+        crate::error::HttpError::new(crate::response::StatusCode::CLIENT_CLOSED_REQUEST)
+            .with_detail("request cancelled")
+    }
+}
+
+impl crate::response::IntoResponse for CancelledError {
+    fn into_response(self) -> crate::response::Response {
+        crate::error::HttpError::from(self).into_response()
+    }
+}
+
 /// Extension trait for converting HTTP results to asupersync Outcome.
 ///
 /// This bridges the HTTP error model with asupersync's 4-valued outcome

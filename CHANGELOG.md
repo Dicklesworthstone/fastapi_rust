@@ -6,7 +6,7 @@ This project is a Rust web framework inspired by Python's [FastAPI](https://fast
 
 Commit links point to `https://github.com/Dicklesworthstone/fastapi_rust/commit/<hash>`.
 
-Scope window: first commit (2026-01-17) through v0.4.2 (2026-08-20).
+Scope window: first commit (2026-01-17) through v0.4.3 (2026-08-20).
 
 Sources: git history and tags on `main`, GitHub Releases, and the crates.io
 version list for `fastapi-rust`. Dates are the local commit/tag dates; crates.io
@@ -16,6 +16,7 @@ shows the same publishes in UTC (which can be one day later).
 
 | Version | Date | Git tag | GitHub Release | crates.io | Notes |
 |---------|------|---------|----------------|-----------|-------|
+| 0.4.3 | 2026-08-20 | [v0.4.3](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.3) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.3) | [yes](https://crates.io/crates/fastapi-rust/0.4.3) | macro route path works for facade consumers; Json responses; builder title/version |
 | 0.4.2 | 2026-08-20 | [v0.4.2](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.2) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.2) | [yes](https://crates.io/crates/fastapi-rust/0.4.2) | real install.sh; stable-safe dependency snippets |
 | 0.4.1 | 2026-08-20 | [v0.4.1](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.1) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.1) | [yes](https://crates.io/crates/fastapi-rust/0.4.1) | builds on stable 1.95; metadata/docs corrections |
 | 0.4.0 | 2026-08-20 | [v0.4.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.0) | [yes](https://crates.io/crates/fastapi-rust/0.4.0) | asupersync ^0.4.9 |
@@ -24,6 +25,58 @@ shows the same publishes in UTC (which can be one day later).
 | 0.2.1 | 2026-03-22 | no | no | [yes](https://crates.io/crates/fastapi-rust/0.2.1) | crates.io only |
 | 0.2.0 | 2026-02-15 | [v0.2.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.2.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.2.0) | [yes](https://crates.io/crates/fastapi-rust/0.2.0) | |
 | 0.1.1 / 0.1.0 | 2026-02-05 | no | no | [yes](https://crates.io/crates/fastapi-rust/0.1.1) | initial crates.io publish |
+
+---
+
+## [v0.4.3] -- 2026-08-20
+
+**The README's headline example now compiles and runs.** A fresh-eyes pass
+that compiled the documented `#[get]` + `&Cx` + `Json<Item>` handler against
+the published crate found three independent defects that together meant the
+proc-macro route path had never worked for a consumer of `fastapi-rust` — and
+nothing in the repo compiled such a handler.
+
+### Fixed
+
+- **Macro expansions could not resolve their own crates.** `#[get]`,
+  `#[post]`, `JsonSchema`, `Validate` expand to unanchored `fastapi_core::` /
+  `fastapi_router::` / `fastapi_openapi::` paths, so a crate depending only on
+  `fastapi-rust` failed with "cannot find crate `fastapi_core`". The facade now
+  re-exports those crate names (hidden) at its root and from `prelude`, so
+  `use fastapi_rust::prelude::*;` makes the expansions resolve.
+- **Handler futures could not borrow the request.** `BoxHandler` returned a
+  `'static` future (its doc comment claimed otherwise), so any extractor-based
+  or `&Cx` handler failed with "lifetime may not live long enough".
+  `BoxHandler` is now `for<'a> Fn(&'a RequestContext, &'a mut Request) ->
+  BoxFuture<'a, Response>`; `RouteEntry::new` keeps its `'static`-future
+  signature, `RouteEntry::new_boxed` is the general borrowing form, and
+  `RouteEntry::from_route` (what the macros emit) uses it.
+- **`Json<T>` was extractor-only.** It now implements `IntoResponse`
+  (`200`, `application/json`; a serialization failure maps to `500`), so
+  `-> Json<T>` and `-> Result<Json<T>, HttpError>` handlers work as documented.
+
+### Added
+
+- `AppBuilder::title` / `version` / `description` (FastAPI's `title=` /
+  `version=` / `description=`): set `AppConfig::name`/`version` and, when
+  OpenAPI is enabled, the spec's `info`, taking precedence over the same
+  fields on an `OpenApiConfig` passed to `.openapi()`. The README had shown
+  these for months; they did not exist.
+- `From<CancelledError> for HttpError` and `IntoResponse for CancelledError`
+  (`499 Client Closed Request`), so `ctx.checkpoint()?` works inside a
+  `Result<_, HttpError>` handler. (`Cx::checkpoint` itself returns
+  `asupersync::Error`, which deliberately has no blanket `HttpError`
+  conversion.)
+- `crates/fastapi/tests/macro_routes.rs`: the first compiled end-to-end test
+  of the macro route path through `TestClient` — `&Cx` and `&RequestContext`
+  handlers, `Path`/`Json` extractors, `Json` and `Result<Json, HttpError>`
+  returns, 422 on extractor failure, builder metadata.
+
+### Changed
+
+- README Quick Example and the installer's agent skill now show the exact
+  handler shapes that test exercises (`ctx.checkpoint()?` with
+  `&RequestContext`; `Result<Json<Item>, HttpError>` for `POST`).
 
 ---
 
