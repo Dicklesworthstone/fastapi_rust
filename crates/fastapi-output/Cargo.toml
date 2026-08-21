@@ -21,7 +21,7 @@ unicode-width = "0.2"
 
 # Rich output library (optional)
 # Uses git until published to crates.io
-rich_rust = { version = "0.2.0", optional = true }
+rich_rust = { version = "0.2.3", optional = true }
 
 [features]
 default = ["rich"]
@@ -32,7 +32,7 @@ full = ["rich", "rich_rust/full"]
 # For testing
 serial_test = "4.0.1"
 proptest = "1"
-insta = { version = "1.46", features = ["redactions"] }
+insta = { version = "1.48", features = ["redactions"] }
 
 [lints]
 workspace = true

@@ -8,6 +8,35 @@ Commit links point to `https://github.com/Dicklesworthstone/fastapi_rust/commit/
 
 ---
 
+## [v0.4.0] -- 2026-08-20
+
+**Asupersync 0.4 runtime release.** The whole workspace moves from the
+asupersync 0.3.x line to `asupersync ^0.4.9`. Because `asupersync::Cx` and
+friends are part of fastapi's public API, this is a semver-minor (pre-1.0
+breaking) bump: consumers must be on the asupersync 0.4.x line. This is what
+lets fastapi-rust share a single runtime with `fsqlite` 0.3.x and
+`sqlmodel` 0.4.x in one dependency graph.
+
+### Changed
+
+- **asupersync 0.3.9 -> 0.4.9** (workspace dependency). No source changes were
+  required; the 0.4.0 break (capability-threaded tracked session channels) does
+  not touch any surface fastapi uses.
+- Third-party refresh: `rich_rust` 0.2.3, `regex` 1.13, `insta` 1.48, plus a
+  full `Cargo.lock` refresh.
+- Lint config: allow the new nightly-2026-08-19 `clippy::assert_is_empty`
+  lint workspace-wide (its suggested `assert_eq!(v, [] as [T; 0])` form is less
+  readable in tests); the `-D warnings` gate stays green on current nightly.
+
+### Since v0.3.1 (previously unreleased on `main`)
+
+- Rate-limit middleware bounds key cardinality ([`a8976e8`](https://github.com/Dicklesworthstone/fastapi_rust/commit/a8976e8)).
+- Request timeout is enforced by racing the handler at the deadline ([`fce7428`](https://github.com/Dicklesworthstone/fastapi_rust/commit/fce7428)).
+- HTTP/2: correct SETTINGS wire identifiers; tests attach the runtime reactor ([`194acca`](https://github.com/Dicklesworthstone/fastapi_rust/commit/194acca), [`dba3890`](https://github.com/Dicklesworthstone/fastapi_rust/commit/dba3890)).
+- Nightly clippy fallout cleaned so the `-D warnings` gate stays green ([`eda766f`](https://github.com/Dicklesworthstone/fastapi_rust/commit/eda766f)).
+
+---
+
 ## [Unreleased] (after v0.2.0)
 
 > Commits on `main` since the v0.2.0 tag (`1170506`), as of 2026-03-21.

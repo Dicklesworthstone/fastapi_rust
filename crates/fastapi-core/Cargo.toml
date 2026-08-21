@@ -23,7 +23,7 @@ futures-executor = "0.3"
 getrandom = "0.4"
 
 # Optional regex support for testing assertions
-regex = { version = "1.12", optional = true }
+regex = { version = "1.13", optional = true }
 
 # Optional gzip backend for the compression middleware (gated on the `compression` feature).
 flate2 = { version = "1", optional = true }
