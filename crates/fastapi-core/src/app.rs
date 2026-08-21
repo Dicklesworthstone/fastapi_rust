@@ -881,8 +881,10 @@ impl AppBuilder {
     ///
     /// Updates [`AppConfig::name`] and, when OpenAPI is enabled via
     /// [`AppBuilder::openapi`] or [`AppBuilder::docs`], the `info.title` of the
-    /// generated specification. Values set here take precedence over the same
-    /// fields on the [`OpenApiConfig`] passed to [`AppBuilder::openapi`].
+    /// generated specification. Values set here are authoritative regardless of
+    /// call order: they take precedence over [`AppConfig::name`] from a later
+    /// [`AppBuilder::config`] and over the same fields on the [`OpenApiConfig`]
+    /// passed to [`AppBuilder::openapi`].
     #[must_use]
     pub fn title(mut self, title: impl Into<String>) -> Self {
         let title = title.into();
@@ -1272,15 +1274,23 @@ impl AppBuilder {
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> App {
-        // Builder-level API metadata wins over the OpenApiConfig's own fields.
-        if let Some(openapi) = self.openapi_config.as_mut() {
-            if let Some(title) = self.api_title.take() {
+        // Builder-level API metadata (`title`/`version`/`description`) is
+        // authoritative regardless of call order: it wins over both a later
+        // `.config(AppConfig)` and the OpenApiConfig's own fields.
+        if let Some(title) = self.api_title.take() {
+            self.config.name.clone_from(&title);
+            if let Some(openapi) = self.openapi_config.as_mut() {
                 openapi.title = title;
             }
-            if let Some(version) = self.api_version.take() {
+        }
+        if let Some(version) = self.api_version.take() {
+            self.config.version.clone_from(&version);
+            if let Some(openapi) = self.openapi_config.as_mut() {
                 openapi.version = version;
             }
-            if let Some(description) = self.api_description.take() {
+        }
+        if let Some(description) = self.api_description.take() {
+            if let Some(openapi) = self.openapi_config.as_mut() {
                 openapi.description = Some(description);
             }
         }
@@ -1935,6 +1945,17 @@ mod tests {
         assert_eq!(app.config().version, "2.3.4");
         // No OpenAPI configured: metadata alone must not enable it.
         assert!(app.openapi_spec().is_none());
+    }
+
+    #[test]
+    fn builder_metadata_wins_over_later_config_call() {
+        let app = App::builder()
+            .title("My API")
+            .version("2.3.4")
+            .config(AppConfig::new().name("other").version("0.0.0"))
+            .build();
+        assert_eq!(app.config().name, "My API");
+        assert_eq!(app.config().version, "2.3.4");
     }
 
     #[test]

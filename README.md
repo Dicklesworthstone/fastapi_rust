@@ -595,16 +595,16 @@ Shutdown propagates through asupersync regions - no orphaned tasks.
 ```rust
 use fastapi_rust::prelude::*;
 
-	let app = App::builder()
-	    // Metadata
-	    .title("My API")
-	    .version("1.0.0")
-	    .description("A sample API built with fastapi_rust")
+    let app = App::builder()
+    // Metadata
+    .title("My API")
+    .version("1.0.0")
+    .description("A sample API built with fastapi_rust")
 
-	    // Routes
-	    .route_entry(get_item_route())
-	    .route_entry(create_item_route())
-	    .route_entry(delete_item_route())
+    // Routes
+    .route_entry(get_item_route())
+    .route_entry(create_item_route())
+        .route_entry(delete_item_route())
 
     // Middleware (order matters)
     .middleware(RequestIdMiddleware::new())
@@ -621,7 +621,7 @@ use fastapi_rust::prelude::*;
 
     // Exception handlers
     .exception_handler(|err: DatabaseError| {
-        HttpError::internal().detail(err.to_string())
+        HttpError::internal().with_detail(err.to_string())
     })
 
     // Lifecycle hooks
