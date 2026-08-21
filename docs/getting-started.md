@@ -4,14 +4,14 @@ This guide walks you through creating your first fastapi_rust application in und
 
 ## Prerequisites
 
-- **Rust 1.85+** (2024 edition)
+- **Rust 1.95+** (2024 edition)
 - **Cargo** (comes with Rust)
 
 Check your Rust version:
 
 ```bash
 rustc --version
-# Should show: rustc 1.85.0 or higher
+# Should show: rustc 1.95.0 or higher
 ```
 
 If you need to update Rust:

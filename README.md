@@ -11,7 +11,7 @@
 *A Rust port inspired by [tiangolo/fastapi](https://github.com/tiangolo/fastapi) (Python), extended with [asupersync](https://github.com/Dicklesworthstone/asupersync) for structured concurrency, zero-copy parsing, and deterministic testing.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-early%20development-yellow.svg)]()
 
 *Type-safe routing | Zero-copy parsing | Structured concurrency | OpenAPI generation*
@@ -31,7 +31,7 @@ serde = { version = "1", features = ["derive"] }
 
 (The crates.io package is `fastapi-rust`; the Rust crate name is `fastapi_rust`.)
 
-<p><em>Requires Rust 1.85+ (2024 edition). Co-developed with <a href="https://github.com/Dicklesworthstone/asupersync">asupersync</a>.</em></p>
+<p><em>Requires Rust 1.95+ (2024 edition). Co-developed with <a href="https://github.com/Dicklesworthstone/asupersync">asupersync</a>.</em></p>
 </div>
 
 ---
@@ -241,7 +241,7 @@ cargo build --release
 
 ### Requirements
 
-- **Rust 1.85+** (2024 edition)
+- **Rust 1.95+** (2024 edition)
 - **[asupersync](https://github.com/Dicklesworthstone/asupersync)** (co-developed runtime)
 
 ---
@@ -666,7 +666,7 @@ Current parity status and the concrete gap list are tracked in:
 ### Non-Negotiables / Constraints
 
 - **Requires asupersync**: no Tokio support (by design).
-- **Rust 1.85+**: uses Rust 2024 edition features.
+- **Rust 1.95+**: the asupersync 0.4 dependency graph (`sysinfo`) needs rustc 1.95; edition 2024.
 - **Early development**: API will change before v1.0.
 
 ---

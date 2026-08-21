@@ -46,12 +46,12 @@ jobs:
 
   # MSRV (Minimum Supported Rust Version) check
   msrv:
-    name: MSRV Check (1.85)
+    name: MSRV Check (1.95)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
