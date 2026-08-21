@@ -6,7 +6,7 @@ This project is a Rust web framework inspired by Python's [FastAPI](https://fast
 
 Commit links point to `https://github.com/Dicklesworthstone/fastapi_rust/commit/<hash>`.
 
-Scope window: first commit (2026-01-17) through v0.4.1 (2026-08-20).
+Scope window: first commit (2026-01-17) through v0.4.2 (2026-08-20).
 
 Sources: git history and tags on `main`, GitHub Releases, and the crates.io
 version list for `fastapi-rust`. Dates are the local commit/tag dates; crates.io
@@ -16,6 +16,7 @@ shows the same publishes in UTC (which can be one day later).
 
 | Version | Date | Git tag | GitHub Release | crates.io | Notes |
 |---------|------|---------|----------------|-----------|-------|
+| 0.4.2 | 2026-08-20 | [v0.4.2](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.2) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.2) | [yes](https://crates.io/crates/fastapi-rust/0.4.2) | real install.sh; stable-safe dependency snippets |
 | 0.4.1 | 2026-08-20 | [v0.4.1](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.1) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.1) | [yes](https://crates.io/crates/fastapi-rust/0.4.1) | builds on stable 1.95; metadata/docs corrections |
 | 0.4.0 | 2026-08-20 | [v0.4.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.0) | [yes](https://crates.io/crates/fastapi-rust/0.4.0) | asupersync ^0.4.9 |
 | 0.3.1 | 2026-07-26 | no | no | [yes](https://crates.io/crates/fastapi-rust/0.3.1) | crates.io only |
@@ -23,6 +24,36 @@ shows the same publishes in UTC (which can be one day later).
 | 0.2.1 | 2026-03-22 | no | no | [yes](https://crates.io/crates/fastapi-rust/0.2.1) | crates.io only |
 | 0.2.0 | 2026-02-15 | [v0.2.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.2.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.2.0) | [yes](https://crates.io/crates/fastapi-rust/0.2.0) | |
 | 0.1.1 / 0.1.0 | 2026-02-05 | no | no | [yes](https://crates.io/crates/fastapi-rust/0.1.1) | initial crates.io publish |
+
+---
+
+## [v0.4.2] -- 2026-08-20
+
+**Real `install.sh` behind the README one-liner.** The "Quick Install"
+`curl | bash` line had pointed at a file that never existed in the repo (HTTP
+404). It now runs a real installer built to the fleet's installer conventions.
+
+### Added
+
+- `install.sh`: toolchain preflight (rustc >= 1.95, `rustup update` / rustup
+  install on request or with `--easy-mode`), crates.io version resolution
+  (sparse index -> GitHub releases -> pinned fallback), `--new NAME` scaffold
+  that compiles, passes its tests, and serves on stable 1.95, and an AI-agent
+  skill (`~/.{claude,codex,gemini,cursor}/skills/fastapi-rust`, release
+  tarball first, inline fallback). Gum/ANSI output, proxy support, atomic
+  lock, `--offline`, `--quiet`, `--no-gum`, `--force`, `--help`; verified
+  under `curl | bash`-style stdin.
+
+### Changed
+
+- README and getting-started dependency snippets now use
+  `asupersync = { version = "0.4", default-features = false }` — with default
+  features asupersync is nightly-only, so the previous snippet could not build
+  on stable even though fastapi-rust 0.4.1 can.
+
+### Representative commits
+
+- see the v0.4.2 tag
 
 ---
 

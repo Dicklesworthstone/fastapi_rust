@@ -25,13 +25,15 @@
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/fastapi_rust/main/install.sh?$(date +%s)" | bash
 ```
 
+Checks your Rust toolchain (>= 1.95, offers rustup if missing), resolves the latest `fastapi-rust` on crates.io, and installs the fastapi_rust skill for Claude Code / Codex / Gemini / Cursor. Add `-s -- --new my_api` to scaffold a ready-to-run project; `--help` lists every flag.
+
 **Or add to your project:**
 
 ```toml
 # Cargo.toml
 [dependencies]
-fastapi-rust = "0.4.1"
-asupersync = "0.4"
+fastapi-rust = "0.4.2"
+asupersync = { version = "0.4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -230,8 +232,8 @@ goal tracked in Beads (see `bd-uz2s`).
 
 ```toml
 [dependencies]
-fastapi-rust = "0.4.1"
-asupersync = "0.4"
+fastapi-rust = "0.4.2"
+asupersync = { version = "0.4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ```
 
