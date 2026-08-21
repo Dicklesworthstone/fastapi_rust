@@ -2,7 +2,7 @@
 
 All notable changes to [fastapi_rust](https://github.com/Dicklesworthstone/fastapi_rust) are documented here.
 
-This project is a Rust web framework inspired by Python's [FastAPI](https://fastapi.tiangolo.com/), built on [asupersync](https://github.com/Dicklesworthstone/asupersync) for structured concurrency. The workspace contains 8 crates: `fastapi` (facade), `fastapi-core`, `fastapi-http`, `fastapi-router`, `fastapi-macros`, `fastapi-openapi`, `fastapi-types`, and `fastapi-output`.
+This project is a Rust web framework inspired by Python's [FastAPI](https://fastapi.tiangolo.com/), built on [asupersync](https://github.com/Dicklesworthstone/asupersync) for structured concurrency. The workspace contains 8 crates: `fastapi-rust` (facade, in `crates/fastapi`), `fastapi-core`, `fastapi-http`, `fastapi-router`, `fastapi-macros`, `fastapi-openapi`, `fastapi-types`, and `fastapi-output`.
 
 Commit links point to `https://github.com/Dicklesworthstone/fastapi_rust/commit/<hash>`.
 
@@ -28,16 +28,37 @@ lets fastapi-rust share a single runtime with `fsqlite` 0.3.x and
   lint workspace-wide (its suggested `assert_eq!(v, [] as [T; 0])` form is less
   readable in tests); the `-D warnings` gate stays green on current nightly.
 
-### Since v0.3.1 (previously unreleased on `main`)
+### Also since 0.3.1
 
-- Rate-limit middleware bounds key cardinality ([`a8976e8`](https://github.com/Dicklesworthstone/fastapi_rust/commit/a8976e8)).
-- Request timeout is enforced by racing the handler at the deadline ([`fce7428`](https://github.com/Dicklesworthstone/fastapi_rust/commit/fce7428)).
-- HTTP/2: correct SETTINGS wire identifiers; tests attach the runtime reactor ([`194acca`](https://github.com/Dicklesworthstone/fastapi_rust/commit/194acca), [`dba3890`](https://github.com/Dicklesworthstone/fastapi_rust/commit/dba3890)).
 - Nightly clippy fallout cleaned so the `-D warnings` gate stays green ([`eda766f`](https://github.com/Dicklesworthstone/fastapi_rust/commit/eda766f)).
+- Workspace/crate pin refreshes and `Cargo.lock` regeneration ([`078c279`](https://github.com/Dicklesworthstone/fastapi_rust/commit/078c279), [`27415d6`](https://github.com/Dicklesworthstone/fastapi_rust/commit/27415d6)).
 
 ---
 
-## [Unreleased] (after v0.2.0)
+## [0.3.1] -- 2026-07-26 (crates.io only; no git tag or GitHub release)
+
+Asupersync 0.3.9 refresh plus the fixes that landed on `main` after v0.3.0
+([`e502149`](https://github.com/Dicklesworthstone/fastapi_rust/commit/e502149)).
+
+- **asupersync 0.3.1 -> 0.3.9**, `syn` 2 -> 3, lockfile refresh ([`4372e5b`](https://github.com/Dicklesworthstone/fastapi_rust/commit/4372e5b)).
+- Rate-limit middleware bounds key cardinality ([`a8976e8`](https://github.com/Dicklesworthstone/fastapi_rust/commit/a8976e8)).
+- Request timeout is enforced by racing the handler at the deadline; timeout made relative ([`fce7428`](https://github.com/Dicklesworthstone/fastapi_rust/commit/fce7428), [`ad2e878`](https://github.com/Dicklesworthstone/fastapi_rust/commit/ad2e878)).
+- HTTP/2: correct SETTINGS wire identifiers; tests attach the runtime reactor ([`194acca`](https://github.com/Dicklesworthstone/fastapi_rust/commit/194acca), [`dba3890`](https://github.com/Dicklesworthstone/fastapi_rust/commit/dba3890)).
+- Concurrent app serve path; test contexts gated behind the `testing` feature ([`95d7a64`](https://github.com/Dicklesworthstone/fastapi_rust/commit/95d7a64), [`d7b2132`](https://github.com/Dicklesworthstone/fastapi_rust/commit/d7b2132)).
+- Cross-platform hardening: OS CSPRNG for salts/CSRF tokens, graceful TCP close, accepted sockets forced to blocking mode on macOS, `flate2` wired into the `compression` feature ([`2cc4675`](https://github.com/Dicklesworthstone/fastapi_rust/commit/2cc4675), [`4d43563`](https://github.com/Dicklesworthstone/fastapi_rust/commit/4d43563), [`85fd035`](https://github.com/Dicklesworthstone/fastapi_rust/commit/85fd035), [`ca6271b`](https://github.com/Dicklesworthstone/fastapi_rust/commit/ca6271b)).
+- Security: cargo-audit findings resolved and stale ignores dropped ([`d9438e6`](https://github.com/Dicklesworthstone/fastapi_rust/commit/d9438e6), [`b072ef8`](https://github.com/Dicklesworthstone/fastapi_rust/commit/b072ef8)).
+
+---
+
+## [v0.3.0] -- 2026-04-21
+
+- **asupersync 0.2.9 -> 0.3.0** (crates.io) and release of the whole workspace at 0.3.0 ([`785f1be`](https://github.com/Dicklesworthstone/fastapi_rust/commit/785f1be), [`9a948dd`](https://github.com/Dicklesworthstone/fastapi_rust/commit/9a948dd)).
+- `.cargo/config.toml` untracked so CI release builds resolve from the registry ([`7adff35`](https://github.com/Dicklesworthstone/fastapi_rust/commit/7adff35)).
+- 0.2.1 (2026-03-22, crates.io only) published against asupersync 0.2.9 ([`1755f15`](https://github.com/Dicklesworthstone/fastapi_rust/commit/1755f15)); the server-lifecycle hardening below shipped in it.
+
+---
+
+## Development after v0.2.0 (shipped in 0.2.1 / v0.3.0)
 
 > Commits on `main` since the v0.2.0 tag (`1170506`), as of 2026-03-21.
 > HEAD: [`e9bccd3`](https://github.com/Dicklesworthstone/fastapi_rust/commit/e9bccd35309c001c786667fa56fe81ec3a399eca) (13 commits after v0.2.0)

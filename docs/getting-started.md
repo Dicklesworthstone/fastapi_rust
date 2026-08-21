@@ -40,13 +40,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-fastapi = { git = "https://github.com/Dicklesworthstone/fastapi_rust.git" }
+fastapi-rust = "0.4.0"
+asupersync = "0.4"
+serde = { version = "1", features = ["derive"] }
 ```
 
-> **Note**: Once published to crates.io, you'll be able to use:
-> ```toml
-> fastapi = "0.1"
-> ```
+> **Note**: the crates.io package is `fastapi-rust`; in code you import it as
+> `fastapi_rust` (e.g. `use fastapi_rust::prelude::*;`).
 
 ## Your First Handler
 
@@ -55,7 +55,7 @@ Replace the contents of `src/main.rs`:
 ```rust
 //! My First fastapi_rust API
 
-use fastapi::core::{
+use fastapi_rust::core::{
     App,
     Request,
     RequestContext,
@@ -150,7 +150,7 @@ let app = App::builder()
 Apply middleware to your application:
 
 ```rust
-use fastapi::core::{App, RequestIdMiddleware, SecurityHeaders};
+use fastapi_rust::core::{App, RequestIdMiddleware, SecurityHeaders};
 
 let app = App::builder()
     // Add request ID to every request
@@ -166,7 +166,7 @@ let app = App::builder()
 Configure your application:
 
 ```rust
-use fastapi::core::{App, AppConfig};
+use fastapi_rust::core::{App, AppConfig};
 
 let config = AppConfig::new()
     .name("My API")
@@ -189,7 +189,7 @@ fastapi_rust includes a powerful `TestClient` for testing:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fastapi::core::TestClient;
+    use fastapi_rust::core::TestClient;
 
     #[test]
     fn test_hello_endpoint() {

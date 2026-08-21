@@ -21,19 +21,15 @@
 <div align="center">
 <h3>Quick Install</h3>
 
-```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/fastapi_rust/main/install.sh?$(date +%s)" | bash
-```
-
-**Or add to your project:**
-
 ```toml
 # Cargo.toml
 [dependencies]
-fastapi = { git = "https://github.com/Dicklesworthstone/fastapi_rust.git" }
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync.git" }
+fastapi-rust = "0.4.0"
+asupersync = "0.4"
 serde = { version = "1", features = ["derive"] }
 ```
+
+(The crates.io package is `fastapi-rust`; the Rust crate name is `fastapi_rust`.)
 
 <p><em>Requires Rust 1.85+ (2024 edition). Co-developed with <a href="https://github.com/Dicklesworthstone/asupersync">asupersync</a>.</em></p>
 </div>
@@ -228,8 +224,8 @@ goal tracked in Beads (see `bd-uz2s`).
 
 ```toml
 [dependencies]
-fastapi_rust = { package = "fastapi-rust", version = "0.1.2" }
-asupersync = "0.1.1"
+fastapi-rust = "0.4.0"
+asupersync = "0.4"
 serde = { version = "1", features = ["derive"] }
 ```
 

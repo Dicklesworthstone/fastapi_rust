@@ -20,7 +20,6 @@ regex = "1"
 unicode-width = "0.2"
 
 # Rich output library (optional)
-# Uses git until published to crates.io
 rich_rust = { version = "0.2.3", optional = true }
 
 [features]
