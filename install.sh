@@ -23,11 +23,11 @@
 #   --dir DIR          Parent directory for --new (default: current directory)
 #   --version X.Y.Z    Pin the fastapi-rust crate version (default: latest on crates.io)
 #   --build            After scaffolding, run `cargo build` to prime the cache
-#   --easy-mode        Install rustup non-interactively if no toolchain is found
+#   --easy-mode        Install/upgrade Rust via rustup non-interactively when needed
 #   --skill-only       Only install the AI-agent skill; skip toolchain/scaffold
 #   --no-skill         Skip AI-agent skill installation
 #   --offline          Skip network lookups (needs --version, or uses the pinned fallback)
-#   --force            Overwrite an existing scaffold directory / skill
+#   --force            Overwrite an existing scaffold's Cargo.toml/src/main.rs and the skill
 #   --quiet            Suppress non-error output
 #   --no-gum           Disable gum formatting even if available
 #   -h, --help         Show this help
@@ -150,7 +150,27 @@ draw_box() {
 }
 
 usage() {
-  sed -n '/^# Options:/,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+  cat <<'USAGE'
+fastapi_rust installer — library bootstrapper (there is no binary to install)
+
+Usage:
+  curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/fastapi_rust/main/install.sh | bash -s -- [options]
+  bash install.sh [options]
+
+Options:
+  --new NAME         Scaffold a new fastapi_rust project in ./NAME (or --dir)
+  --dir DIR          Parent directory for --new (default: current directory)
+  --version X.Y.Z    Pin the fastapi-rust crate version (default: latest on crates.io)
+  --build            After scaffolding, run `cargo build` to prime the cache
+  --easy-mode        Install/upgrade Rust via rustup non-interactively when needed
+  --skill-only       Only install the AI-agent skill; skip toolchain/scaffold
+  --no-skill         Skip AI-agent skill installation
+  --offline          Skip network lookups (needs --version, or uses the pinned fallback)
+  --force            Overwrite an existing scaffold's Cargo.toml/src/main.rs and the skill
+  --quiet            Suppress non-error output
+  --no-gum           Disable gum formatting even if available
+  -h, --help         Show this help
+USAGE
 }
 
 # ── Args ─────────────────────────────────────────────────────────────────────
@@ -286,7 +306,7 @@ check_toolchain() {
   RUSTC_VERSION=$(rustc_version || true)
   if [ -n "$RUSTC_VERSION" ]; then
     local numeric="${RUSTC_VERSION%%-*}"
-    if version_ge "$numeric" "$MSRV" || [[ "$RUSTC_VERSION" == *nightly* ]]; then
+    if version_ge "$numeric" "$MSRV"; then
       TOOLCHAIN_STATUS="ok"
       ok "rustc $RUSTC_VERSION (MSRV $MSRV satisfied)"
       return 0
@@ -366,7 +386,12 @@ scaffold_project() {
     fi
     warn "Overwriting Cargo.toml and src/main.rs in existing $PROJECT_PATH"
   fi
-  check_disk_space "$(dirname "$PROJECT_PATH")" $((200 * 1024))
+  # A bare scaffold is tiny; a first `cargo build` of the dependency graph is not.
+  if [ "$DO_BUILD" -eq 1 ]; then
+    check_disk_space "$(dirname "$PROJECT_PATH")" $((1536 * 1024))
+  else
+    check_disk_space "$(dirname "$PROJECT_PATH")" $((10 * 1024))
+  fi
   mkdir -p "$PROJECT_PATH/src"
   local crate_ident="${NEW_NAME//-/_}"
 
@@ -465,8 +490,10 @@ EOF
 
   if [ "$DO_BUILD" -eq 1 ]; then
     [ "$OFFLINE" -eq 1 ] && warn "--build with --offline relies on a warm cargo registry cache"
-    if run_with_spinner "Building ${NEW_NAME} (first build compiles the dependency graph)" \
-        bash -c "cd '$PROJECT_PATH' && cargo build $([ "$QUIET" -eq 1 ] && echo -q) 2>&1 | tail -n 20"; then
+    info "Building ${NEW_NAME} (the first build compiles the whole dependency graph; cargo shows progress)"
+    local -a quiet_flag=()
+    [ "$QUIET" -eq 1 ] && quiet_flag=(-q)
+    if cargo build --manifest-path "$PROJECT_PATH/Cargo.toml" "${quiet_flag[@]}"; then
       ok "cargo build succeeded"
     else
       SCAFFOLD_STATUS="failed"
@@ -516,7 +543,10 @@ Installed by the fastapi_rust installer for \`fastapi-rust\` ${VERSION} (MSRV ${
 use fastapi_rust::prelude::*;
 
 #[get("/items/{id}")]
-async fn get_item(cx: &Cx, id: Path<i64>) -> Json<Item> { cx.checkpoint()?; /* ... */ }
+async fn get_item(cx: &Cx, id: Path<i64>) -> Result<Json<Item>, HttpError> {
+    cx.checkpoint()?;            // cancellation-safe yield point
+    Ok(Json(load_item(id.0)?))
+}
 
 let app = App::builder()
     .title("My API").version("1.0.0")
@@ -563,7 +593,9 @@ install_skill() {
         "https://github.com/${OWNER}/${REPO}/releases/download/v${VERSION}/fastapi-rust-skill.tar.gz" -o "$tarball" 2>/dev/null \
        && tar -tzf "$tarball" >/dev/null 2>&1; then
       mkdir -p "$TEMP_DIR/skill" && tar -xzf "$tarball" -C "$TEMP_DIR/skill"
-      skill_src=$(find "$TEMP_DIR/skill" -name SKILL.md -maxdepth 3 | head -n1 | xargs -r dirname)
+      local skill_md
+      skill_md=$(find "$TEMP_DIR/skill" -maxdepth 3 -name SKILL.md | head -n1)
+      [ -n "$skill_md" ] && skill_src=$(dirname "$skill_md")
     fi
   fi
 
@@ -594,7 +626,8 @@ show_summary() {
   lines+=("")
   case "$TOOLCHAIN_STATUS" in
     ok)        lines+=("Toolchain:  rustc ${RUSTC_VERSION} (>= ${MSRV})") ;;
-    installed) lines+=("Toolchain:  installed rustc ${RUSTC_VERSION} via rustup") ;;
+    installed) lines+=("Toolchain:  installed rustc ${RUSTC_VERSION} via rustup")
+               lines+=("            new shells: source \"\$HOME/.cargo/env\" (PATH was not modified)") ;;
     "")        lines+=("Toolchain:  not checked (--skill-only)") ;;
   esac
   lines+=("Crate:      fastapi-rust ${VERSION} (${VERSION_SOURCE})")

@@ -53,7 +53,8 @@ shows the same publishes in UTC (which can be one day later).
 
 ### Representative commits
 
-- see the v0.4.2 tag
+- [`74bda94`](https://github.com/Dicklesworthstone/fastapi_rust/commit/74bda94) -- install.sh + stable-safe snippets, 0.4.2 bump
+- [`99b0160`](https://github.com/Dicklesworthstone/fastapi_rust/commit/99b0160) -- README: Cargo dependency first, installer as an optional subsection (post-tag, docs only)
 
 ---
 
