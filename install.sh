@@ -191,6 +191,8 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
+# Never die silently: name the line when `set -e` trips on an unhandled failure.
+trap 'err "Installer failed unexpectedly at line $LINENO (re-run with: bash -x install.sh ...)"' ERR
 
 acquire_lock() {
   if mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -265,6 +267,13 @@ check_network() {
 
 RUSTC_VERSION=""
 TOOLCHAIN_STATUS="" # ok|installed|missing|too-old
+# Print the rustc semver (e.g. 1.95.0 or 1.100.0-nightly); empty/non-zero if unusable.
+rustc_version() {
+  command -v rustc &>/dev/null || return 1
+  local out
+  out=$(timeout 15 rustc --version 2>/dev/null) || out=$(rustc --version 2>/dev/null) || return 1
+  printf '%s' "$out" | awk '{print $2}'
+}
 check_toolchain() {
   if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
     # rustup may be installed but not on PATH in this shell (fresh install).
@@ -272,8 +281,10 @@ check_toolchain() {
       export PATH="$HOME/.cargo/bin:$PATH"
     fi
   fi
-  if command -v rustc &>/dev/null; then
-    RUSTC_VERSION=$(rustc --version 2>/dev/null | awk '{print $2}')
+  # `rustc` may exist only as a rustup proxy with no toolchain installed, in
+  # which case `rustc --version` fails; treat that the same as "no toolchain".
+  RUSTC_VERSION=$(rustc_version || true)
+  if [ -n "$RUSTC_VERSION" ]; then
     local numeric="${RUSTC_VERSION%%-*}"
     if version_ge "$numeric" "$MSRV" || [[ "$RUSTC_VERSION" == *nightly* ]]; then
       TOOLCHAIN_STATUS="ok"
@@ -285,7 +296,7 @@ check_toolchain() {
     if command -v rustup &>/dev/null; then
       if [ "$EASY" -eq 1 ] || ask_yn "Run 'rustup update stable' now? [y/N]" "n"; then
         run_with_spinner "Updating stable toolchain via rustup" rustup update stable
-        RUSTC_VERSION=$(rustc --version 2>/dev/null | awk '{print $2}')
+        RUSTC_VERSION=$(rustc_version || true)
         TOOLCHAIN_STATUS="ok"
         ok "rustc $RUSTC_VERSION"
         return 0
@@ -303,8 +314,8 @@ check_toolchain() {
       || die "Failed to download rustup-init"
     run_with_spinner "Installing Rust (stable) via rustup" sh "$rustup_init" -y --profile minimal --default-toolchain stable --no-modify-path
     export PATH="$HOME/.cargo/bin:$PATH"
-    command -v rustc &>/dev/null || die "rustup finished but rustc is not on PATH; open a new shell and re-run."
-    RUSTC_VERSION=$(rustc --version | awk '{print $2}')
+    RUSTC_VERSION=$(rustc_version || true)
+    [ -n "$RUSTC_VERSION" ] || die "rustup finished but rustc is not usable yet; open a new shell and re-run."
     TOOLCHAIN_STATUS="installed"
     ok "Installed rustc $RUSTC_VERSION"
     return 0
