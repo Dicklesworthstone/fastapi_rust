@@ -531,7 +531,7 @@ Installed by the fastapi_rust installer for \`fastapi-rust\` ${VERSION} (MSRV ${
 ## Orientation
 
 - Package \`fastapi-rust\`; crate/import name \`fastapi_rust\` (\`use fastapi_rust::prelude::*;\`).
-- Runtime is **asupersync**, never Tokio. Handlers receive \`&Cx\`; call \`cx.checkpoint()?\` in loops and long work.
+- Runtime is **asupersync**, never Tokio. Handlers receive \`&Cx\`; call \`cx.checkpoint()\` in loops and long work (it returns \`Result<(), asupersync::Error>\`).
 - Submodules: \`fastapi_rust::core\` (App, Request, Response, middleware, extractors, TestClient),
   \`fastapi_rust::server\` (serve, ServerConfig, graceful shutdown), \`fastapi_rust::openapi\`,
   \`fastapi_rust::macros\` (\`#[get]\`, \`#[post]\`, \`JsonSchema\`, \`Validate\`).
@@ -542,10 +542,17 @@ Installed by the fastapi_rust installer for \`fastapi-rust\` ${VERSION} (MSRV ${
 \`\`\`rust
 use fastapi_rust::prelude::*;
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Item { id: i64, name: String }
+
 #[get("/items/{id}")]
-async fn get_item(cx: &Cx, id: Path<i64>) -> Result<Json<Item>, HttpError> {
-    cx.checkpoint()?;            // cancellation-safe yield point
-    Ok(Json(load_item(id.0)?))
+async fn get_item(cx: &Cx, id: Path<i64>) -> Json<Item> {
+    // cx.checkpoint() -> Result<(), asupersync::Error>. Map it yourself: there is
+    // no From<asupersync::Error> for HttpError, so a bare \`?\` will not compile.
+    if cx.checkpoint().is_err() {
+        return Json(Item { id: id.0, name: "cancelled".into() });
+    }
+    Json(Item { id: id.0, name: "Widget".into() })
 }
 
 let app = App::builder()

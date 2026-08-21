@@ -243,6 +243,18 @@ pub use fastapi_macros as macros;
 pub use fastapi_openapi as openapi;
 pub use fastapi_router as router;
 
+// The attribute/derive macros (`#[get]`, `JsonSchema`, `Validate`, ...) expand to
+// unanchored `fastapi_core::` / `fastapi_router::` / `fastapi_openapi::` paths, so
+// those crate names must be resolvable at the call site. Consumers that depend only
+// on `fastapi-rust` get them from here (the `prelude` glob-imports them); consumers
+// that depend on the component crates directly already have them in scope.
+#[doc(hidden)]
+pub use fastapi_core;
+#[doc(hidden)]
+pub use fastapi_openapi;
+#[doc(hidden)]
+pub use fastapi_router;
+
 // Re-export commonly used types
 pub use fastapi_core::{
     App, AppBuilder, AppConfig, Cors, CorsConfig, Cx, DefaultConfig, DefaultDependencyConfig,
@@ -400,6 +412,9 @@ pub mod prelude {
         put,
         serve,
     };
+    // Crate names the proc-macro expansions refer to; see the note at the crate root.
+    #[doc(hidden)]
+    pub use crate::{fastapi_core, fastapi_openapi, fastapi_router};
     pub use serde::{Deserialize, Serialize};
 }
 

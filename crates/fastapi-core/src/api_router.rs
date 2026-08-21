@@ -480,8 +480,7 @@ impl APIRouter {
         Fut: Future<Output = Response> + Send + 'static,
     {
         let boxed: BoxHandler = Box::new(move |ctx, req| {
-            let fut = handler(ctx, req);
-            Box::pin(fut)
+            Box::pin(handler(ctx, req)) as crate::middleware::BoxFuture<'_, Response>
         });
         self.routes.push(RouterRoute {
             method,
@@ -752,14 +751,14 @@ impl APIRouter {
                 // Create a wrapper handler that runs dependencies first
                 if deps.is_empty() {
                     // No dependencies, use handler directly
-                    RouteEntry::new(route.method, full_path, move |ctx, req| {
+                    RouteEntry::new_boxed(route.method, full_path, move |ctx, req| {
                         let handler = Arc::clone(&handler);
                         (handler)(ctx, req)
                     })
                 } else {
                     // Wrap handler to run dependencies first
                     let deps = Arc::new(deps);
-                    RouteEntry::new(route.method, full_path, move |ctx, req| {
+                    RouteEntry::new_boxed(route.method, full_path, move |ctx, req| {
                         let handler = Arc::clone(&handler);
                         let deps = Arc::clone(&deps);
                         Box::pin(async move {

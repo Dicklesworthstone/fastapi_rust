@@ -709,6 +709,19 @@ impl IntoResponse for std::convert::Infallible {
     }
 }
 
+/// `Json<T>` doubles as a response type, mirroring FastAPI returning a model:
+/// `200 OK` with an `application/json` body. A serialization failure is a
+/// server bug, so it maps to a `500` via [`crate::error::HttpError::internal`]
+/// rather than panicking inside a handler.
+impl<T: Serialize> IntoResponse for crate::extract::Json<T> {
+    fn into_response(self) -> Response {
+        match Response::json(&self.0) {
+            Ok(response) => response,
+            Err(_) => crate::error::HttpError::internal().into_response(),
+        }
+    }
+}
+
 // =============================================================================
 // Response Type Checking (OpenAPI)
 // =============================================================================
@@ -2707,6 +2720,45 @@ mod tests {
         } else {
             panic!("Expected Bytes body");
         }
+    }
+
+    #[test]
+    fn json_into_response_is_200_application_json_with_serialized_body() {
+        #[derive(serde::Serialize)]
+        struct Item {
+            id: i64,
+            name: &'static str,
+        }
+        let response = crate::extract::Json(Item {
+            id: 7,
+            name: "Widget",
+        })
+        .into_response();
+
+        assert_eq!(response.status().as_u16(), 200);
+        let content_type = response
+            .headers()
+            .iter()
+            .find(|(name, _)| name == "content-type")
+            .map(|(_, value)| String::from_utf8_lossy(value).to_string());
+        assert_eq!(content_type, Some("application/json".to_string()));
+        if let ResponseBody::Bytes(bytes) = response.body_ref() {
+            assert_eq!(bytes, br#"{"id":7,"name":"Widget"}"#);
+        } else {
+            panic!("Expected Bytes body");
+        }
+    }
+
+    #[test]
+    fn json_into_response_maps_serialization_failure_to_500() {
+        struct Unserializable;
+        impl serde::Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("boom"))
+            }
+        }
+        let response = crate::extract::Json(Unserializable).into_response();
+        assert_eq!(response.status().as_u16(), 500);
     }
 
     #[test]

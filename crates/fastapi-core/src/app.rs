@@ -185,14 +185,12 @@ impl StartupOutcome {
 
 /// A boxed handler function.
 ///
-/// Note: The lifetime parameter allows the future to borrow from the context/request.
+/// The returned future may borrow the context and request for the duration of
+/// the call (`BoxFuture<'a, _>`), which is what extractor-based handlers and
+/// `#[get]`-style proc-macro routes need: they `await` `FromRequest` on `req`
+/// and hand `ctx.cx()` to the handler.
 pub type BoxHandler = Box<
-    dyn Fn(
-            &RequestContext,
-            &mut Request,
-        ) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>>
-        + Send
-        + Sync,
+    dyn for<'a> Fn(&'a RequestContext, &'a mut Request) -> BoxFuture<'a, Response> + Send + Sync,
 >;
 
 /// A boxed websocket handler function.
@@ -224,20 +222,37 @@ pub struct RouteEntry {
 }
 
 impl RouteEntry {
-    /// Creates a new route entry.
+    /// Creates a new route entry from a handler whose future is `'static`
+    /// (it does not borrow the context or request beyond the call).
     ///
-    /// Note: The handler's returned future must be `'static`, meaning it should not
-    /// hold references to the context or request beyond the call. If you need to
-    /// borrow from them, clone the data you need first.
+    /// Plain `fn(&RequestContext, &mut Request) -> Ready<Response>` handlers and
+    /// `async fn` handlers that clone what they need fit here. Handlers that must
+    /// borrow `ctx`/`req` across an `.await` use [`RouteEntry::new_boxed`].
     pub fn new<H, Fut>(method: Method, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        let handler: BoxHandler = Box::new(move |ctx, req| {
-            let fut = handler(ctx, req);
-            Box::pin(fut)
-        });
+        Self::new_boxed(method, path, move |ctx, req| {
+            Box::pin(handler(ctx, req)) as BoxFuture<'_, Response>
+        })
+    }
+
+    /// Creates a new route entry from a handler that returns a [`BoxFuture`]
+    /// borrowing the context and request for the call's duration.
+    ///
+    /// This is the general form: extractor-based handlers `await` `FromRequest`
+    /// on `req` and pass `ctx.cx()` through, so their futures are tied to the
+    /// call. `#[get]`-style proc-macro routes are built this way via
+    /// [`RouteEntry::from_route`].
+    pub fn new_boxed<H>(method: Method, path: impl Into<String>, handler: H) -> Self
+    where
+        H: for<'a> Fn(&'a RequestContext, &'a mut Request) -> BoxFuture<'a, Response>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let handler: BoxHandler = Box::new(handler);
         Self {
             method,
             path: path.into(),
@@ -248,16 +263,19 @@ impl RouteEntry {
 
     /// Creates a new route entry from a `fastapi_router::Route` metadata object.
     ///
-    /// This is the preferred constructor for proc-macro generated routes, since it preserves
-    /// OpenAPI metadata (operation_id, tags, request body, etc).
-    pub fn from_route<H, Fut>(route: fastapi_router::Route, handler: H) -> Self
+    /// This is the constructor proc-macro generated routes use, since it preserves
+    /// OpenAPI metadata (operation_id, tags, request body, etc). The handler has
+    /// the borrowing form of [`RouteEntry::new_boxed`].
+    pub fn from_route<H>(route: fastapi_router::Route, handler: H) -> Self
     where
-        H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        H: for<'a> Fn(&'a RequestContext, &'a mut Request) -> BoxFuture<'a, Response>
+            + Send
+            + Sync
+            + 'static,
     {
         let method = route.method;
         let path = route.path.clone();
-        let mut entry = Self::new(method, path, handler);
+        let mut entry = Self::new_boxed(method, path, handler);
         entry.meta = Some(route);
         entry
     }
@@ -824,6 +842,11 @@ pub struct AppBuilder {
     async_shutdown_hooks: Vec<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
     openapi_config: Option<OpenApiConfig>,
     docs_config: Option<crate::docs::DocsConfig>,
+    /// API metadata set via [`AppBuilder::title`] / [`AppBuilder::version`] /
+    /// [`AppBuilder::description`]; applied to the OpenAPI info at build time.
+    api_title: Option<String>,
+    api_version: Option<String>,
+    api_description: Option<String>,
 }
 
 impl Default for AppBuilder {
@@ -840,6 +863,9 @@ impl Default for AppBuilder {
             async_shutdown_hooks: Vec::new(),
             openapi_config: None,
             docs_config: None,
+            api_title: None,
+            api_version: None,
+            api_description: None,
         }
     }
 }
@@ -849,6 +875,41 @@ impl AppBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the API title (FastAPI's `FastAPI(title=...)`).
+    ///
+    /// Updates [`AppConfig::name`] and, when OpenAPI is enabled via
+    /// [`AppBuilder::openapi`] or [`AppBuilder::docs`], the `info.title` of the
+    /// generated specification. Values set here take precedence over the same
+    /// fields on the [`OpenApiConfig`] passed to [`AppBuilder::openapi`].
+    #[must_use]
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        let title = title.into();
+        self.config.name.clone_from(&title);
+        self.api_title = Some(title);
+        self
+    }
+
+    /// Sets the API version (FastAPI's `FastAPI(version=...)`).
+    ///
+    /// Updates [`AppConfig::version`] and the OpenAPI `info.version` when OpenAPI
+    /// is enabled; see [`AppBuilder::title`] for precedence.
+    #[must_use]
+    pub fn version(mut self, version: impl Into<String>) -> Self {
+        let version = version.into();
+        self.config.version.clone_from(&version);
+        self.api_version = Some(version);
+        self
+    }
+
+    /// Sets the API description (FastAPI's `FastAPI(description=...)`), used as
+    /// the OpenAPI `info.description` when OpenAPI is enabled; see
+    /// [`AppBuilder::title`] for precedence.
+    #[must_use]
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.api_description = Some(description.into());
+        self
     }
 
     /// Sets the application configuration.
@@ -1211,6 +1272,19 @@ impl AppBuilder {
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> App {
+        // Builder-level API metadata wins over the OpenApiConfig's own fields.
+        if let Some(openapi) = self.openapi_config.as_mut() {
+            if let Some(title) = self.api_title.take() {
+                openapi.title = title;
+            }
+            if let Some(version) = self.api_version.take() {
+                openapi.version = version;
+            }
+            if let Some(description) = self.api_description.take() {
+                openapi.description = Some(description);
+            }
+        }
+
         // Generate OpenAPI spec if configured
         let (openapi_spec, openapi_path) = if let Some(ref openapi_config) = self.openapi_config {
             if openapi_config.enabled {
@@ -1852,6 +1926,30 @@ mod tests {
     fn test_context() -> RequestContext {
         let cx = asupersync::Cx::for_testing();
         RequestContext::new(cx, 1)
+    }
+
+    #[test]
+    fn builder_title_and_version_set_app_config() {
+        let app = App::builder().title("My API").version("2.3.4").build();
+        assert_eq!(app.config().name, "My API");
+        assert_eq!(app.config().version, "2.3.4");
+        // No OpenAPI configured: metadata alone must not enable it.
+        assert!(app.openapi_spec().is_none());
+    }
+
+    #[test]
+    fn builder_metadata_populates_openapi_info_and_wins_over_openapi_config() {
+        let app = App::builder()
+            .openapi(OpenApiConfig::new().title("ignored").version("0.0.0"))
+            .title("My API")
+            .version("2.3.4")
+            .description("A sample API")
+            .build();
+        let spec: serde_json::Value =
+            serde_json::from_str(app.openapi_spec().expect("openapi enabled")).unwrap();
+        assert_eq!(spec["info"]["title"], "My API");
+        assert_eq!(spec["info"]["version"], "2.3.4");
+        assert_eq!(spec["info"]["description"], "A sample API");
     }
 
     #[test]
