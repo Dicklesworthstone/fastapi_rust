@@ -28,6 +28,18 @@ shows the same publishes in UTC (which can be one day later).
 
 ---
 
+## [Unreleased]
+
+- `AppBuilder::title` / `version` are now authoritative regardless of call
+  order: they also override `AppConfig::name` / `version` from a later
+  `.config(...)` call, matching the documented precedence over `OpenApiConfig`
+  (test: `builder_metadata_wins_over_later_config_call`).
+- README: `HttpError::internal().detail(..)` in the Configuration sketch
+  corrected to `.with_detail(..)`; the getting-started example was compiled and
+  run from the registry on stable 1.95 and matches its documented output.
+
+---
+
 ## [v0.4.3] -- 2026-08-20
 
 **The README's headline example now compiles and runs.** A fresh-eyes pass
