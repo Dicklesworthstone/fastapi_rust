@@ -19,15 +19,7 @@
 </div>
 
 <div align="center">
-<h3>Quick Install</h3>
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/fastapi_rust/main/install.sh?$(date +%s)" | bash
-```
-
-Checks your Rust toolchain (>= 1.95, offers rustup if missing), resolves the latest `fastapi-rust` on crates.io, and installs the fastapi_rust skill for Claude Code / Codex / Gemini / Cursor. Add `-s -- --new my_api` to scaffold a ready-to-run project; `--help` lists every flag.
-
-**Or add to your project:**
+<h3>Add to your project</h3>
 
 ```toml
 # Cargo.toml
@@ -246,6 +238,30 @@ git clone https://github.com/Dicklesworthstone/fastapi_rust.git
 cd fastapi_rust
 cargo build --release
 ```
+
+### Optional: project bootstrapper (`install.sh`)
+
+fastapi_rust is a library, so there is nothing to "install" beyond the Cargo
+dependency above — most users should stop there. For a brand-new machine or a
+brand-new project, `install.sh` bundles the first-run chores:
+
+- checks that `rustc` meets the 1.95 MSRV (offers `rustup update` / a rustup
+  install if missing; `--easy-mode` does it non-interactively),
+- resolves the latest `fastapi-rust` on crates.io,
+- `--new NAME` scaffolds a project with a working server, tests, and the
+  stable-safe dependency set, and
+- installs a `fastapi-rust` skill for Claude Code / Codex / Gemini / Cursor if
+  those agents are present (`--no-skill` to skip).
+
+```bash
+# inspect flags
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/fastapi_rust/main/install.sh?$(date +%s)" | bash -s -- --help
+# scaffold ./my_api and build it
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/fastapi_rust/main/install.sh?$(date +%s)" | bash -s -- --new my_api --build
+```
+
+It never touches your shell rc files or `PATH`; undo by deleting the project
+directory and `~/.{claude,codex,gemini,cursor}/skills/fastapi-rust`.
 
 ### Requirements
 
