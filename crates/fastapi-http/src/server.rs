@@ -508,12 +508,12 @@ fn extract_effective_host(
     request: &Request,
     config: &ServerConfig,
 ) -> Result<String, HostValidationError> {
-    if config.trust_x_forwarded_host {
-        if let Some(value) = header_value(request, "x-forwarded-host")? {
-            let forwarded = extract_first_list_value(&value)
-                .ok_or_else(|| HostValidationError::invalid("empty X-Forwarded-Host value"))?;
-            return Ok(forwarded.to_string());
-        }
+    if config.trust_x_forwarded_host
+        && let Some(value) = header_value(request, "x-forwarded-host")?
+    {
+        let forwarded = extract_first_list_value(&value)
+            .ok_or_else(|| HostValidationError::invalid("empty X-Forwarded-Host value"))?;
+        return Ok(forwarded.to_string());
     }
 
     match header_value(request, "host")? {

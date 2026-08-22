@@ -290,10 +290,10 @@ impl TestReportDisplay {
             lines.push(self.render_module_header(&module.name));
             for case in &module.cases {
                 lines.push(self.render_case_line(case));
-                if case.status == TestStatus::Fail {
-                    if let Some(details) = &case.details {
-                        lines.push(format!("    -> {details}"));
-                    }
+                if case.status == TestStatus::Fail
+                    && let Some(details) = &case.details
+                {
+                    lines.push(format!("    -> {details}"));
                 }
             }
             lines.push(String::new());

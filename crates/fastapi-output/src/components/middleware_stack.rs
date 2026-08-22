@@ -125,10 +125,10 @@ impl MiddlewareStackDisplay {
                 lines.push(format!("     type: {}", mw.type_name));
             }
 
-            if self.show_config {
-                if let Some(config) = &mw.config_summary {
-                    lines.push(format!("     config: {config}"));
-                }
+            if self.show_config
+                && let Some(config) = &mw.config_summary
+            {
+                lines.push(format!("     config: {config}"));
             }
         }
 

@@ -1289,10 +1289,10 @@ impl AppBuilder {
                 openapi.version = version;
             }
         }
-        if let Some(description) = self.api_description.take() {
-            if let Some(openapi) = self.openapi_config.as_mut() {
-                openapi.description = Some(description);
-            }
+        if let Some(description) = self.api_description.take()
+            && let Some(openapi) = self.openapi_config.as_mut()
+        {
+            openapi.description = Some(description);
         }
 
         // Generate OpenAPI spec if configured

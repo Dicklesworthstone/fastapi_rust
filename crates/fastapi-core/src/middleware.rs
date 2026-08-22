@@ -1080,16 +1080,16 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
         return true;
     }
 
-    if let Some(pat_backup) = star {
-        if val_chars.peek().is_none() {
-            let trailing = pat_backup;
-            for ch in trailing {
-                if ch != '*' {
-                    return false;
-                }
+    if let Some(pat_backup) = star
+        && val_chars.peek().is_none()
+    {
+        let trailing = pat_backup;
+        for ch in trailing {
+            if ch != '*' {
+                return false;
             }
-            return true;
         }
+        return true;
     }
 
     val_chars.peek().is_none()
@@ -1259,10 +1259,10 @@ impl Middleware for RequestResponseLogger {
                 entry = entry.field("headers", headers);
             }
 
-            if self.log_body {
-                if let Some(body) = preview_body(req.body(), self.max_body_bytes) {
-                    entry = entry.field("body", body);
-                }
+            if self.log_body
+                && let Some(body) = preview_body(req.body(), self.max_body_bytes)
+            {
+                entry = entry.field("body", body);
             }
 
             entry
@@ -1297,11 +1297,10 @@ impl Middleware for RequestResponseLogger {
                 entry = entry.field("headers", headers);
             }
 
-            if self.log_body {
-                if let Some(body) = preview_response_body(response.body_ref(), self.max_body_bytes)
-                {
-                    entry = entry.field("body", body);
-                }
+            if self.log_body
+                && let Some(body) = preview_response_body(response.body_ref(), self.max_body_bytes)
+            {
+                entry = entry.field("body", body);
             }
 
             entry
@@ -1607,17 +1606,16 @@ impl RequestIdMiddleware {
 
     /// Extracts or generates a request ID for the given request.
     fn get_or_generate_id(&self, req: &Request) -> RequestId {
-        if self.config.accept_from_client {
-            if let Some(header_value) = req.headers().get(&self.config.header_name) {
-                if let Ok(client_id) = std::str::from_utf8(header_value) {
-                    // Validate length and basic content
-                    if !client_id.is_empty()
-                        && client_id.len() <= self.config.max_client_id_length
-                        && is_valid_request_id(client_id)
-                    {
-                        return RequestId::new(client_id);
-                    }
-                }
+        if self.config.accept_from_client
+            && let Some(header_value) = req.headers().get(&self.config.header_name)
+            && let Ok(client_id) = std::str::from_utf8(header_value)
+        {
+            // Validate length and basic content
+            if !client_id.is_empty()
+                && client_id.len() <= self.config.max_client_id_length
+                && is_valid_request_id(client_id)
+            {
+                return RequestId::new(client_id);
             }
         }
         RequestId::generate()
@@ -2287,10 +2285,10 @@ impl CsrfMiddleware {
         // Parse cookie header: "name1=value1; name2=value2"
         for part in cookie_str.split(';') {
             let part = part.trim();
-            if let Some((name, value)) = part.split_once('=') {
-                if name.trim() == self.config.cookie_name {
-                    return Some(value.trim().to_string());
-                }
+            if let Some((name, value)) = part.split_once('=')
+                && name.trim() == self.config.cookie_name
+            {
+                return Some(value.trim().to_string());
             }
         }
         None
@@ -2418,15 +2416,13 @@ impl Middleware for CsrfMiddleware {
             if is_safe {
                 let should_set_cookie = existing_cookie_token.is_none() || config.rotate_token;
 
-                if should_set_cookie {
-                    if let Some(token) = token {
-                        let cookie_value = Self::make_set_cookie_header_value(
-                            &config.cookie_name,
-                            token.as_str(),
-                            config.production,
-                        );
-                        return response.header("set-cookie", cookie_value);
-                    }
+                if should_set_cookie && let Some(token) = token {
+                    let cookie_value = Self::make_set_cookie_header_value(
+                        &config.cookie_name,
+                        token.as_str(),
+                        config.production,
+                    );
+                    return response.header("set-cookie", cookie_value);
                 }
             }
             response
@@ -2908,18 +2904,18 @@ pub struct IpKeyExtractor;
 impl KeyExtractor for IpKeyExtractor {
     fn extract_key(&self, req: &Request) -> Option<String> {
         // Try X-Forwarded-For first, then X-Real-IP, then fall back
-        if let Some(forwarded) = req.headers().get("x-forwarded-for") {
-            if let Ok(s) = std::str::from_utf8(forwarded) {
-                // Take the first IP (client IP) from the chain
-                if let Some(ip) = s.split(',').next() {
-                    return Some(ip.trim().to_string());
-                }
+        if let Some(forwarded) = req.headers().get("x-forwarded-for")
+            && let Ok(s) = std::str::from_utf8(forwarded)
+        {
+            // Take the first IP (client IP) from the chain
+            if let Some(ip) = s.split(',').next() {
+                return Some(ip.trim().to_string());
             }
         }
-        if let Some(real_ip) = req.headers().get("x-real-ip") {
-            if let Ok(s) = std::str::from_utf8(real_ip) {
-                return Some(s.trim().to_string());
-            }
+        if let Some(real_ip) = req.headers().get("x-real-ip")
+            && let Ok(s) = std::str::from_utf8(real_ip)
+        {
+            return Some(s.trim().to_string());
         }
         Some("unknown".to_string())
     }
@@ -3003,17 +2999,16 @@ impl TrustedProxyIpKeyExtractor {
 
     /// Extract client IP from X-Forwarded-For header.
     fn extract_from_header(&self, req: &Request) -> Option<String> {
-        if let Some(forwarded) = req.headers().get("x-forwarded-for") {
-            if let Ok(s) = std::str::from_utf8(forwarded) {
-                if let Some(ip) = s.split(',').next() {
-                    return Some(ip.trim().to_string());
-                }
-            }
+        if let Some(forwarded) = req.headers().get("x-forwarded-for")
+            && let Ok(s) = std::str::from_utf8(forwarded)
+            && let Some(ip) = s.split(',').next()
+        {
+            return Some(ip.trim().to_string());
         }
-        if let Some(real_ip) = req.headers().get("x-real-ip") {
-            if let Ok(s) = std::str::from_utf8(real_ip) {
-                return Some(s.trim().to_string());
-            }
+        if let Some(real_ip) = req.headers().get("x-real-ip")
+            && let Ok(s) = std::str::from_utf8(real_ip)
+        {
+            return Some(s.trim().to_string());
         }
         None
     }
@@ -4625,24 +4620,21 @@ impl Middleware for ETagMiddleware {
             };
 
             // Check If-None-Match header
-            if let Some(ref etag_value) = etag {
-                if let Some(if_none_match) = req.headers().get("if-none-match") {
-                    if let Ok(value) = std::str::from_utf8(if_none_match) {
-                        let client_etags = Self::parse_if_none_match(value);
+            if let Some(ref etag_value) = etag
+                && let Some(if_none_match) = req.headers().get("if-none-match")
+                && let Ok(value) = std::str::from_utf8(if_none_match)
+            {
+                let client_etags = Self::parse_if_none_match(value);
 
-                        // Check for wildcard or matching ETag
-                        let matches = client_etags.iter().any(|client_etag| {
-                            client_etag == "*" || Self::etags_match_weak(client_etag, etag_value)
-                        });
+                // Check for wildcard or matching ETag
+                let matches = client_etags.iter().any(|client_etag| {
+                    client_etag == "*" || Self::etags_match_weak(client_etag, etag_value)
+                });
 
-                        if matches {
-                            // Return 304 Not Modified with ETag header
-                            return Response::with_status(
-                                crate::response::StatusCode::NOT_MODIFIED,
-                            )
-                            .header("etag", etag_value.as_bytes().to_vec());
-                        }
-                    }
+                if matches {
+                    // Return 304 Not Modified with ETag header
+                    return Response::with_status(crate::response::StatusCode::NOT_MODIFIED)
+                        .header("etag", etag_value.as_bytes().to_vec());
                 }
             }
 
@@ -5191,14 +5183,13 @@ impl CacheControlMiddleware {
         // Extract max-age value if present
         for directive in cache_control.split(',') {
             let directive = directive.trim();
-            if directive.starts_with("max-age=") {
-                if let Ok(seconds) = directive[8..].parse::<u64>() {
-                    // Calculate expiration time
-                    let now = std::time::SystemTime::now();
-                    if let Some(expires) = now.checked_add(std::time::Duration::from_secs(seconds))
-                    {
-                        return Some(format_http_date(expires));
-                    }
+            if directive.starts_with("max-age=")
+                && let Ok(seconds) = directive[8..].parse::<u64>()
+            {
+                // Calculate expiration time
+                let now = std::time::SystemTime::now();
+                if let Some(expires) = now.checked_add(std::time::Duration::from_secs(seconds)) {
+                    return Some(format_http_date(expires));
                 }
             }
         }
@@ -5362,10 +5353,10 @@ impl Middleware for CacheControlMiddleware {
             }
 
             // Add Expires header if configured
-            if config.set_expires {
-                if let Some(expires) = Self::calculate_expires(&config.cache_control) {
-                    headers.push(("Expires".to_string(), expires.into_bytes()));
-                }
+            if config.set_expires
+                && let Some(expires) = Self::calculate_expires(&config.cache_control)
+            {
+                headers.push(("Expires".to_string(), expires.into_bytes()));
             }
 
             // Reconstruct response
@@ -5682,25 +5673,25 @@ impl HttpsRedirectMiddleware {
             bytes
         }
 
-        if let Some(info) = req.get_extension::<crate::request::ConnectionInfo>() {
-            if info.is_tls {
-                return true;
-            }
+        if let Some(info) = req.get_extension::<crate::request::ConnectionInfo>()
+            && info.is_tls
+        {
+            return true;
         }
 
         // RFC 7239 Forwarded: for=...;proto=https;host=...
-        if let Some(forwarded) = req.headers().get("Forwarded") {
-            if let Ok(s) = std::str::from_utf8(forwarded) {
-                for entry in s.split(',') {
-                    for param in entry.split(';') {
-                        let param = param.trim();
-                        if let Some((k, v)) = param.split_once('=') {
-                            if k.trim().eq_ignore_ascii_case("proto") {
-                                let proto = v.trim().trim_matches('"');
-                                if proto.eq_ignore_ascii_case("https") {
-                                    return true;
-                                }
-                            }
+        if let Some(forwarded) = req.headers().get("Forwarded")
+            && let Ok(s) = std::str::from_utf8(forwarded)
+        {
+            for entry in s.split(',') {
+                for param in entry.split(';') {
+                    let param = param.trim();
+                    if let Some((k, v)) = param.split_once('=')
+                        && k.trim().eq_ignore_ascii_case("proto")
+                    {
+                        let proto = v.trim().trim_matches('"');
+                        if proto.eq_ignore_ascii_case("https") {
+                            return true;
                         }
                     }
                 }
@@ -6226,11 +6217,11 @@ impl ResponseInterceptor for DebugInfoInterceptor {
                 );
             }
 
-            if self.include_request_id {
-                if let Some(request_id) = ctx.request.get_extension::<RequestId>() {
-                    let header_name = format!("{}Request-Id", self.header_prefix);
-                    resp = resp.header(header_name, request_id.0.as_bytes().to_vec());
-                }
+            if self.include_request_id
+                && let Some(request_id) = ctx.request.get_extension::<RequestId>()
+            {
+                let header_name = format!("{}Request-Id", self.header_prefix);
+                resp = resp.header(header_name, request_id.0.as_bytes().to_vec());
             }
 
             if self.include_timing {
@@ -7141,10 +7132,10 @@ impl Middleware for TimingMetricsMiddleware {
                         );
 
                         // Add TTFB if available and enabled
-                        if config.include_ttfb {
-                            if let Some(ttfb) = metrics.ttfb_ms() {
-                                builder = builder.add_with_desc("ttfb", ttfb, "Time to first byte");
-                            }
+                        if config.include_ttfb
+                            && let Some(ttfb) = metrics.ttfb_ms()
+                        {
+                            builder = builder.add_with_desc("ttfb", ttfb, "Time to first byte");
                         }
 
                         // Add custom metrics if enabled
@@ -10730,11 +10721,11 @@ mod tests {
 
         let result = futures_executor::block_on(csrf.before(&ctx, &mut req));
 
-        if let ControlFlow::Break(response) = result {
-            if let ResponseBody::Bytes(body) = response.body_ref() {
-                let body_str = std::str::from_utf8(body).unwrap();
-                assert!(body_str.contains("Access denied: invalid security token"));
-            }
+        if let ControlFlow::Break(response) = result
+            && let ResponseBody::Bytes(body) = response.body_ref()
+        {
+            let body_str = std::str::from_utf8(body).unwrap();
+            assert!(body_str.contains("Access denied: invalid security token"));
         }
     }
 

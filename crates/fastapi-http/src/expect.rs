@@ -168,17 +168,15 @@ impl ExpectHandler {
             return Ok(()); // No limit
         }
 
-        if let Some(value) = request.headers().get("content-length") {
-            if let Ok(len_str) = std::str::from_utf8(value) {
-                if let Ok(len) = len_str.trim().parse::<usize>() {
-                    if len > self.max_content_length {
-                        return Err(Self::payload_too_large(format!(
-                            "Content-Length {} exceeds maximum {}",
-                            len, self.max_content_length
-                        )));
-                    }
-                }
-            }
+        if let Some(value) = request.headers().get("content-length")
+            && let Ok(len_str) = std::str::from_utf8(value)
+            && let Ok(len) = len_str.trim().parse::<usize>()
+            && len > self.max_content_length
+        {
+            return Err(Self::payload_too_large(format!(
+                "Content-Length {} exceeds maximum {}",
+                len, self.max_content_length
+            )));
         }
 
         Ok(())
@@ -642,10 +640,10 @@ mod tests {
                 }
             }))
             .with(FnValidator::new("content_type", |req: &Request| {
-                if let Some(ct) = req.headers().get("content-type") {
-                    if ct.starts_with(b"application/json") {
-                        return Ok(());
-                    }
+                if let Some(ct) = req.headers().get("content-type")
+                    && ct.starts_with(b"application/json")
+                {
+                    return Ok(());
                 }
                 Err(ExpectHandler::unsupported_media_type("Expected JSON"))
             }));

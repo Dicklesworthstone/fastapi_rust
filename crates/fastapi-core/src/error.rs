@@ -168,11 +168,11 @@ impl DebugConfig {
         // Check for debug header
         if let (Some(header_name), Some(expected_token)) = (&self.debug_header, &self.debug_token) {
             for (name, value) in request_headers {
-                if name.eq_ignore_ascii_case(header_name) {
-                    if let Ok(token) = std::str::from_utf8(value) {
-                        // Use constant-time comparison to prevent timing attacks
-                        return constant_time_str_eq(token, expected_token);
-                    }
+                if name.eq_ignore_ascii_case(header_name)
+                    && let Ok(token) = std::str::from_utf8(value)
+                {
+                    // Use constant-time comparison to prevent timing attacks
+                    return constant_time_str_eq(token, expected_token);
                 }
             }
         }

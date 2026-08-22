@@ -242,12 +242,12 @@ impl DigestAuth {
         };
 
         let nc = params.get("nc").map(|v| v.to_ascii_lowercase());
-        if let Some(nc) = &nc {
-            if nc.len() != 8 || !nc.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-                return Err(DigestAuthError {
-                    kind: DigestAuthErrorKind::InvalidNc,
-                });
-            }
+        if let Some(nc) = &nc
+            && (nc.len() != 8 || !nc.as_bytes().iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err(DigestAuthError {
+                kind: DigestAuthErrorKind::InvalidNc,
+            });
         }
 
         let cnonce = params.get("cnonce").map(ToString::to_string);
@@ -373,10 +373,10 @@ impl DigestAuth {
         if self.nonce != nonce {
             return Ok(false);
         }
-        if let Some(header_realm) = self.realm.as_deref() {
-            if header_realm != realm {
-                return Ok(false);
-            }
+        if let Some(header_realm) = self.realm.as_deref()
+            && header_realm != realm
+        {
+            return Ok(false);
         }
         self.verify(method, realm, password)
     }

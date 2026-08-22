@@ -54,10 +54,6 @@ missing_panics_doc = "allow"
 # New in nightly-2026-08-19 clippy: prefers `assert_eq!(v, [] as [T; 0])` over
 # `assert!(v.is_empty())`, which is less readable in test code.
 assert_is_empty = "allow"
-# Fires workspace-wide since rust-version moved to 1.95 (clippy now assumes
-# let-chains are available): ~60 nested-`if` sites, mostly in fastapi-macros.
-# Collapsing them into let-chains is a separate mechanical refactor; tracked in beads.
-collapsible_if = "allow"
 # Trait contracts (FromRequest, Middleware, ...) mandate async signatures;
 # impls that happen not to await cannot drop `async` without desugaring.
 unused_async_trait_impl = "allow"

@@ -110,10 +110,10 @@ impl ArgInfo {
         if let Some(long) = &self.long {
             parts.push(long.clone());
         }
-        if parts.is_empty() {
-            if let Some(value) = &self.value {
-                return value.clone();
-            }
+        if parts.is_empty()
+            && let Some(value) = &self.value
+        {
+            return value.clone();
         }
         parts.join(", ")
     }
@@ -385,16 +385,16 @@ impl HelpDisplay {
                 line.push_str(&" ".repeat(padding));
                 line.push_str(&arg.description);
 
-                if self.show_defaults {
-                    if let Some(default) = &arg.default {
-                        let _ = write!(line, " [default: {default}]");
-                    }
+                if self.show_defaults
+                    && let Some(default) = &arg.default
+                {
+                    let _ = write!(line, " [default: {default}]");
                 }
 
-                if self.show_env_vars {
-                    if let Some(env) = &arg.env_var {
-                        let _ = write!(line, " [env: {env}]");
-                    }
+                if self.show_env_vars
+                    && let Some(env) = &arg.env_var
+                {
+                    let _ = write!(line, " [env: {env}]");
                 }
 
                 lines.push(line);
@@ -487,10 +487,10 @@ impl HelpDisplay {
                 lines.push(line);
                 lines.push(format!("        {muted}{}{ANSI_RESET}", arg.description));
 
-                if self.show_defaults {
-                    if let Some(default) = &arg.default {
-                        lines.push(format!("        {muted}Default: {default}{ANSI_RESET}"));
-                    }
+                if self.show_defaults
+                    && let Some(default) = &arg.default
+                {
+                    lines.push(format!("        {muted}Default: {default}{ANSI_RESET}"));
                 }
             }
         }
@@ -592,15 +592,15 @@ impl HelpDisplay {
                 lines.push(format!("      {muted}{}{ANSI_RESET}", arg.description));
 
                 let mut meta_parts = Vec::new();
-                if self.show_defaults {
-                    if let Some(default) = &arg.default {
-                        meta_parts.push(format!("default: {info}{default}{ANSI_RESET}"));
-                    }
+                if self.show_defaults
+                    && let Some(default) = &arg.default
+                {
+                    meta_parts.push(format!("default: {info}{default}{ANSI_RESET}"));
                 }
-                if self.show_env_vars {
-                    if let Some(env) = &arg.env_var {
-                        meta_parts.push(format!("env: {info}{env}{ANSI_RESET}"));
-                    }
+                if self.show_env_vars
+                    && let Some(env) = &arg.env_var
+                {
+                    meta_parts.push(format!("env: {info}{env}{ANSI_RESET}"));
                 }
                 if !meta_parts.is_empty() {
                     lines.push(format!(

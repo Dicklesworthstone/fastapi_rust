@@ -69,26 +69,26 @@ impl ParamAttrs {
 
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("title") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.title = Some(s.value());
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                    {
+                        result.title = Some(s.value());
                     }
                 } else if meta.path.is_ident("description") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.description = Some(s.value());
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                    {
+                        result.description = Some(s.value());
                     }
                 } else if meta.path.is_ident("deprecated") {
                     result.deprecated = true;
                 } else if meta.path.is_ident("exclude") {
                     result.exclude = true;
                 } else if meta.path.is_ident("example") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(expr) = value.parse::<syn::Expr>() {
-                            result.example = Some(quote! { #expr });
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(expr) = value.parse::<syn::Expr>()
+                    {
+                        result.example = Some(quote! { #expr });
                     }
                 } else if meta.path.is_ident("ge") {
                     if let Ok(value) = meta.value() {
@@ -123,41 +123,40 @@ impl ParamAttrs {
                         }
                     }
                 } else if meta.path.is_ident("min_length") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Int(i)) = value.parse::<Lit>() {
-                            result.min_length = i.base10_parse().ok();
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Int(i)) = value.parse::<Lit>()
+                    {
+                        result.min_length = i.base10_parse().ok();
                     }
                 } else if meta.path.is_ident("max_length") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Int(i)) = value.parse::<Lit>() {
-                            result.max_length = i.base10_parse().ok();
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Int(i)) = value.parse::<Lit>()
+                    {
+                        result.max_length = i.base10_parse().ok();
                     }
                 } else if meta.path.is_ident("pattern") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.pattern = Some(s.value());
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                    {
+                        result.pattern = Some(s.value());
                     }
                 } else if meta.path.is_ident("alias") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.alias = Some(s.value());
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                    {
+                        result.alias = Some(s.value());
                     }
                 } else if meta.path.is_ident("validation_alias") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.validation_alias = Some(s.value());
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                    {
+                        result.validation_alias = Some(s.value());
                     }
-                } else if meta.path.is_ident("serialization_alias") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.serialization_alias = Some(s.value());
-                        }
-                    }
+                } else if meta.path.is_ident("serialization_alias")
+                    && let Ok(value) = meta.value()
+                    && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                {
+                    result.serialization_alias = Some(s.value());
                 }
                 Ok(())
             });

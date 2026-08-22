@@ -213,10 +213,10 @@ impl CookieJar {
             if c.secure && !is_secure {
                 continue;
             }
-            if let Some(exp) = c.expires_at {
-                if exp <= now {
-                    continue;
-                }
+            if let Some(exp) = c.expires_at
+                && exp <= now
+            {
+                continue;
             }
             if !domain_matches(&c.domain, host.as_deref()) {
                 continue;
@@ -440,10 +440,10 @@ fn compute_cookie_expiration(
         };
         expires_at = now.checked_add(std::time::Duration::from_secs(secs));
     }
-    if let Some(exp) = expires_at {
-        if exp <= now {
-            return CookieExpiration::Delete;
-        }
+    if let Some(exp) = expires_at
+        && exp <= now
+    {
+        return CookieExpiration::Delete;
     }
     CookieExpiration::Keep(expires_at)
 }
@@ -460,24 +460,24 @@ fn request_host(request: &Request) -> Option<String> {
 }
 
 fn request_is_secure(request: &Request) -> bool {
-    if let Some(info) = request.get_extension::<crate::request::ConnectionInfo>() {
-        if info.is_tls {
-            return true;
-        }
+    if let Some(info) = request.get_extension::<crate::request::ConnectionInfo>()
+        && info.is_tls
+    {
+        return true;
     }
 
-    if let Some(forwarded) = request.headers().get("forwarded") {
-        if let Ok(s) = std::str::from_utf8(forwarded) {
-            for entry in s.split(',') {
-                for param in entry.split(';') {
-                    let param = param.trim();
-                    if let Some((k, v)) = param.split_once('=') {
-                        if k.trim().eq_ignore_ascii_case("proto") {
-                            let proto = v.trim().trim_matches('"');
-                            if proto.eq_ignore_ascii_case("https") {
-                                return true;
-                            }
-                        }
+    if let Some(forwarded) = request.headers().get("forwarded")
+        && let Ok(s) = std::str::from_utf8(forwarded)
+    {
+        for entry in s.split(',') {
+            for param in entry.split(';') {
+                let param = param.trim();
+                if let Some((k, v)) = param.split_once('=')
+                    && k.trim().eq_ignore_ascii_case("proto")
+                {
+                    let proto = v.trim().trim_matches('"');
+                    if proto.eq_ignore_ascii_case("https") {
+                        return true;
                     }
                 }
             }
@@ -5976,10 +5976,10 @@ impl ResponseDiff {
         if self.expected_status != self.actual_status {
             return false;
         }
-        if let Some(ref expected) = self.expected_body {
-            if !self.actual_body.contains(expected) {
-                return false;
-            }
+        if let Some(ref expected) = self.expected_body
+            && !self.actual_body.contains(expected)
+        {
+            return false;
         }
         true
     }
@@ -5996,13 +5996,13 @@ impl ResponseDiff {
             ));
         }
 
-        if let Some(ref expected) = self.expected_body {
-            if !self.actual_body.contains(expected) {
-                output.push_str(&format!(
-                    "Body mismatch:\n  expected to contain: {:?}\n  actual: {:?}\n",
-                    expected, self.actual_body
-                ));
-            }
+        if let Some(ref expected) = self.expected_body
+            && !self.actual_body.contains(expected)
+        {
+            output.push_str(&format!(
+                "Body mismatch:\n  expected to contain: {:?}\n  actual: {:?}\n",
+                expected, self.actual_body
+            ));
         }
 
         for (name, expected, actual) in &self.header_diffs {
@@ -6207,34 +6207,32 @@ fn mask_json_path(value: &mut serde_json::Value, path: &str, placeholder: &str) 
     let parts: Vec<&str> = path.splitn(2, '.').collect();
     match parts.as_slice() {
         [key] => {
-            if let Some(obj) = value.as_object_mut() {
-                if obj.contains_key(*key) {
-                    obj.insert(
-                        key.to_string(),
-                        serde_json::Value::String(placeholder.to_string()),
-                    );
-                }
+            if let Some(obj) = value.as_object_mut()
+                && obj.contains_key(*key)
+            {
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String(placeholder.to_string()),
+                );
             }
-            if let Some(arr) = value.as_array_mut() {
-                if let Ok(idx) = key.parse::<usize>() {
-                    if idx < arr.len() {
-                        arr[idx] = serde_json::Value::String(placeholder.to_string());
-                    }
-                }
+            if let Some(arr) = value.as_array_mut()
+                && let Ok(idx) = key.parse::<usize>()
+                && idx < arr.len()
+            {
+                arr[idx] = serde_json::Value::String(placeholder.to_string());
             }
         }
         [key, rest] => {
-            if let Some(obj) = value.as_object_mut() {
-                if let Some(child) = obj.get_mut(*key) {
-                    mask_json_path(child, rest, placeholder);
-                }
+            if let Some(obj) = value.as_object_mut()
+                && let Some(child) = obj.get_mut(*key)
+            {
+                mask_json_path(child, rest, placeholder);
             }
-            if let Some(arr) = value.as_array_mut() {
-                if let Ok(idx) = key.parse::<usize>() {
-                    if let Some(child) = arr.get_mut(idx) {
-                        mask_json_path(child, rest, placeholder);
-                    }
-                }
+            if let Some(arr) = value.as_array_mut()
+                && let Ok(idx) = key.parse::<usize>()
+                && let Some(child) = arr.get_mut(idx)
+            {
+                mask_json_path(child, rest, placeholder);
             }
         }
         _ => {}

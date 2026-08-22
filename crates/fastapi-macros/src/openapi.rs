@@ -46,22 +46,22 @@ impl SchemaAttrs {
 
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("title") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.title = Some(s.value());
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                    {
+                        result.title = Some(s.value());
                     }
                 } else if meta.path.is_ident("description") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.description = Some(s.value());
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                    {
+                        result.description = Some(s.value());
                     }
                 } else if meta.path.is_ident("format") {
-                    if let Ok(value) = meta.value() {
-                        if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
-                            result.format = Some(s.value());
-                        }
+                    if let Ok(value) = meta.value()
+                        && let Ok(Lit::Str(s)) = value.parse::<Lit>()
+                    {
+                        result.format = Some(s.value());
                     }
                 } else if meta.path.is_ident("nullable") {
                     result.nullable = true;
@@ -119,16 +119,13 @@ struct FieldInfo {
 
 /// Analyze a type to determine if it's Option<T> and extract T if so.
 fn unwrap_option_type(ty: &Type) -> Option<&Type> {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Option" {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                        return Some(inner);
-                    }
-                }
-            }
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+        && let PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner);
     }
     None
 }
@@ -163,105 +160,104 @@ fn generate_type_schema(ty: &Type, attrs: &SchemaAttrs) -> TokenStream2 {
     }
 
     // Check for known types
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            let ident_str = segment.ident.to_string();
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+    {
+        let ident_str = segment.ident.to_string();
 
-            return match ident_str.as_str() {
-                // String types
-                "String" | "str" => quote! {
-                    fastapi_openapi::Schema::string()
-                },
+        return match ident_str.as_str() {
+            // String types
+            "String" | "str" => quote! {
+                fastapi_openapi::Schema::string()
+            },
 
-                // Integer types
-                "i8" => quote! {
-                    fastapi_openapi::Schema::integer(Some("int8"))
-                },
-                "i16" => quote! {
-                    fastapi_openapi::Schema::integer(Some("int16"))
-                },
-                "i32" => quote! {
-                    fastapi_openapi::Schema::integer(Some("int32"))
-                },
-                "i64" | "isize" => quote! {
-                    fastapi_openapi::Schema::integer(Some("int64"))
-                },
-                "u8" => quote! {
-                    fastapi_openapi::Schema::integer(Some("uint8"))
-                },
-                "u16" => quote! {
-                    fastapi_openapi::Schema::integer(Some("uint16"))
-                },
-                "u32" => quote! {
-                    fastapi_openapi::Schema::integer(Some("uint32"))
-                },
-                "u64" | "usize" => quote! {
-                    fastapi_openapi::Schema::integer(Some("uint64"))
-                },
+            // Integer types
+            "i8" => quote! {
+                fastapi_openapi::Schema::integer(Some("int8"))
+            },
+            "i16" => quote! {
+                fastapi_openapi::Schema::integer(Some("int16"))
+            },
+            "i32" => quote! {
+                fastapi_openapi::Schema::integer(Some("int32"))
+            },
+            "i64" | "isize" => quote! {
+                fastapi_openapi::Schema::integer(Some("int64"))
+            },
+            "u8" => quote! {
+                fastapi_openapi::Schema::integer(Some("uint8"))
+            },
+            "u16" => quote! {
+                fastapi_openapi::Schema::integer(Some("uint16"))
+            },
+            "u32" => quote! {
+                fastapi_openapi::Schema::integer(Some("uint32"))
+            },
+            "u64" | "usize" => quote! {
+                fastapi_openapi::Schema::integer(Some("uint64"))
+            },
 
-                // Float types
-                "f32" => quote! {
-                    fastapi_openapi::Schema::number(Some("float"))
-                },
-                "f64" => quote! {
-                    fastapi_openapi::Schema::number(Some("double"))
-                },
+            // Float types
+            "f32" => quote! {
+                fastapi_openapi::Schema::number(Some("float"))
+            },
+            "f64" => quote! {
+                fastapi_openapi::Schema::number(Some("double"))
+            },
 
-                // Boolean
-                "bool" => quote! {
-                    fastapi_openapi::Schema::boolean()
-                },
+            // Boolean
+            "bool" => quote! {
+                fastapi_openapi::Schema::boolean()
+            },
 
-                // Vec<T>
-                "Vec" => {
-                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                            let inner_schema = generate_type_schema(inner, &SchemaAttrs::default());
-                            return quote! {
-                                fastapi_openapi::Schema::array(#inner_schema)
-                            };
-                        }
-                    }
-                    // Fallback for Vec without type args
-                    quote! {
-                        fastapi_openapi::Schema::array(fastapi_openapi::Schema::Boolean(true))
+            // Vec<T>
+            "Vec" => {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments
+                    && let Some(GenericArgument::Type(inner)) = args.args.first()
+                {
+                    let inner_schema = generate_type_schema(inner, &SchemaAttrs::default());
+                    return quote! {
+                        fastapi_openapi::Schema::array(#inner_schema)
+                    };
+                }
+                // Fallback for Vec without type args
+                quote! {
+                    fastapi_openapi::Schema::array(fastapi_openapi::Schema::Boolean(true))
+                }
+            }
+
+            // HashMap<K, V>
+            "HashMap" | "BTreeMap" => {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                    let mut args_iter = args.args.iter();
+                    let _key = args_iter.next(); // Skip key type (assumed to be string)
+                    if let Some(GenericArgument::Type(value_ty)) = args_iter.next() {
+                        let value_schema = generate_type_schema(value_ty, &SchemaAttrs::default());
+                        return quote! {
+                            fastapi_openapi::Schema::Object(fastapi_openapi::ObjectSchema {
+                                title: None,
+                                description: None,
+                                properties: std::collections::HashMap::new(),
+                                required: Vec::new(),
+                                additional_properties: Some(Box::new(#value_schema)),
+                            })
+                        };
                     }
                 }
-
-                // HashMap<K, V>
-                "HashMap" | "BTreeMap" => {
-                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                        let mut args_iter = args.args.iter();
-                        let _key = args_iter.next(); // Skip key type (assumed to be string)
-                        if let Some(GenericArgument::Type(value_ty)) = args_iter.next() {
-                            let value_schema =
-                                generate_type_schema(value_ty, &SchemaAttrs::default());
-                            return quote! {
-                                fastapi_openapi::Schema::Object(fastapi_openapi::ObjectSchema {
-                                    title: None,
-                                    description: None,
-                                    properties: std::collections::HashMap::new(),
-                                    required: Vec::new(),
-                                    additional_properties: Some(Box::new(#value_schema)),
-                                })
-                            };
-                        }
-                    }
-                    // Fallback
-                    quote! {
-                        fastapi_openapi::Schema::Object(fastapi_openapi::ObjectSchema::default())
-                    }
+                // Fallback
+                quote! {
+                    fastapi_openapi::Schema::Object(fastapi_openapi::ObjectSchema::default())
                 }
+            }
 
-                // Other types - use JsonSchema trait if implemented, otherwise reference
-                _ => {
-                    // For custom types, try to call their JsonSchema implementation
-                    quote! {
-                        <#ty as fastapi_openapi::JsonSchema>::schema()
-                    }
+            // Other types - use JsonSchema trait if implemented, otherwise reference
+            _ => {
+                // For custom types, try to call their JsonSchema implementation
+                quote! {
+                    <#ty as fastapi_openapi::JsonSchema>::schema()
                 }
-            };
-        }
+            }
+        };
     }
 
     // Fallback: try to use the type's JsonSchema implementation

@@ -287,10 +287,10 @@ pub fn is_valid_phone(value: &str) -> bool {
             }
             '-' | '.' => {
                 // No consecutive '-' or '.' (including mixed like "-.").
-                if let Some(prev) = last_sep {
-                    if matches!(prev, '-' | '.') {
-                        return false;
-                    }
+                if let Some(prev) = last_sep
+                    && matches!(prev, '-' | '.')
+                {
+                    return false;
                 }
                 last_sep = Some(c);
             }

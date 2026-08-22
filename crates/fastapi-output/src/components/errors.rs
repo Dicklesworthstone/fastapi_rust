@@ -367,10 +367,10 @@ impl ErrorFormatter {
             }
 
             // Show context if present
-            if let Some(ctx) = &error.ctx {
-                if !ctx.is_empty() {
-                    lines.push(format!("    Context: {}", ctx.format()));
-                }
+            if let Some(ctx) = &error.ctx
+                && !ctx.is_empty()
+            {
+                lines.push(format!("    Context: {}", ctx.format()));
             }
 
             if self.show_codes {
@@ -427,13 +427,13 @@ impl ErrorFormatter {
             }
 
             // Show context if present
-            if let Some(ctx) = &error.ctx {
-                if !ctx.is_empty() {
-                    lines.push(format!(
-                        "    {muted}Constraints: {}{ANSI_RESET}",
-                        ctx.format()
-                    ));
-                }
+            if let Some(ctx) = &error.ctx
+                && !ctx.is_empty()
+            {
+                lines.push(format!(
+                    "    {muted}Constraints: {}{ANSI_RESET}",
+                    ctx.format()
+                ));
             }
 
             // Error type
@@ -481,17 +481,17 @@ impl ErrorFormatter {
         lines.push(format!("Detail: {detail}", detail = error.detail));
 
         // Code
-        if self.show_codes {
-            if let Some(code) = &error.code {
-                lines.push(format!("Code: {code}"));
-            }
+        if self.show_codes
+            && let Some(code) = &error.code
+        {
+            lines.push(format!("Code: {code}"));
         }
 
         // Context
-        if self.show_context {
-            if let (Some(method), Some(path)) = (&error.method, &error.path) {
-                lines.push(format!("Request: {method} {path}"));
-            }
+        if self.show_context
+            && let (Some(method), Some(path)) = (&error.method, &error.path)
+        {
+            lines.push(format!("Request: {method} {path}"));
         }
 
         lines.join("\n")
@@ -515,19 +515,19 @@ impl ErrorFormatter {
         lines.push(format!("  {detail}", detail = error.detail));
 
         // Code
-        if self.show_codes {
-            if let Some(code) = &error.code {
-                lines.push(format!("  {muted}Code: {accent}{code}{ANSI_RESET}"));
-            }
+        if self.show_codes
+            && let Some(code) = &error.code
+        {
+            lines.push(format!("  {muted}Code: {accent}{code}{ANSI_RESET}"));
         }
 
         // Context
-        if self.show_context {
-            if let (Some(method), Some(path)) = (&error.method, &error.path) {
-                lines.push(format!(
-                    "  {muted}Request: {accent}{method} {path}{ANSI_RESET}"
-                ));
-            }
+        if self.show_context
+            && let (Some(method), Some(path)) = (&error.method, &error.path)
+        {
+            lines.push(format!(
+                "  {muted}Request: {accent}{method} {path}{ANSI_RESET}"
+            ));
         }
 
         lines.join("\n")

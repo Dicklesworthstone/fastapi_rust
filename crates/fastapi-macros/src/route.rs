@@ -178,10 +178,10 @@ fn extract_path_params(path: &str) -> Vec<String> {
 
 /// Check if a type is a Path extractor and extract its inner type.
 fn is_path_extractor(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            return segment.ident == "Path";
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+    {
+        return segment.ident == "Path";
     }
     false
 }
@@ -204,16 +204,13 @@ fn count_path_extractors(inputs: &syn::punctuated::Punctuated<FnArg, syn::token:
 
 /// Count tuple elements in a Path<(T1, T2, ...)> type.
 fn count_tuple_elements(ty: &Type) -> Option<usize> {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Path" {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(GenericArgument::Type(Type::Tuple(tuple))) = args.args.first() {
-                        return Some(tuple.elems.len());
-                    }
-                }
-            }
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Path"
+        && let PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(GenericArgument::Type(Type::Tuple(tuple))) = args.args.first()
+    {
+        return Some(tuple.elems.len());
     }
     None
 }
@@ -221,13 +218,12 @@ fn count_tuple_elements(ty: &Type) -> Option<usize> {
 /// Check if a type is one of the context types that don't require FromRequest.
 /// These are: &Cx, &RequestContext, &mut Request
 fn is_context_type(ty: &Type) -> bool {
-    if let Type::Reference(ref_type) = ty {
-        if let Type::Path(type_path) = &*ref_type.elem {
-            if let Some(segment) = type_path.path.segments.last() {
-                let name = segment.ident.to_string();
-                return matches!(name.as_str(), "Cx" | "RequestContext" | "Request");
-            }
-        }
+    if let Type::Reference(ref_type) = ty
+        && let Type::Path(type_path) = &*ref_type.elem
+        && let Some(segment) = type_path.path.segments.last()
+    {
+        let name = segment.ident.to_string();
+        return matches!(name.as_str(), "Cx" | "RequestContext" | "Request");
     }
     false
 }
@@ -290,19 +286,15 @@ struct BodyExtractorInfo {
 /// Handles both `Json<T>` and `Option<Json<T>>`.
 fn extract_body_info(ty: &Type) -> Option<BodyExtractorInfo> {
     // Check for Option<Json<T>> first
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Option" {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                        if let Some(mut info) = extract_json_info(inner_ty) {
-                            info.required = false;
-                            return Some(info);
-                        }
-                    }
-                }
-            }
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+        && let PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(GenericArgument::Type(inner_ty)) = args.args.first()
+        && let Some(mut info) = extract_json_info(inner_ty)
+    {
+        info.required = false;
+        return Some(info);
     }
 
     // Check for Json<T> directly
@@ -311,21 +303,18 @@ fn extract_body_info(ty: &Type) -> Option<BodyExtractorInfo> {
 
 /// Extract type info from a Json<T> type.
 fn extract_json_info(ty: &Type) -> Option<BodyExtractorInfo> {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Json" {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                        let type_name = extract_type_name(inner_ty);
-                        return Some(BodyExtractorInfo {
-                            type_name,
-                            content_type: "application/json",
-                            required: true,
-                        });
-                    }
-                }
-            }
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Json"
+        && let PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(GenericArgument::Type(inner_ty)) = args.args.first()
+    {
+        let type_name = extract_type_name(inner_ty);
+        return Some(BodyExtractorInfo {
+            type_name,
+            content_type: "application/json",
+            required: true,
+        });
     }
     None
 }
@@ -351,10 +340,10 @@ fn find_body_extractor(
     inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
 ) -> Option<BodyExtractorInfo> {
     for arg in inputs {
-        if let Some(ty) = extract_param_type(arg) {
-            if let Some(info) = extract_body_info(ty) {
-                return Some(info);
-            }
+        if let Some(ty) = extract_param_type(arg)
+            && let Some(info) = extract_body_info(ty)
+        {
+            return Some(info);
         }
     }
     None
@@ -479,22 +468,21 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
 
     // Validation 3: Check tuple arity matches parameter count
     for arg in fn_inputs {
-        if let FnArg::Typed(pat_type) = arg {
-            if let Some(tuple_count) = count_tuple_elements(&pat_type.ty) {
-                if tuple_count != path_param_count {
-                    let error_msg = format!(
-                        "Path tuple has {} element(s) but route '{}' has {} path parameter(s) [{}].\n\
+        if let FnArg::Typed(pat_type) = arg
+            && let Some(tuple_count) = count_tuple_elements(&pat_type.ty)
+            && tuple_count != path_param_count
+        {
+            let error_msg = format!(
+                "Path tuple has {} element(s) but route '{}' has {} path parameter(s) [{}].\n\
                          The tuple element count must match the number of path parameters.",
-                        tuple_count,
-                        path_str,
-                        path_param_count,
-                        path_params.join(", ")
-                    );
-                    return syn::Error::new(Span::call_site(), error_msg)
-                        .to_compile_error()
-                        .into();
-                }
-            }
+                tuple_count,
+                path_str,
+                path_param_count,
+                path_params.join(", ")
+            );
+            return syn::Error::new(Span::call_site(), error_msg)
+                .to_compile_error()
+                .into();
         }
     }
 
@@ -681,28 +669,26 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
         };
 
         // Context injections are passed directly.
-        if is_context_type(ty) {
-            if let Type::Reference(ref_type) = ty {
-                if let Type::Path(type_path) = &*ref_type.elem {
-                    if let Some(segment) = type_path.path.segments.last() {
-                        let name = segment.ident.to_string();
-                        match name.as_str() {
-                            "Cx" => {
-                                call_args.push(quote! { ctx.cx() });
-                                continue;
-                            }
-                            "RequestContext" => {
-                                call_args.push(quote! { ctx });
-                                continue;
-                            }
-                            "Request" => {
-                                call_args.push(quote! { req });
-                                continue;
-                            }
-                            _ => {}
-                        }
-                    }
+        if is_context_type(ty)
+            && let Type::Reference(ref_type) = ty
+            && let Type::Path(type_path) = &*ref_type.elem
+            && let Some(segment) = type_path.path.segments.last()
+        {
+            let name = segment.ident.to_string();
+            match name.as_str() {
+                "Cx" => {
+                    call_args.push(quote! { ctx.cx() });
+                    continue;
                 }
+                "RequestContext" => {
+                    call_args.push(quote! { ctx });
+                    continue;
+                }
+                "Request" => {
+                    call_args.push(quote! { req });
+                    continue;
+                }
+                _ => {}
             }
         }
 

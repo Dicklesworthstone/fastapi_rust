@@ -338,10 +338,10 @@ impl RequestInspector {
         if let Some(id) = &info.request_id {
             lines.push(format!("Request-ID: {id}"));
         }
-        if self.show_timing {
-            if let Some(duration) = info.parse_duration {
-                lines.push(format!("Parse time: {}", format_duration(duration)));
-            }
+        if self.show_timing
+            && let Some(duration) = info.parse_duration
+        {
+            lines.push(format!("Parse time: {}", format_duration(duration)));
         }
 
         // Headers
@@ -393,13 +393,13 @@ impl RequestInspector {
                 "{muted}Request-ID:{ANSI_RESET} {accent}{id}{ANSI_RESET}"
             ));
         }
-        if self.show_timing {
-            if let Some(duration) = info.parse_duration {
-                lines.push(format!(
-                    "{muted}Parse time:{ANSI_RESET} {}",
-                    format_duration(duration)
-                ));
-            }
+        if self.show_timing
+            && let Some(duration) = info.parse_duration
+        {
+            lines.push(format!(
+                "{muted}Parse time:{ANSI_RESET} {}",
+                format_duration(duration)
+            ));
         }
 
         // Headers (condensed)
@@ -461,10 +461,10 @@ impl RequestInspector {
         if let Some(id) = &info.request_id {
             meta_parts.push(format!("ID: {id}"));
         }
-        if self.show_timing {
-            if let Some(duration) = info.parse_duration {
-                meta_parts.push(format!("Parsed: {}", format_duration(duration)));
-            }
+        if self.show_timing
+            && let Some(duration) = info.parse_duration
+        {
+            meta_parts.push(format!("Parsed: {}", format_duration(duration)));
         }
         if !meta_parts.is_empty() {
             lines.push(format!(
@@ -608,10 +608,10 @@ impl ResponseInspector {
         lines.push(format!("HTTP/1.1 {} {reason}", info.status));
 
         // Timing
-        if self.show_timing {
-            if let Some(duration) = info.response_time {
-                lines.push(format!("Response time: {}", format_duration(duration)));
-            }
+        if self.show_timing
+            && let Some(duration) = info.response_time
+        {
+            lines.push(format!("Response time: {}", format_duration(duration)));
         }
 
         // Headers
@@ -656,13 +656,13 @@ impl ResponseInspector {
         ));
 
         // Timing
-        if self.show_timing {
-            if let Some(duration) = info.response_time {
-                lines.push(format!(
-                    "{muted}Response time:{ANSI_RESET} {}",
-                    format_duration(duration)
-                ));
-            }
+        if self.show_timing
+            && let Some(duration) = info.response_time
+        {
+            lines.push(format!(
+                "{muted}Response time:{ANSI_RESET} {}",
+                format_duration(duration)
+            ));
         }
 
         // Headers (condensed)
@@ -710,13 +710,13 @@ impl ResponseInspector {
         ));
 
         // Timing
-        if self.show_timing {
-            if let Some(duration) = info.response_time {
-                lines.push(format!(
-                    "{border}│{ANSI_RESET} {muted}Response time: {}{ANSI_RESET}",
-                    format_duration(duration)
-                ));
-            }
+        if self.show_timing
+            && let Some(duration) = info.response_time
+        {
+            lines.push(format!(
+                "{border}│{ANSI_RESET} {muted}Response time: {}{ANSI_RESET}",
+                format_duration(duration)
+            ));
         }
 
         // Headers section

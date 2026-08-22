@@ -219,14 +219,14 @@ impl Banner {
         lines.push(format!("Server: {accent}{}{ANSI_RESET}", info.base_url()));
 
         // Documentation links
-        if self.config.show_docs {
-            if let Some(docs) = &info.docs_path {
-                lines.push(format!(
-                    "Docs:   {accent}{}{}{ANSI_RESET}",
-                    info.base_url(),
-                    docs
-                ));
-            }
+        if self.config.show_docs
+            && let Some(docs) = &info.docs_path
+        {
+            lines.push(format!(
+                "Docs:   {accent}{}{}{ANSI_RESET}",
+                info.base_url(),
+                docs
+            ));
         }
 
         lines.join("\n")

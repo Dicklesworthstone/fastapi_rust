@@ -38,13 +38,13 @@ async fn collect_body_limited(
             content_length,
         } => {
             let mut stream = stream.into_inner().unwrap_or_else(|e| e.into_inner());
-            if let Some(n) = content_length {
-                if n > limit {
-                    return Err(RequestBodyStreamError::TooLarge {
-                        received: n,
-                        max: limit,
-                    });
-                }
+            if let Some(n) = content_length
+                && n > limit
+            {
+                return Err(RequestBodyStreamError::TooLarge {
+                    received: n,
+                    max: limit,
+                });
             }
 
             // Poll the stream without requiring Unpin.
@@ -126,10 +126,10 @@ async fn parse_multipart_limited(
         } => {
             let mut stream = stream.into_inner().unwrap_or_else(|e| e.into_inner());
 
-            if let Some(n) = content_length {
-                if n > limit {
-                    return Err(MultipartExtractError::PayloadTooLarge { size: n, limit });
-                }
+            if let Some(n) = content_length
+                && n > limit
+            {
+                return Err(MultipartExtractError::PayloadTooLarge { size: n, limit });
             }
 
             let mut state = multipart::MultipartStreamState::default();

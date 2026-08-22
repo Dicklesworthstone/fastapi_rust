@@ -242,20 +242,20 @@ impl DependencyTreeDisplay {
             parts.push(cached);
         }
 
-        if self.show_scopes {
-            if let Some(scope) = &node.scope {
-                let scope_text = if self.mode.uses_ansi() {
-                    format!(
-                        "{}(scope: {}){}",
-                        self.theme.secondary.to_ansi_fg(),
-                        scope,
-                        ANSI_RESET
-                    )
-                } else {
-                    format!("(scope: {scope})")
-                };
-                parts.push(scope_text);
-            }
+        if self.show_scopes
+            && let Some(scope) = &node.scope
+        {
+            let scope_text = if self.mode.uses_ansi() {
+                format!(
+                    "{}(scope: {}){}",
+                    self.theme.secondary.to_ansi_fg(),
+                    scope,
+                    ANSI_RESET
+                )
+            } else {
+                format!("(scope: {scope})")
+            };
+            parts.push(scope_text);
         }
 
         if node.cycle {
@@ -267,10 +267,10 @@ impl DependencyTreeDisplay {
             parts.push(cycle);
         }
 
-        if self.show_notes {
-            if let Some(note) = &node.note {
-                parts.push(format!("- {note}"));
-            }
+        if self.show_notes
+            && let Some(note) = &node.note
+        {
+            parts.push(format!("- {note}"));
         }
 
         parts.join(" ")

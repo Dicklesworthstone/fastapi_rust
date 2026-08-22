@@ -323,10 +323,8 @@ where
         let use_cache = C::USE_CACHE && scope == DependencyScope::Request;
 
         // Check cache first
-        if use_cache {
-            if let Some(cached) = ctx.dependency_cache().get::<T::Value>() {
-                return Ok(DependsCleanup::new(cached));
-            }
+        if use_cache && let Some(cached) = ctx.dependency_cache().get::<T::Value>() {
+            return Ok(DependsCleanup::new(cached));
         }
 
         // Check for circular dependency (bd-276p: intentional panic for config errors)
@@ -801,10 +799,8 @@ where
         let use_cache = C::USE_CACHE && scope == DependencyScope::Request;
 
         // Check cache - if already resolved, no cycle possible
-        if use_cache {
-            if let Some(cached) = ctx.dependency_cache().get::<T>() {
-                return Ok(Depends::new(cached));
-            }
+        if use_cache && let Some(cached) = ctx.dependency_cache().get::<T>() {
+            return Ok(Depends::new(cached));
         }
 
         // Check for circular dependency before attempting resolution

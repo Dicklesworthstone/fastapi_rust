@@ -360,17 +360,17 @@ impl SetCookie {
         out.push('=');
         out.push_str(&self.value);
 
-        if let Some(ref path) = self.path {
-            if is_valid_attr_value(path) {
-                out.push_str("; Path=");
-                out.push_str(path);
-            }
+        if let Some(ref path) = self.path
+            && is_valid_attr_value(path)
+        {
+            out.push_str("; Path=");
+            out.push_str(path);
         }
-        if let Some(ref domain) = self.domain {
-            if is_valid_attr_value(domain) {
-                out.push_str("; Domain=");
-                out.push_str(domain);
-            }
+        if let Some(ref domain) = self.domain
+            && is_valid_attr_value(domain)
+        {
+            out.push_str("; Domain=");
+            out.push_str(domain);
         }
         if let Some(max_age) = self.max_age {
             out.push_str("; Max-Age=");
@@ -1948,12 +1948,10 @@ pub fn apply_conditional(
     if matches!(
         method,
         crate::request::Method::Get | crate::request::Method::Head
-    ) {
-        if let Some(if_none_match) = find_header(request_headers, "if-none-match") {
-            if !check_if_none_match(&if_none_match, &response_etag) {
-                return Response::not_modified().with_etag(response_etag);
-            }
-        }
+    ) && let Some(if_none_match) = find_header(request_headers, "if-none-match")
+        && !check_if_none_match(&if_none_match, &response_etag)
+    {
+        return Response::not_modified().with_etag(response_etag);
     }
 
     // Check If-Match (for unsafe methods - returns 412)
@@ -1962,12 +1960,10 @@ pub fn apply_conditional(
         crate::request::Method::Put
             | crate::request::Method::Patch
             | crate::request::Method::Delete
-    ) {
-        if let Some(if_match) = find_header(request_headers, "if-match") {
-            if !check_if_match(&if_match, &response_etag) {
-                return Response::precondition_failed();
-            }
-        }
+    ) && let Some(if_match) = find_header(request_headers, "if-match")
+        && !check_if_match(&if_match, &response_etag)
+    {
+        return Response::precondition_failed();
     }
 
     response

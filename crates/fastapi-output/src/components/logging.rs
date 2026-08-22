@@ -248,17 +248,17 @@ impl RequestLogger {
         }
 
         // Client IP
-        if self.show_client_ip {
-            if let Some(ip) = &entry.client_ip {
-                parts.push(format!("[{ip}]"));
-            }
+        if self.show_client_ip
+            && let Some(ip) = &entry.client_ip
+        {
+            parts.push(format!("[{ip}]"));
         }
 
         // Request ID
-        if self.show_request_id {
-            if let Some(id) = &entry.request_id {
-                parts.push(format!("({id})"));
-            }
+        if self.show_request_id
+            && let Some(id) = &entry.request_id
+        {
+            parts.push(format!("({id})"));
         }
 
         parts.join(" ")
@@ -338,17 +338,17 @@ impl RequestLogger {
         }
 
         // Client IP
-        if self.show_client_ip {
-            if let Some(ip) = &entry.client_ip {
-                parts.push(format!("{muted}[{ip}]{ANSI_RESET}"));
-            }
+        if self.show_client_ip
+            && let Some(ip) = &entry.client_ip
+        {
+            parts.push(format!("{muted}[{ip}]{ANSI_RESET}"));
         }
 
         // Request ID
-        if self.show_request_id {
-            if let Some(id) = &entry.request_id {
-                parts.push(format!("{muted}({id}){ANSI_RESET}"));
-            }
+        if self.show_request_id
+            && let Some(id) = &entry.request_id
+        {
+            parts.push(format!("{muted}({id}){ANSI_RESET}"));
         }
 
         parts.join(" ")

@@ -55,20 +55,20 @@ impl OutputMode {
     /// Select the appropriate mode based on environment detection.
     #[must_use]
     pub fn auto() -> Self {
-        if let Ok(mode_str) = std::env::var("FASTAPI_OUTPUT_MODE") {
-            if let Ok(mode) = mode_str.parse::<OutputMode>() {
-                if matches!(mode, OutputMode::Rich) {
-                    #[cfg(feature = "rich")]
-                    {
-                        return OutputMode::Rich;
-                    }
-                    #[cfg(not(feature = "rich"))]
-                    {
-                        return OutputMode::Plain;
-                    }
+        if let Ok(mode_str) = std::env::var("FASTAPI_OUTPUT_MODE")
+            && let Ok(mode) = mode_str.parse::<OutputMode>()
+        {
+            if matches!(mode, OutputMode::Rich) {
+                #[cfg(feature = "rich")]
+                {
+                    return OutputMode::Rich;
                 }
-                return mode;
+                #[cfg(not(feature = "rich"))]
+                {
+                    return OutputMode::Plain;
+                }
             }
+            return mode;
         }
 
         match detected_preference() {

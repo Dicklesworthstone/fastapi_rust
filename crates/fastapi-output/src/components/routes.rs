@@ -193,14 +193,14 @@ impl RouteDisplay {
                 width = method_width
             );
 
-            if self.config.show_handlers {
-                if let Some(handler) = &route.handler {
-                    // Pad path column
-                    let padding = path_width.saturating_sub(route.path.len());
-                    line.push_str(&" ".repeat(padding));
-                    line.push_str("  ");
-                    line.push_str(handler);
-                }
+            if self.config.show_handlers
+                && let Some(handler) = &route.handler
+            {
+                // Pad path column
+                let padding = path_width.saturating_sub(route.path.len());
+                line.push_str(&" ".repeat(padding));
+                line.push_str("  ");
+                line.push_str(handler);
             }
 
             if self.config.show_tags && !route.tags.is_empty() {
