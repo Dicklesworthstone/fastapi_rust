@@ -15,13 +15,6 @@ fastapi-types = { workspace = true }
 fastapi-router = { workspace = true }
 fastapi-openapi = { workspace = true }
 
-# Testing utilities (used by TestClient for sync execution). Optional so a
-# downstream that disables `testing` resolves no executor at all: the crate's
-# async surface is driven entirely by the consumer's asupersync runtime, and
-# futures-executor exists only to keep TestClient's synchronous API
-# synchronous. See AGENTS.md "Async Runtime: asupersync (MANDATORY)".
-futures-executor = { version = "0.3", optional = true }
-
 # Cross-platform OS CSPRNG (used for password salts and CSRF tokens; replaces
 # the previous /dev/urandom-only implementation that panicked on Windows).
 getrandom = "0.4"
@@ -35,13 +28,20 @@ flate2 = { version = "1", optional = true }
 [features]
 default = ["testing"]
 # TestClient and assertion helpers require asupersync's test-only Cx constructors.
-testing = ["asupersync/test-internals", "dep:futures-executor"]
+# No executor dependency: TestClient's synchronous API runs on the
+# crate-local `testing::block_on` (GH#31).
+testing = ["asupersync/test-internals"]
 # Enable regex support in testing assertions
 regex = ["dep:regex"]
 # Enable the gzip-based compression middleware (pulls in flate2).
 compression = ["dep:flate2"]
 
 [dev-dependencies]
+# Test-only executor for `#[cfg(test)]` modules and doctests. Deliberately NOT
+# a normal dependency (GH#31): production code (including the feature-gated
+# `testing` module's TestClient) uses the crate-local `testing::block_on`, so
+# no alternate async runtime reaches consumers' dependency closures.
+futures-executor = "0.3"
 serial_test = "4.0.1"
 fastapi-macros = { workspace = true }
 
