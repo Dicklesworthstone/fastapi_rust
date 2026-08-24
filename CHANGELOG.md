@@ -6,7 +6,7 @@ This project is a Rust web framework inspired by Python's [FastAPI](https://fast
 
 Commit links point to `https://github.com/Dicklesworthstone/fastapi_rust/commit/<hash>`.
 
-Scope window: first commit (2026-01-17) through v0.4.3 (2026-08-20).
+Scope window: first commit (2026-01-17) through v0.4.4 (2026-08-24).
 
 Sources: git history and tags on `main`, GitHub Releases, and the crates.io
 version list for `fastapi-rust`. Dates are the local commit/tag dates; crates.io
@@ -16,6 +16,7 @@ shows the same publishes in UTC (which can be one day later).
 
 | Version | Date | Git tag | GitHub Release | crates.io | Notes |
 |---------|------|---------|----------------|-----------|-------|
+| 0.4.4 | 2026-08-24 | [v0.4.4](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.4) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.4) | [yes](https://crates.io/crates/fastapi-rust/0.4.4) | futures-executor out of the normal dep graph (GH#31); builder metadata precedence |
 | 0.4.3 | 2026-08-20 | [v0.4.3](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.3) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.3) | [yes](https://crates.io/crates/fastapi-rust/0.4.3) | macro route path works for facade consumers; Json responses; builder title/version |
 | 0.4.2 | 2026-08-20 | [v0.4.2](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.2) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.2) | [yes](https://crates.io/crates/fastapi-rust/0.4.2) | real install.sh; stable-safe dependency snippets |
 | 0.4.1 | 2026-08-20 | [v0.4.1](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.1) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.1) | [yes](https://crates.io/crates/fastapi-rust/0.4.1) | builds on stable 1.95; metadata/docs corrections |
@@ -28,7 +29,7 @@ shows the same publishes in UTC (which can be one day later).
 
 ---
 
-## [Unreleased]
+## [v0.4.4] -- 2026-08-24
 
 - `fastapi-core` no longer has any normal dependency on `futures-executor`
   (GH#31). The synchronous `TestClient` API now drives handler futures with a
