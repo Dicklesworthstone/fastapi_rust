@@ -15,9 +15,6 @@ fastapi-types = { workspace = true }
 fastapi-router = { workspace = true }
 fastapi-openapi = { workspace = true }
 
-# Testing utilities (used by TestClient for sync execution)
-futures-executor = "0.3"
-
 # Cross-platform OS CSPRNG (used for password salts and CSRF tokens; replaces
 # the previous /dev/urandom-only implementation that panicked on Windows).
 getrandom = "0.4"
@@ -31,6 +28,8 @@ flate2 = { version = "1", optional = true }
 [features]
 default = ["testing"]
 # TestClient and assertion helpers require asupersync's test-only Cx constructors.
+# No executor dependency: TestClient's synchronous API runs on the
+# crate-local `testing::block_on` (GH#31).
 testing = ["asupersync/test-internals"]
 # Enable regex support in testing assertions
 regex = ["dep:regex"]
@@ -38,6 +37,11 @@ regex = ["dep:regex"]
 compression = ["dep:flate2"]
 
 [dev-dependencies]
+# Test-only executor for `#[cfg(test)]` modules and doctests. Deliberately NOT
+# a normal dependency (GH#31): production code (including the feature-gated
+# `testing` module's TestClient) uses the crate-local `testing::block_on`, so
+# no alternate async runtime reaches consumers' dependency closures.
+futures-executor = "0.3"
 serial_test = "4.0.1"
 fastapi-macros = { workspace = true }
 

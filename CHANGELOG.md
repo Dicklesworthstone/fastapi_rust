@@ -30,6 +30,15 @@ shows the same publishes in UTC (which can be one day later).
 
 ## [Unreleased]
 
+- `fastapi-core` no longer has any normal dependency on `futures-executor`
+  (GH#31). The synchronous `TestClient` API now drives handler futures with a
+  crate-local park/unpark executor (`testing::block_on`), and
+  `futures-executor` moved to dev-dependencies (still used by `#[cfg(test)]`
+  modules). Asupersync-only consumers can depend on `fastapi-core` — default
+  features included — without an alternate async runtime entering their
+  `Cargo.lock`. No API change; TestClient semantics are identical (the
+  previous executor also drove these futures reactor-free).
+
 - `AppBuilder::title` / `version` are now authoritative regardless of call
   order: they also override `AppConfig::name` / `version` from a later
   `.config(...)` call, matching the documented precedence over `OpenApiConfig`

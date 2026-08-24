@@ -55,6 +55,46 @@ use crate::middleware::Handler;
 use crate::request::{Body, Method, Request};
 use crate::response::{Response, ResponseBody, StatusCode};
 
+/// Run a future to completion on the current thread, parking between polls.
+///
+/// Minimal single-future executor used by the synchronous [`TestClient`] API.
+/// It intentionally replaces `futures_executor::block_on` so that
+/// `fastapi-core`'s normal dependency closure contains no alternate async
+/// runtime (GH#31): Asupersync-only consumers can depend on the crate — with
+/// the default `testing` feature on — without another executor entering their
+/// `Cargo.lock`.
+///
+/// Correctness notes: the unpark token is buffered, so a wake landing between
+/// `poll` and `park` is not lost; spurious unparks merely cause an extra poll.
+/// The futures driven here are the same pure state machines the previous
+/// `futures_executor::block_on` drove (no reactor was involved before either).
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+    use std::pin::pin;
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::thread::Thread;
+
+    /// Wakes the thread that owns the future by unparking it.
+    struct ThreadWaker(Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let mut future = pin!(future);
+    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
 /// A simple cookie jar for maintaining cookies across requests.
 ///
 /// Cookies are stored as name-value pairs and automatically
@@ -822,7 +862,7 @@ impl<H: Handler + 'static> TestClient<H> {
             RequestContext::with_overrides(cx, request_id, Arc::clone(&self.dependency_overrides));
 
         // The TestClient API is synchronous; run the async handler to completion.
-        let response = futures_executor::block_on(self.handler.call(&ctx, &mut request));
+        let response = crate::testing::block_on(self.handler.call(&ctx, &mut request));
 
         // Extract cookies from response
         {
@@ -2163,7 +2203,7 @@ impl<H: Handler + 'static> CancellationTest<H> {
         ctx.cx().set_cancel_requested(true);
 
         let mut request = Request::new(Method::Get, "/test");
-        let response = futures_executor::block_on(self.handler.call(&ctx, &mut request));
+        let response = crate::testing::block_on(self.handler.call(&ctx, &mut request));
 
         // Check if handler returned a cancellation-related status
         let is_cancelled_response = response.status().as_u16() == 499
@@ -2184,7 +2224,7 @@ impl<H: Handler + 'static> CancellationTest<H> {
         let ctx = RequestContext::new(cx, 1);
         let mut request = Request::new(Method::Get, "/test");
 
-        let response = futures_executor::block_on(self.handler.call(&ctx, &mut request));
+        let response = crate::testing::block_on(self.handler.call(&ctx, &mut request));
 
         CancellationTestResult {
             completed: true,
@@ -2215,7 +2255,7 @@ impl<H: Handler + 'static> CancellationTest<H> {
         }
 
         let mut request = Request::new(Method::Get, path);
-        let response = futures_executor::block_on(self.handler.call(&ctx, &mut request));
+        let response = crate::testing::block_on(self.handler.call(&ctx, &mut request));
 
         let is_cancelled = ctx.is_cancelled();
         let is_cancelled_response =
@@ -2327,7 +2367,7 @@ mod tests {
     }
 
     fn override_dep_route(ctx: &RequestContext, req: &mut Request) -> std::future::Ready<Response> {
-        let dep = futures_executor::block_on(Depends::<OverrideDep>::from_request(ctx, req))
+        let dep = crate::testing::block_on(Depends::<OverrideDep>::from_request(ctx, req))
             .expect("dependency extraction failed");
         std::future::ready(
             Response::ok().body(ResponseBody::Bytes(dep.value.to_string().into_bytes())),
@@ -4509,7 +4549,7 @@ impl TestServer {
         let ctx = RequestContext::with_overrides(cx, request_id, dependency_overrides);
 
         // Execute the App handler synchronously
-        let response = futures_executor::block_on(app.handle(&ctx, &mut request));
+        let response = crate::testing::block_on(app.handle(&ctx, &mut request));
 
         let duration = start_time.elapsed();
         let status_code = response.status().as_u16();
