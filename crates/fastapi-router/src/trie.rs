@@ -20,6 +20,12 @@
 //! - `/users/123` → `/users/{id}` (param wins over wildcard)
 //! - `/other/path` → `/{*path}` (wildcard catches the rest)
 //!
+//! Priority decides which candidate is tried *first*; the walk backtracks when a candidate's
+//! subtree dead-ends. So `/docs/{venue}/{issuer}/list` and `/docs/{key}/body` can both be
+//! registered (different structure, so no conflict) and both resolve, and
+//! `/x/static/only` beside `/x/{p}/other` resolves `/x/static/other` to the second route
+//! (while `/x/static/{a}` would still win it, static prefix first).
+//!
 //! ## Conflict Detection
 //!
 //! Routes that are ambiguous are rejected at registration:
@@ -906,10 +912,6 @@ impl Node {
             .iter()
             .find(|c| c.param.is_none() && c.segment == segment)
     }
-
-    fn find_param(&self) -> Option<&Node> {
-        self.children.iter().find(|c| c.param.is_some())
-    }
 }
 
 /// Radix trie router.
@@ -1165,39 +1167,74 @@ impl Router {
 
         let last_end = ranges.last().map_or(0, |(_, end)| *end);
         let mut params = Vec::new();
-        let mut node = &self.root;
+        let node = Self::walk(&self.root, path, ranges, 0, last_end, &mut params)?;
+        Some((node, params))
+    }
 
-        for &(start, end) in ranges {
-            let segment = &path[start..end];
+    /// Depth-first walk from `node` over `ranges[idx..]`, in priority order: the static child
+    /// first, then every parameter child in registration order. A candidate whose subtree
+    /// dead-ends is abandoned and the next candidate is tried, so sibling parameter nodes with
+    /// different names (`/x/{a}/{b}/list` beside `/x/{key}/body` — registrable, because
+    /// `paths_conflict` stops at the first static/param difference) and a static prefix that
+    /// only covers part of the pattern space (`/x/static/only` beside `/x/{p}/other`) are all
+    /// reachable. Before this walk existed the matcher committed to the first static or
+    /// parameter child it saw and every later sibling was silently unroutable (404 at runtime
+    /// with no registration error). Backtracking never changes an existing match: a path that
+    /// resolved before still takes the same first candidate; only paths that previously
+    /// returned `None` can now resolve.
+    ///
+    /// A terminal node must carry at least one route: an intermediate node reached exactly at
+    /// the end of the path is not a match, so `/x/s` under `/x/s/list` + `/x/{b}` resolves to
+    /// `/x/{b}` instead of dead-ending on the routeless static `s`.
+    fn walk<'a>(
+        node: &'a Node,
+        path: &'a str,
+        ranges: &[(usize, usize)],
+        idx: usize,
+        last_end: usize,
+        params: &mut Vec<(&'a str, &'a str)>,
+    ) -> Option<&'a Node> {
+        if idx == ranges.len() {
+            return if node.routes.is_empty() {
+                None
+            } else {
+                Some(node)
+            };
+        }
+        let (start, end) = ranges[idx];
+        let segment = &path[start..end];
 
-            // Try static match first
-            if let Some(child) = node.find_static(segment) {
-                node = child;
-                continue;
-            }
-
-            // Try parameter match
-            if let Some(child) = node.find_param()
-                && let Some(ref info) = child.param
-            {
-                if info.converter == Converter::Path {
-                    let value = &path[start..last_end];
-                    params.push((info.name.as_str(), value));
-                    node = child;
-                    // Path converter consumes rest of path
-                    return Some((node, params));
-                }
-                if info.converter.matches(segment) {
-                    params.push((info.name.as_str(), segment));
-                    node = child;
-                    continue;
-                }
-            }
-
-            return None;
+        // Static segments take priority over parameters.
+        if let Some(child) = node.find_static(segment)
+            && let Some(found) = Self::walk(child, path, ranges, idx + 1, last_end, params)
+        {
+            return Some(found);
         }
 
-        Some((node, params))
+        // Parameter children, in registration order.
+        for child in node.children.iter().filter(|c| c.param.is_some()) {
+            let Some(ref info) = child.param else {
+                continue;
+            };
+            if info.converter == Converter::Path {
+                // Path converter consumes the rest of the path.
+                if child.routes.is_empty() {
+                    continue;
+                }
+                params.push((info.name.as_str(), &path[start..last_end]));
+                return Some(child);
+            }
+            if !info.converter.matches(segment) {
+                continue;
+            }
+            params.push((info.name.as_str(), segment));
+            if let Some(found) = Self::walk(child, path, ranges, idx + 1, last_end, params) {
+                return Some(found);
+            }
+            params.pop();
+        }
+
+        None
     }
 }
 
@@ -3923,5 +3960,113 @@ mod tests {
 
         let m = router.match_path(&path, Method::Get);
         assert!(m.is_some());
+    }
+
+    // ── Backtracking across sibling candidates ──────────────────────────────
+    //
+    // Found in production (midas_edge_api, 2026-08-28): `/v1/external-documents/{venue}/{issuer}/
+    // bfv-documents` registered beside `/v1/external-documents/{document_key}/bfv` built,
+    // was cataloged and unit-tested, and 404'd on every request — the greedy walk committed
+    // to the first parameter child (`{venue}`) and never tried its sibling.
+
+    #[test]
+    fn sibling_params_with_different_names_are_both_reachable() {
+        let mut router = Router::new();
+        router
+            .add(route(Method::Get, "/docs/{venue}/{issuer}/list"))
+            .unwrap();
+        router.add(route(Method::Get, "/docs/{key}/body")).unwrap();
+        router
+            .add(route(Method::Get, "/docs/{key}/body/sections"))
+            .unwrap();
+
+        let m = router
+            .match_path("/docs/asx/SKS/list", Method::Get)
+            .unwrap();
+        assert_eq!(m.route.path, "/docs/{venue}/{issuer}/list");
+        assert_eq!(m.params, vec![("venue", "asx"), ("issuer", "SKS")]);
+
+        let m = router.match_path("/docs/abc123/body", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/docs/{key}/body");
+        assert_eq!(m.params, vec![("key", "abc123")]);
+
+        let m = router
+            .match_path("/docs/abc123/body/sections", Method::Get)
+            .unwrap();
+        assert_eq!(m.route.path, "/docs/{key}/body/sections");
+        assert_eq!(m.params, vec![("key", "abc123")]);
+
+        // Neither shape matches a two-segment tail that is not `body`.
+        assert!(
+            router
+                .match_path("/docs/abc123/other", Method::Get)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn static_prefix_dead_end_falls_back_to_param_sibling() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/x/static/only")).unwrap();
+        router.add(route(Method::Get, "/x/{p}/other")).unwrap();
+
+        // Static wins when its subtree matches.
+        let m = router.match_path("/x/static/only", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/x/static/only");
+        assert!(m.params.is_empty());
+
+        // The static subtree has no `other`; the parameter sibling does.
+        let m = router.match_path("/x/static/other", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/x/{p}/other");
+        assert_eq!(m.params, vec![("p", "static")]);
+
+        // Priority is unchanged when the static subtree CAN match: `/x/static/{a}` still
+        // captures `other` as `a` rather than falling back to `/x/{p}/other`.
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/x/static/{a}")).unwrap();
+        router.add(route(Method::Get, "/x/{p}/other")).unwrap();
+        let m = router.match_path("/x/static/other", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/x/static/{a}");
+        assert_eq!(m.params, vec![("a", "other")]);
+    }
+
+    #[test]
+    fn intermediate_node_without_routes_is_not_a_match() {
+        let mut router = Router::new();
+        router.add(route(Method::Get, "/x/s/list")).unwrap();
+        router.add(route(Method::Get, "/x/{b}")).unwrap();
+
+        // The static `s` node is reached exactly at the end of the path but carries no
+        // route; the parameter sibling does, and captures `s`.
+        let m = router.match_path("/x/s", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/x/{b}");
+        assert_eq!(m.params, vec![("b", "s")]);
+
+        let m = router.match_path("/x/s/list", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/x/s/list");
+        assert!(m.params.is_empty());
+
+        // A registered-but-methodless terminal is still a 405, not a fallback to a sibling.
+        let mut router = Router::new();
+        router.add(route(Method::Post, "/y/{a}")).unwrap();
+        assert!(matches!(
+            router.lookup("/y/1", Method::Get),
+            RouteLookup::MethodNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn backtracking_restores_params_of_abandoned_candidates() {
+        let mut router = Router::new();
+        router
+            .add(route(Method::Get, "/r/{first}/{second}/deep"))
+            .unwrap();
+        router.add(route(Method::Get, "/r/{only}/flat")).unwrap();
+
+        // The first candidate captures `first` and `second`, then dead-ends on `flat`; the
+        // captured values must not leak into the second candidate's parameter list.
+        let m = router.match_path("/r/1/flat", Method::Get).unwrap();
+        assert_eq!(m.route.path, "/r/{only}/flat");
+        assert_eq!(m.params, vec![("only", "1")]);
     }
 }

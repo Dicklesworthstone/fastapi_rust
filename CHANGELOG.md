@@ -29,6 +29,23 @@ shows the same publishes in UTC (which can be one day later).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Router: sibling route candidates are now backtracked instead of silently unroutable.**
+  The trie walk committed to the first static or parameter child at each depth and never
+  tried a sibling, so `/docs/{venue}/{issuer}/list` beside `/docs/{key}/body` registered
+  without a conflict error, appeared in OpenAPI, and 404'd on every request (found in
+  production by `midas_edge_api`, 2026-08-28). `match_node` now walks depth-first in
+  priority order (static child, then parameter children in registration order) and falls
+  back when a subtree dead-ends; an intermediate node reached at the end of the path is
+  not a match. Existing matches are unchanged — only paths that previously returned
+  `None` can now resolve. Tests: `sibling_params_with_different_names_are_both_reachable`,
+  `static_prefix_dead_end_falls_back_to_param_sibling`,
+  `intermediate_node_without_routes_is_not_a_match`,
+  `backtracking_restores_params_of_abandoned_candidates`.
+
 ## [v0.4.4] -- 2026-08-24
 
 - `fastapi-core` no longer has any normal dependency on `futures-executor`
