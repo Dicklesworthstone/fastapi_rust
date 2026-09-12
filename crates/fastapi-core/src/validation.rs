@@ -172,11 +172,7 @@ pub fn is_valid_url(value: &str) -> bool {
     }
 
     // Must have at least one dot (or be localhost)
-    if host != "localhost" && !host.contains('.') {
-        return false;
-    }
-
-    true
+    host == "localhost" || host.contains('.')
 }
 
 /// Check if a string matches a regex pattern.

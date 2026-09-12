@@ -23,7 +23,7 @@ homepage = "https://github.com/Dicklesworthstone/fastapi_rust"
 # Runtime (our own) - uses crates.io in CI/publishing; override with path in .cargo/config.toml for local dev.
 # default-features = false keeps asupersync's `nightly-outcome-try` default off so the
 # workspace builds on stable (MSRV 1.95); consumers can enable extra asupersync features themselves.
-asupersync = { version = "0.4.9", default-features = false }
+asupersync = { version = "0.5.0", default-features = false }
 
 # Serialization (only these)
 serde = { version = "1", features = ["derive"] }

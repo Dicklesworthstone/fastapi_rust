@@ -20,6 +20,8 @@ asupersync = { workspace = true }
 default = []
 
 [dev-dependencies]
+# Standalone HTTP unit tests construct contexts without widening normal consumers.
+asupersync = { workspace = true, features = ["test-internals"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
