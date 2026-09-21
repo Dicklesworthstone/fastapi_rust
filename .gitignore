@@ -28,6 +28,7 @@ Thumbs.db
 .beads/beads.db-fsqlite-ns-*
 *-fsqlite-ns-gate
 *-fsqlite-ns-use
+.beads/.br_recovery/
 
 # Source images (webp versions are committed instead)
 *.png
