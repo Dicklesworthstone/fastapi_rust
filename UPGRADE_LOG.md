@@ -38,6 +38,11 @@ link, corrected to `enable_docs`. Warning gates remain unchanged. Evidence:
 [clippy job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879160),
 [docs job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879582).
 No open GitHub issues or PRs were found. Post-push CI verification is pending.
+The preservation push at e942b6e passed formatting and macOS/Windows tests,
+then [Clippy](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37242247058/job/111553476317)
+reported two `collapsible_if` errors in compression middleware. The nested
+conditions are now equivalent short-circuit let chains; `-D warnings` stays
+unchanged. Final remote Clippy and the next pushed CI run remain pending.
 The scheduled workflow now uses explicit `+nightly` / `+1.95.0` selectors:
 otherwise the repository pin silently overrides the toolchain installed for
 the named latest-nightly or MSRV check. Existing warning gates and optional
@@ -64,6 +69,9 @@ The replacement worker passed epoch validation, then refused queue validation
 for the same pressure condition. Subsequent builds use RCH's admissible-worker
 selection and Cargo `--jobs 2` to reduce peak compiler memory. Test scope,
 assertions, and warning gates are unchanged; neither refusal ran tests.
+The data-encoding run first hit a source-sync timeout on hz4 before remote
+Cargo started. RCH retried on hz3, where 2110 workspace library tests passed.
+The failed sync is not test evidence; no local compilation fallback occurred.
 
 The latest wasm-bindgen-futures (0.4.79) adds a normal Tokio dependency under an
 Emscripten cfg, which Cargo records even on Linux. The project forbids this.
@@ -96,6 +104,10 @@ all seven intended versions without Tokio. No manual checksum edits were needed.
 | crossbeam-epoch | 0.9.20 → 0.9.21 (already locked) | [Source](https://static.crates.io/crates/crossbeam-epoch/crossbeam-epoch-0.9.21.crate): Const null and TSan support. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
 | crossbeam-queue | 0.3.13 → 0.3.14 (already locked) | [Source](https://static.crates.io/crates/crossbeam-queue/crossbeam-queue-0.3.14.crate): Wider indexes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | crossbeam-utils | 0.8.22 → 0.8.23 | [Source](https://static.crates.io/crates/crossbeam-utils/crossbeam-utils-0.8.23.crate): ShardedLock guard and TSan fixes. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| data-encoding | 2.11.0 → 2.11.1 | [Source](https://github.com/ia0/data-encoding/compare/v2.11.0...v2.11.1): Metadata-only source comparison. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| either | 1.17.0 → 1.18.0 | [Source](https://static.crates.io/crates/either/either-1.18.0.crate): Tuple iterator implementations. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| find-msvc-tools | 0.1.9 → 0.1.14 (already locked) | [Source](https://github.com/rust-lang/cc-rs/blob/find-msvc-tools-v0.1.14/find-msvc-tools/CHANGELOG.md): MSRV 1.65 and cc integration. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed in coupled cc validation. |
+| futures-io | 0.3.33 → 0.3.34 | [Source](https://github.com/rust-lang/futures-rs/releases/tag/0.3.34): Companion futures release. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
 ## Historical upgrade record
