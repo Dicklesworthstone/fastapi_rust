@@ -108,6 +108,7 @@ all seven intended versions without Tokio. No manual checksum edits were needed.
 | either | 1.17.0 → 1.18.0 | [Source](https://static.crates.io/crates/either/either-1.18.0.crate): Tuple iterator implementations. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | find-msvc-tools | 0.1.9 → 0.1.14 (already locked) | [Source](https://github.com/rust-lang/cc-rs/blob/find-msvc-tools-v0.1.14/find-msvc-tools/CHANGELOG.md): MSRV 1.65 and cc integration. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed in coupled cc validation. |
 | futures-io | 0.3.33 → 0.3.34 | [Source](https://github.com/rust-lang/futures-rs/releases/tag/0.3.34): Companion futures release. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| hermit-abi | 0.5.2 → 0.5.3 | [Source](https://github.com/hermit-os/hermit-rs/compare/356f491b8c68aaa893a4450b10b9c080f6d2e63a...c0b97d12a2f1f65610ba84e6f23fbb69fc70c0f7): fsync and docs; native regression only. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
 ## Historical upgrade record
