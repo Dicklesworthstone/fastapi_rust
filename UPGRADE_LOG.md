@@ -1,5 +1,105 @@
 # Dependency Upgrade Log
 
+## 2026-10-04 refresh (bd-3ffo)
+
+The user explicitly requested `library-updater`. This section records registry
+research and per-dependency validation; it does not claim a performance win.
+Historical entries below are retained. The recovery file
+`claude-upgrade-progress.json` becomes inactive once validation is complete.
+
+All 18 direct external dependencies were checked against official crates.io
+stable, non-yanked versions. Four need lockfile updates; their manifest ranges
+already allow the target versions. Internal path dependencies and the pinned
+nightly toolchain are preserved.
+
+| Dependency | Locked before | Target | Research / compatibility notes | Validation |
+|---|---|---|---|---|
+| flate2 | 1.1.9 | 1.1.10 | [Release notes](https://github.com/rust-lang/flate2-rs/releases/tag/1.1.10): decoder/header fixes; miniz backend moves to 0.9. | Reapplied: RCH core all-feature library tests passed (1197 passed, 1 existing ignored). |
+| futures-executor | 0.3.33 | 0.3.34 | [Release notes](https://github.com/rust-lang/futures-rs/releases/tag/0.3.34): waker fix; requires companion futures core/task/util 0.3.34. | Reapplied: RCH workspace all-feature library tests passed. |
+| syn (direct) | 3.0.3 | 3.0.6 | [Release notes](https://github.com/dtolnay/syn/releases/tag/3.0.6): foreign safe-fn parsing, error spans, interpolated lifetimes. The separate transitive syn 2 remains upstream-owned. | RCH workspace all-feature tests passed. |
+| insta | 1.48.0 | 1.49.0 | [Release notes](https://github.com/mitsuhiko/insta/releases/tag/1.49.0): enum-key serialization and macro warning fixes. Existing snapshots checked without regeneration. | RCH output all-feature tests passed. |
+
+Already current: asupersync 0.5.0, serde 1.0.229, serde_json 1.0.151,
+parking_lot 0.12.5, getrandom 0.4.3, regex 1.13.1, serial_test 4.0.1,
+criterion 0.8.2, proc-macro2 1.0.107, quote 1.0.47, crossterm 0.29.0,
+unicode-width 0.2.2, rich_rust 0.2.3, proptest 1.11.0.
+
+GitHub Actions stable release tags and major aliases were checked against their
+upstream Git refs: checkout v7.0.1, upload-artifact v7.0.1,
+download-artifact v8.0.1, github-script v9.0.0, rust-cache v2.9.2,
+cargo-deny-action v2.1.1, action-gh-release v3.0.3. All active workflow
+selectors already point to these releases. Intentional rust-toolchain selectors
+are preserved. CI now explicitly installs the repository's pinned nightly in
+each job: the prior fmt/clippy jobs installed components on floating nightly,
+then rustup selected the pinned nightly without those components. Their checks
+never ran. The separate rustdoc failure was an obsolete `AppBuilder::docs`
+link, corrected to `enable_docs`. Warning gates remain unchanged. Evidence:
+[fmt job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879709),
+[clippy job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879160),
+[docs job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879582).
+No open GitHub issues or PRs were found. Post-push CI verification is pending.
+The scheduled workflow now uses explicit `+nightly` / `+1.95.0` selectors:
+otherwise the repository pin silently overrides the toolchain installed for
+the named latest-nightly or MSRV check. Existing warning gates and optional
+job policies are preserved.
+
+Baseline: RCH `cargo test --workspace --all-features --locked` at dfaa5a1 passed.
+The flate2 and futures upgrades passed their first workspace tests, but external
+checkout resets at 20:39:55 and 20:41:07 UTC removed those lockfile changes and
+the uncommitted source/doc edits. Original handwritten patches were recovered
+from the session log; dependency changes are being reapplied and retested.
+Those earlier runs do not certify the recovered final checkout.
+
+Transitive updates are researched from published manifests, changelogs, and
+tagged source before mutation. Each update gets affected-crate tests before the
+next update; the final workspace suite checks integration. Target-specific
+dependencies receive native regression checks, not cross-platform certification.
+No snapshots are regenerated. Final checks and security audit are pending.
+
+The crossbeam-epoch validation was initially refused by RCH because worker
+vmi1264463 had critical memory pressure (exit 103). No tests ran and no local
+fallback occurred. Validation resumes on an admissible remote worker before
+another dependency changes; this refusal is not a passing test result.
+The replacement worker passed epoch validation, then refused queue validation
+for the same pressure condition. Subsequent builds use RCH's admissible-worker
+selection and Cargo `--jobs 2` to reduce peak compiler memory. Test scope,
+assertions, and warning gates are unchanged; neither refusal ran tests.
+
+The latest wasm-bindgen-futures (0.4.79) adds a normal Tokio dependency under an
+Emscripten cfg, which Cargo records even on Linux. The project forbids this.
+Use the preceding Tokio-free family: futures 0.4.78, bindgen 0.2.128, and
+js-sys/web-sys 0.3.105. [Published manifest](https://raw.githubusercontent.com/wasm-bindgen/wasm-bindgen/0.2.129/crates/futures/Cargo.toml).
+The first futures-only resolver attempt failed because locked web-sys required
+js-sys 0.3.103. Selecting both futures and web-sys with precise futures 0.4.78
+lets Cargo update the exactly coupled family atomically; its dry run confirmed
+all seven intended versions without Tokio. No manual checksum edits were needed.
+
+### Sequential transitive validation
+
+| Package / coupled family | Before → after | Research | Tests |
+|---|---|---|---|
+| futures-executor | 0.3.33 → 0.3.34 | [Source](https://github.com/rust-lang/futures-rs/releases/tag/0.3.34): Waker identity fix; coupled core/task/util upgrades. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0` passed. |
+| insta | 1.48.0 → 1.49.0 | [Source](https://github.com/mitsuhiko/insta/releases/tag/1.49.0): Enum-key serialization and macro warning fixes; preserve snapshots. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| chacha20 | 0.10.1 → 0.10.2 | [Source](https://github.com/RustCrypto/stream-ciphers/pull/580): Replace yanked release; fix SSE2 backend intrinsics. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0` passed. |
+| wasm-bindgen-futures / wasm-bindgen / js-sys / web-sys | 0.4.76 / 0.2.126 / 0.3.103 → 0.4.78 / 0.2.128 / 0.3.105 | [Source](https://github.com/wasm-bindgen/wasm-bindgen/blob/0.2.128/CHANGELOG.md): Newest Tokio-free coupled bindgen/js/web family; native regression only. | RCH workspace all-feature library tests passed; native only. |
+| aes | 0.9.2 → 0.9.3 | [Source](https://static.crates.io/crates/aes/aes-0.9.3.crate): MSRV 1.89; VAES default and backend cfg changes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0` passed. |
+| aes-gcm | 0.11.0 → 0.11.1 | [Source](https://static.crates.io/crates/aes-gcm/aes-gcm-0.11.1.crate): Internal ctutils migration. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0` passed. |
+| aho-corasick | 1.1.4 → 1.1.5 | [Source](https://github.com/BurntSushi/aho-corasick/compare/1.1.4...1.1.5): Checked offsets. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| bitflags | 2.13.1 → 2.13.2 | [Source](https://github.com/bitflags/bitflags/releases/tag/2.13.2): Generated const placement fix. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| cc | 1.4.0 → 1.6.0 | [Source](https://github.com/rust-lang/cc-rs/blob/cc-v1.6.0/CHANGELOG.md): MSRV 1.65; build flag/cache changes; paired MSVC tools. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| cfg-if | 1.0.4 → 1.0.5 | [Source](https://github.com/rust-lang/cfg-if/releases/tag/v1.0.5): Documentation update. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| clap | 4.6.4 → 4.6.7 | [Source](https://github.com/clap-rs/clap/blob/v4.6.7/CHANGELOG.md): Criterion parser family. | RCH `cargo test -p fastapi-http --all-targets --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| console | 0.16.4 → 0.16.6 | [Source](https://github.com/console-rs/console/releases/tag/0.16.6): Terminal escape and UTF-8 width fixes. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| cpufeatures | 0.3.0 → 0.3.1 | [Source](https://static.crates.io/crates/cpufeatures/cpufeatures-0.3.1.crate): AVX/Miri detection fixes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0` passed. |
+| crc32fast | 1.5.0 → 1.5.2 | [Source](https://github.com/srijs/rust-crc32fast/compare/v1.5.0...v1.5.2): CRC backend changes; no speed claim. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| crossbeam-deque | 0.8.7 → 0.8.8 | [Source](https://static.crates.io/crates/crossbeam-deque/crossbeam-deque-0.8.8.crate): Wider indexes and TSan support. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| crossbeam-epoch | 0.9.20 → 0.9.21 (already locked) | [Source](https://static.crates.io/crates/crossbeam-epoch/crossbeam-epoch-0.9.21.crate): Const null and TSan support. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed. |
+| crossbeam-queue | 0.3.13 → 0.3.14 (already locked) | [Source](https://static.crates.io/crates/crossbeam-queue/crossbeam-queue-0.3.14.crate): Wider indexes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| crossbeam-utils | 0.8.22 → 0.8.23 | [Source](https://static.crates.io/crates/crossbeam-utils/crossbeam-utils-0.8.23.crate): ShardedLock guard and TSan fixes. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+
+
+## Historical upgrade record
+
 **Date:** 2026-02-19  |  **Project:** fastapi_rust  |  **Language:** Rust
 
 ## Summary
