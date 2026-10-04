@@ -52,7 +52,7 @@ These examples target current `main`, which uses asupersync 0.5. The published
 | Feature | What It Does |
 |---------|--------------|
 | **Zero-copy HTTP parsing** | Requests parsed directly from buffers; no allocations on fast paths |
-| **Compile-time route validation** | Invalid routes fail at build time via proc macros, not at runtime |
+| **Compile-time handler validation** | Macros check handler signatures and extractors; route conflicts and wildcard placement are checked during app construction |
 | **Structured concurrency** | Concurrent connection tasks use regions; handlers receive cooperative cancellation contexts |
 | **Type-driven extractors** | Declare parameter types; framework extracts and validates automatically |
 | **Dependency discipline** | No Tokio/Hyper/Tower/Axum; direct deps kept small with a bias toward removal |
