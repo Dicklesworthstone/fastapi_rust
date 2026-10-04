@@ -24,12 +24,17 @@
 ```toml
 # Cargo.toml
 [dependencies]
-fastapi-rust = "0.4.3"
-asupersync = { version = "0.4", default-features = false }
+fastapi-rust = { git = "https://github.com/Dicklesworthstone/fastapi_rust", branch = "main" }
+asupersync = { version = "0.5", default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ```
 
 (The crates.io package is `fastapi-rust`; the Rust crate name is `fastapi_rust`.)
+
+These examples target current `main`, which uses asupersync 0.5. The published
+`fastapi-rust` 0.4.4 release instead uses the asupersync 0.4 line (currently
+0.4.11); use that runtime line when choosing the registry release.
 
 <p><em>Requires Rust 1.95+ (2024 edition). Co-developed with <a href="https://github.com/Dicklesworthstone/asupersync">asupersync</a>.</em></p>
 </div>
@@ -48,11 +53,11 @@ serde = { version = "1", features = ["derive"] }
 |---------|--------------|
 | **Zero-copy HTTP parsing** | Requests parsed directly from buffers; no allocations on fast paths |
 | **Compile-time route validation** | Invalid routes fail at build time via proc macros, not at runtime |
-| **Structured concurrency** | Request handlers run in regions; cancellation is automatic and correct |
+| **Structured concurrency** | Concurrent connection tasks use regions; handlers receive cooperative cancellation contexts |
 | **Type-driven extractors** | Declare parameter types; framework extracts and validates automatically |
 | **Dependency discipline** | No Tokio/Hyper/Tower/Axum; direct deps kept small with a bias toward removal |
-| **Deterministic testing** | Lab runtime for reproducible concurrent request tests |
-| **FastAPI-compatible errors** | Validation errors match FastAPI's JSON format exactly |
+| **Deterministic testing** | Seeded request contexts and asupersync lab integration |
+| **FastAPI-compatible errors** | Validation errors use FastAPI's `detail` array shape |
 
 ---
 
@@ -68,9 +73,15 @@ struct Item {
     price: f64,
 }
 
+#[derive(Deserialize)]
+struct SearchParams {
+    q: String,
+    limit: Option<usize>,
+}
+
 #[get("/items/{id}")]
 async fn get_item(ctx: &RequestContext, id: Path<i64>) -> Result<Json<Item>, HttpError> {
-    ctx.checkpoint()?;  // Cancellation-safe yield point (cancelled -> 499)
+    ctx.checkpoint()?;  // Cancellation/budget check (cancelled -> 499)
 
     Ok(Json(Item {
         id: id.0,
@@ -81,7 +92,7 @@ async fn get_item(ctx: &RequestContext, id: Path<i64>) -> Result<Json<Item>, Htt
 
 #[post("/items")]
 async fn create_item(_cx: &Cx, item: Json<Item>) -> Result<Json<Item>, HttpError> {
-    // Automatic JSON deserialization with validation
+    // Automatic JSON deserialization; application validation below
     // Wrong Content-Type -> 415
     // Parse error -> 422 with detailed location
     // Payload too large -> 413
@@ -93,13 +104,12 @@ async fn create_item(_cx: &Cx, item: Json<Item>) -> Result<Json<Item>, HttpError
 
 #[get("/search")]
 async fn search(
-    cx: &Cx,
-    q: Query<SearchParams>,           // ?q=...&limit=...
-    auth: Header<Option<Bearer>>,     // Optional auth header
-) -> Result<Json<Results>, HttpError> {
-    // All extraction happens automatically
-    // Wrong types -> compile error
-    // Missing required -> 422 response
+    _cx: &Cx,
+    q: Query<SearchParams>,          // ?q=...&limit=...
+    _auth: Option<BearerToken>,       // Optional bearer credentials
+) -> Json<Vec<Item>> {
+    let items = vec![Item { id: 1, name: q.0.q, price: 29.99 }];
+    Json(items.into_iter().take(q.0.limit.unwrap_or(10)).collect())
 }
 
 fn main() {
@@ -110,7 +120,7 @@ fn main() {
         .route_entry(create_item_route())
         .route_entry(search_route())
         .middleware(RequestIdMiddleware::new())
-        .middleware(Cors::permissive())
+        .middleware(Cors::new().allow_any_origin())
         .build();
 
     // Run with asupersync
@@ -124,6 +134,12 @@ fn main() {
     });
 }
 ```
+
+Each route macro generates `<handler>_route()` for runtime registration.
+Register the runtime entry with
+`.route_entry(...)`; it runs extractors, calls the handler, and converts its
+result into a response. Invalid request values produce an HTTP error; unsupported
+extractor types fail to compile.
 
 ---
 
@@ -143,36 +159,37 @@ We study FastAPI's behavior and ergonomics, then implement idiomatically in Rust
 | Technique | Implementation |
 |-----------|----------------|
 | No runtime reflection | Proc macros analyze types at compile time |
-| No trait objects on hot paths | Monomorphization via generics |
+| Typed handler signatures | Compile-time extractor and response checks; runtime route entries use boxed futures |
 | Pre-allocated buffers | 4KB default, configurable per-route |
 | Zero-copy HTTP parsing | Borrowed types reference request buffer |
 | Inline critical paths | `#[inline(always)]` on hot code |
 
 ### 3. Cancel-Correct by Default
 
-Every request handler runs in an asupersync **region**. Client disconnects, timeouts, and shutdowns trigger graceful cancellation:
+The TCP server uses asupersync contexts and cooperative cancellation. Concurrent
+serving methods scope connection work to regions; handlers inherit the caller's
+capability context:
 
 ```
 Connection Accepted
     |
     v
-+-----------------------------------------------+
-|  Request Region (owns all request work)       |
-|  +-------------------------------------------+|
-|  |  Handler Task                             ||
-|  |  +-- Dependency Task (DB query)           ||
-|  |  +-- Dependency Task (cache lookup)       ||
-|  |  +-- Background Task (logging)            ||
-|  +-------------------------------------------+|
-|                                               |
-|  Region close waits for ALL tasks to finish  |
-+-----------------------------------------------+
+Caller Context -> Request Context
     |
     v
-Response Sent (only after region quiescent)
+Middleware -> Extractors -> Handler
+    |
+    v
+Response Sent
+    |
+    v
+Background Tasks
 ```
 
-**No orphaned tasks.** Client disconnect -> cancel region -> all tasks cleaned up.
+Use `TcpServer` with the caller's `Cx` for explicit runtime control. The convenience
+`serve` function wires application startup, request handling, and shutdown.
+Cancellation remains cooperative: handlers should check `ctx.checkpoint()` around
+long-running work. Background tasks run after the response is sent.
 
 ### 4. Dependency Discipline
 
@@ -186,7 +203,7 @@ Response Sent (only after region quiescent)
 
 Note: Some workspace crates currently use additional small utility/test/proc-macro dependencies
 where it meaningfully improves safety or developer experience. Shrinking this further is an active
-goal tracked in Beads (see `bd-uz2s`).
+goal; the dependency inventory is recorded in `Cargo.lock` and `UPGRADE_LOG.md`.
 
 ---
 
@@ -201,7 +218,7 @@ goal tracked in Beads (see `bd-uz2s`).
 | Dependency injection | **Native + cache** | State only | Data only | Managed |
 | OpenAPI generation | **Compile-time** | External | External | External |
 | Deterministic testing | **Lab runtime** | No | No | No |
-| Direct deps (core runtime crates) | **Low (single digits)** | ~80+ | ~60+ | ~50+ |
+| Runtime | **asupersync** | Tokio | Actix-rt | Tokio |
 | FastAPI-style errors | **Yes (422 format)** | No | No | No |
 
 ### When to Use fastapi_rust
@@ -214,8 +231,8 @@ goal tracked in Beads (see `bd-uz2s`).
 
 ### When to Consider Alternatives
 
-- You need production-proven stability today (fastapi_rust is v0.1.2)
-- You require production-hardened WebSocket support (basic support exists; full parity tracked in `bd-z09e`)
+- You need production-proven stability today (fastapi_rust is v0.4.4)
+- You require production-hardened WebSocket support (implementation exists; broader parity remains under `bd-uz2s`)
 - You have existing Tokio-based infrastructure
 - You need the massive ecosystem of Tower middleware
 
@@ -227,12 +244,15 @@ goal tracked in Beads (see `bd-uz2s`).
 
 ```toml
 [dependencies]
-fastapi-rust = "0.4.3"
-asupersync = { version = "0.4", default-features = false }
+fastapi-rust = { git = "https://github.com/Dicklesworthstone/fastapi_rust", branch = "main" }
+asupersync = { version = "0.5", default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ```
 
 **Note**: The crates.io package is `fastapi-rust`, and the crate name is `fastapi_rust`.
+This dependency set follows current `main`. For published `fastapi-rust = "0.4.4"`,
+use `asupersync = { version = "0.4.11", default-features = false }` instead.
 
 ### From Source
 
@@ -306,14 +326,16 @@ directory and `~/.{claude,codex,gemini,cursor}/skills/fastapi-rust`.
 
 ### Crate Overview
 
-| Crate | ~Lines | Purpose |
-|-------|--------|---------|
-| `fastapi_rust` | 100 | Facade: re-exports, prelude |
-| `fastapi-core` | 6,000 | Request, Response, extractors, DI, middleware, logging, testing, shutdown |
-| `fastapi-http` | 2,500 | Zero-copy HTTP/1.1 parser, body handling, query parsing, streaming |
-| `fastapi-router` | 600 | Radix trie routing, path matching, conflict detection |
-| `fastapi-macros` | 400 | `#[get]`, `#[post]`, `#[derive(Validate)]`, `#[derive(JsonSchema)]` |
-| `fastapi-openapi` | 500 | OpenAPI 3.1 types, schema builder, spec generation |
+| Crate | Purpose |
+|-------|---------|
+| `fastapi-rust` | Facade: re-exports, prelude |
+| `fastapi-core` | Request, Response, extractors, DI, middleware, testing, shutdown |
+| `fastapi-http` | HTTP/1.1 parser, TCP server, body handling, HTTP/2, WebSockets, streaming |
+| `fastapi-router` | Radix trie routing, path matching, conflict detection |
+| `fastapi-macros` | Route macros, validation derive, JSON Schema derive |
+| `fastapi-openapi` | OpenAPI 3.1 types, schema builder, spec generation |
+| `fastapi-types` | Shared HTTP Method enum |
+| `fastapi-output` | Optional agent-aware terminal output |
 
 ---
 
@@ -323,28 +345,38 @@ Extract typed data from requests declaratively:
 
 ```rust
 use fastapi_rust::prelude::*;
+use fastapi_rust::extractors::{Accept, Authorization, NamedHeader};
+
+#[derive(Deserialize)]
+struct SearchParams {
+    q: String,
+}
 
 #[get("/users/{id}")]
 async fn get_user(
-    cx: &Cx,                           // Capability context (required)
+    _cx: &Cx,                          // Capability context
     id: Path<i64>,                     // Path parameter: /users/123
-    q: Query<SearchParams>,            // Query string: ?q=...&limit=...
-    auth: Header<Authorization>,       // Required header
-    accept: Header<Option<Accept>>,    // Optional header
-) -> Result<Json<User>, HttpError> {
-    // Types declare what you need - framework handles extraction
-    // Wrong types -> compile error
-    // Missing required -> 422 with FastAPI-compatible error
+    q: Query<SearchParams>,            // Query string: ?q=...
+    _auth: NamedHeader<String, Authorization>, // Required header
+    _accept: Option<NamedHeader<String, Accept>>, // Optional header
+) -> Json<String> {
+    Json(format!("User {}: {}", id.0, q.0.q))
+}
+
+#[derive(Serialize, Deserialize)]
+struct CreateItem {
+    name: String,
 }
 
 #[post("/items")]
 async fn create(
-    cx: &Cx,
+    _cx: &Cx,
     item: Json<CreateItem>,            // JSON body
-) -> Result<Response, HttpError> {
+) -> Json<CreateItem> {
     // 415 if wrong Content-Type
     // 413 if payload too large (configurable)
     // 422 if parse error (with location path)
+    item
 }
 ```
 
@@ -355,11 +387,10 @@ async fn create(
 | `Path<T>` | URL path parameters | 422 if missing/wrong type |
 | `Query<T>` | Query string | 422 if missing/invalid |
 | `Json<T>` | JSON request body | 415/413/422 |
-| `Header<T>` | Single header value | 422 if missing/invalid |
-| `HeaderValues<T>` | All values for header | 422 if invalid |
+| `NamedHeader<T, N>` | Header named by a `HeaderName` marker | 422 if missing/invalid |
 | `State<T>` | Application state | 500 if not configured |
 | `Depends<T>` | Dependency injection | Depends on factory |
-| `Option<T>` | Any extractor, optional | Never fails |
+| `Option<T>` | Any extractor, optional | Converts extraction errors to `None`, including malformed values |
 
 ---
 
@@ -369,28 +400,34 @@ Composable middleware with onion model execution:
 
 ```rust
 use fastapi_rust::prelude::*;
+use fastapi_rust::core::{
+    AddResponseHeader, BoxFuture, ControlFlow, Middleware, RequestResponseLogger,
+    RequireHeader,
+};
 
 // Built-in middleware
 let app = App::builder()
     .middleware(RequestIdMiddleware::new())      // Add X-Request-Id
     .middleware(RequestResponseLogger::default()) // Log all requests
-    .middleware(Cors::permissive())               // CORS handling
+    .middleware(Cors::new().allow_any_origin())   // CORS handling
     .middleware(RequireHeader::new("X-API-Key")) // Require header
     .middleware(AddResponseHeader::new("X-Powered-By", b"fastapi_rust"))
     .build();
 
 // Custom middleware
-struct Timing;
+struct ExampleHeader;
 
-impl Middleware for Timing {
-    async fn before(&self, ctx: &RequestContext, req: &mut Request) -> ControlFlow {
-        // Store start time in context
-        ControlFlow::Continue
+impl Middleware for ExampleHeader {
+    fn before<'a>(
+        &'a self, _ctx: &'a RequestContext, _req: &'a mut Request,
+    ) -> BoxFuture<'a, ControlFlow> {
+        Box::pin(async { ControlFlow::Continue })
     }
 
-    async fn after(&self, ctx: &RequestContext, req: &Request, mut resp: Response) -> Response {
-        // Add X-Response-Time header
-        resp
+    fn after<'a>(
+        &'a self, _ctx: &'a RequestContext, _req: &'a Request, resp: Response,
+    ) -> BoxFuture<'a, Response> {
+        Box::pin(async move { resp.header("x-example", b"enabled".to_vec()) })
     }
 }
 ```
@@ -414,33 +451,39 @@ Request-scoped dependencies with caching:
 ```rust
 use fastapi_rust::prelude::*;
 
-// Define a dependency
+// A dependency resolved from application state
 #[derive(Clone)]
-struct DatabasePool { /* ... */ }
+struct DatabasePool {
+    label: String,
+}
 
 impl FromDependency for DatabasePool {
     type Error = HttpError;
 
     async fn from_dependency(ctx: &RequestContext, req: &mut Request) -> Result<Self, HttpError> {
-        // Resolved once per request, cached for subsequent uses
-        Ok(DatabasePool::connect().await?)
+        ctx.checkpoint()?;
+        let state = State::<DatabasePool>::from_request(ctx, req).await
+            .map_err(|_| HttpError::internal().with_detail("DatabasePool state missing"))?;
+        Ok(state.0)
     }
 }
 
 // Use in handler
 #[get("/users/{id}")]
 async fn get_user(
-    cx: &Cx,
+    _cx: &Cx,
     id: Path<i64>,
     db: Depends<DatabasePool>,  // Automatically resolved and cached
-) -> Result<Json<User>, HttpError> {
-    let user = db.fetch_user(id.0).await?;
-    Ok(Json(user))
+) -> Json<String> {
+    Json(format!("User {} from {}", id.0, db.label))
 }
 
 // Override for testing
-let overrides = DependencyOverrides::new()
-    .with::<DatabasePool>(MockDatabase::new());
+let app = App::builder()
+    .state(DatabasePool { label: "primary".into() })
+    .route_entry(get_user_route())
+    .build();
+app.override_dependency_value(DatabasePool { label: "test".into() });
 ```
 
 ### Dependency Scopes
@@ -449,64 +492,56 @@ let overrides = DependencyOverrides::new()
 |-------|----------|
 | `Request` (default) | Resolve once, cache for request lifetime |
 | `Function` | Resolve on every extraction |
-| `NoCache` | Explicit opt-out of caching |
+| `Depends<T, NoCache>` | Explicit opt-out of caching |
 
 ---
 
 ## Testing
 
-In-process testing without network I/O:
+In-process testing without network I/O. These tests use the `Item` and route
+functions from the quick example above:
 
 ```rust
-use fastapi_rust::testing::*;
+use fastapi_rust::prelude::*;
+use fastapi_rust::testing::TestClient;
 
 #[test]
 fn test_get_item() {
+    let app = App::builder().route_entry(get_item_route()).build();
     let client = TestClient::new(app);
 
     let resp = client.get("/items/42")
         .header("Authorization", "Bearer token")
         .send();
 
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status().as_u16(), 200);
 
-    let item: Item = resp.json();
+    let item: Item = resp.json().expect("valid item JSON");
     assert_eq!(item.id, 42);
 }
 
 #[test]
 fn test_deterministic() {
-    // Same seed = same execution order for concurrent operations
+    let app = App::builder().route_entry(create_item_route()).build();
+    // Seeded in-process request context
     let client = TestClient::with_seed(app, 12345);
 
-    // Reproducible even with concurrent handlers
     let resp = client.post("/items")
-        .json(&new_item)
+        .json(&Item { id: 1, name: "Widget".into(), price: 29.99 })
         .send();
 
-    assert_eq!(resp.status(), 201);
-}
-
-#[test]
-fn test_with_overrides() {
-    let overrides = DependencyOverrides::new()
-        .with::<Database>(MockDatabase::new());
-
-    let client = TestClient::new(app)
-        .with_overrides(overrides);
-
-    // Handler receives MockDatabase instead of real one
+    assert_eq!(resp.status().as_u16(), 200);
 }
 ```
 
 ### Assertion Helpers
 
 ```rust
-use fastapi_core::{assert_status, assert_header, assert_json};
+use fastapi_rust::core::{assert_status, assert_header, assert_json};
 
 assert_status!(resp, 200);
 assert_header!(resp, "Content-Type", "application/json");
-assert_json!(resp, {"id": 42, "name": "Widget"});
+assert_json!(resp, {"id": 42, "name": "Widget", "price": 29.99});
 ```
 
 ---
@@ -516,15 +551,18 @@ assert_json!(resp, {"id": 42, "name": "Widget"});
 FastAPI-compatible validation errors:
 
 ```rust
-// Handler returns HttpError
+use fastapi_rust::prelude::*;
+use fastapi_rust::core::error::loc;
+
 #[get("/items/{id}")]
-async fn get_item(id: Path<i64>) -> Result<Json<Item>, HttpError> {
+async fn get_item(_cx: &Cx, id: Path<i64>) -> Result<Json<i64>, ValidationErrors> {
     if id.0 < 0 {
-        return Err(HttpError::unprocessable_entity()
-            .detail("ID must be positive")
-            .loc(["path", "id"]));
+        return Err(ValidationErrors::single(
+            ValidationError::value_error(loc::path("id"), "ID must be non-negative")
+                .with_input(serde_json::json!(id.0)),
+        ));
     }
-    // ...
+    Ok(Json(id.0))
 }
 ```
 
@@ -536,7 +574,7 @@ async fn get_item(id: Path<i64>) -> Result<Json<Item>, HttpError> {
     {
       "type": "value_error",
       "loc": ["path", "id"],
-      "msg": "ID must be positive",
+      "msg": "ID must be non-negative",
       "input": -1
     }
   ]
@@ -553,40 +591,30 @@ async fn get_item(id: Path<i64>) -> Result<Json<Item>, HttpError> {
 | 404 | `HttpError::not_found()` | Resource not found |
 | 413 | `HttpError::payload_too_large()` | Body exceeds limit |
 | 415 | `HttpError::unsupported_media_type()` | Wrong Content-Type |
-| 422 | `HttpError::unprocessable_entity()` | Validation failed |
+| 422 | `ValidationErrors::single(error)` | Validation failed |
 | 500 | `HttpError::internal()` | Server error |
 
 ---
 
 ## Graceful Shutdown
 
-Cancel-correct shutdown with configurable grace periods:
+The TCP server exposes a shutdown controller and a configurable drain timeout:
 
 ```rust
-use fastapi_rust::prelude::*;
-use fastapi_core::shutdown::*;
+use fastapi_rust::{ServerConfig, TcpServer};
 
-let app = App::builder()
-    .graceful_shutdown(GracefulConfig {
-        grace_period: Duration::from_secs(30),
-        force_timeout: Duration::from_secs(5),
-    })
-    .on_shutdown(|phase| async move {
-        match phase {
-            ShutdownPhase::GracePeriod => {
-                // Stop accepting new connections
-                // Wait for in-flight requests
-            }
-            ShutdownPhase::ForceClose => {
-                // Cancel remaining requests
-            }
-        }
-        Ok(())
-    })
-    .build();
+let server = TcpServer::new(
+    ServerConfig::new("0.0.0.0:8000").with_drain_timeout_secs(30),
+);
+let shutdown = server.shutdown_controller().clone();
+// Keep this handle in application state or a signal-handling task.
+// Calling shutdown initiates the server's shutdown sequence.
+shutdown.shutdown();
 ```
 
-Shutdown propagates through asupersync regions - no orphaned tasks.
+Use `serve_with_shutdown` or a concurrent serving method to stop accepting
+connections and drain active work. Application shutdown hooks use
+`.on_shutdown(|| { ... })` or `.on_shutdown_async(|| async { ... })`.
 
 ---
 
@@ -595,7 +623,7 @@ Shutdown propagates through asupersync regions - no orphaned tasks.
 ```rust
 use fastapi_rust::prelude::*;
 
-    let app = App::builder()
+let app = App::builder()
     // Metadata
     .title("My API")
     .version("1.0.0")
@@ -604,34 +632,30 @@ use fastapi_rust::prelude::*;
     // Routes
     .route_entry(get_item_route())
     .route_entry(create_item_route())
-        .route_entry(delete_item_route())
 
     // Middleware (order matters)
     .middleware(RequestIdMiddleware::new())
-    .middleware(Cors::new(CorsConfig {
-        allow_origins: vec!["https://example.com".into()],
-        allow_methods: vec![Method::Get, Method::Post],
-        allow_headers: vec!["Authorization".into()],
-        max_age: Some(3600),
-    }))
+    .middleware(Cors::new()
+        .allow_origin("https://example.com")
+        .allow_methods([Method::Get, Method::Post])
+        .allow_headers(["Authorization"])
+        .max_age(3600))
 
     // Shared state
-    .state(DatabasePool::new())
-    .state(CacheClient::new())
+    .state(DatabasePool { label: "primary".into() })
 
     // Exception handlers
-    .exception_handler(|err: DatabaseError| {
-        HttpError::internal().with_detail(err.to_string())
+    .exception_handler(|_ctx, err: std::io::Error| {
+        HttpError::internal().with_detail(err.to_string()).into_response()
     })
 
     // Lifecycle hooks
-    .on_startup(|| async {
+    .on_startup(|| {
         println!("Starting up...");
         Ok(())
     })
-    .on_shutdown(|_| async {
+    .on_shutdown(|| {
         println!("Shutting down...");
-        Ok(())
     })
 
     // Build
@@ -647,25 +671,30 @@ use fastapi_rust::prelude::*;
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | `asupersync not found` | Missing dependency | Add `asupersync` to Cargo.toml |
-| `Cx lifetime error` | Holding Cx across await | Use `cx.checkpoint()` pattern |
+| Handler needs a request context | Context must come from the caller | Accept `&Cx` or `&RequestContext`; pass the caller's `Cx` to `TcpServer::serve_app` |
 | Route conflicts | Overlapping path patterns | Check for `{param}` vs literal conflicts |
-| 422 on valid JSON | Missing `#[derive(Deserialize)]` | Add serde derive to your types |
+| JSON handler does not compile | Body type lacks `Deserialize` | Add serde derive to your type |
 | Middleware not running | Wrong registration order | Check middleware ordering |
 
 ### Debugging Tips
 
 ```rust
+use fastapi_rust::core::RequestResponseLogger;
+use fastapi_rust::testing::TestClient;
+
 // Enable request logging
-.middleware(RequestResponseLogger::new(LogConfig {
-    log_bodies: true,
-    log_headers: true,
-}))
+let app = App::builder()
+    .route_entry(get_item_route())
+    .middleware(RequestResponseLogger::new()
+        .log_body(true)
+        .log_request_headers(true))
+    .build();
 
 // Check route registration
-app.routes().for_each(|r| println!("{} {}", r.method, r.path));
+app.routes().for_each(|(method, path)| println!("{} {}", method.as_str(), path));
 
-// Deterministic test reproduction
-TestClient::with_seed(app, failing_seed)
+// Seeded in-process request context
+let client = TestClient::with_seed(app, 12345);
 ```
 
 ---
@@ -677,23 +706,33 @@ the legacy Python FastAPI library.
 
 Current parity status and the concrete gap list are tracked in:
 - `PROPOSED_RUST_ARCHITECTURE.md` (Section 0: Parity Matrix)
-- Beads (`br ready`, `br show <id>`) with the top-level epic `bd-uz2s`
+- Beads (`br ready`, `br show <id>`) with coverage/gap audit epic `bd-uz2s`
 
-### Known Gaps (As Of 2026-02-11)
+### Current Coverage and Limits (As Of 2026-10-04)
 
-- **OpenAPI generation**: currently minimal; needs real operation/schema mapping from route metadata.
-- **TCP server integration/hardening**: `fastapi-http` has a server implementation, but the end-to-end
-  surface is still evolving.
-- **WebSockets**: partial (handshake + basic frames). Full FastAPI/Starlette parity is tracked in `bd-z09e`.
+- **Route macros**: runtime entries execute extractors and handlers; consumer tests cover JSON,
+  path parameters, cancellation checkpoints, and error responses.
+- **OpenAPI generation**: route metadata maps to operations, path parameters, and declared
+  request/response schema references. Automatic registration of every referenced component schema
+  and complete extractor metadata inference still need work.
+- **TCP server**: HTTP/1.1 keep-alive, request deadlines, body streaming, and protocol upgrades
+  have integration coverage. Production hardening remains an ongoing goal.
+- **WebSockets**: handshake, frames, ping/pong, and close handling have integration tests.
+  This does not establish every FastAPI/Starlette behavior.
 - **Multipart/form-data + file uploads**: parser + `MultipartForm` extractor + incremental streamed-body parsing +
   streamed-part incremental flushing + spool-backed file parts + `UploadFile` async API (`read`/`write`/`seek`/`close`) are implemented.
-  Remaining parity work in `bd-3ess` is mainly API-surface refinement around fully streamed consumption paths and broader behavior parity edge cases.
-- **HTTP/2**: missing (`bd-2c9t`).
+  Fully streamed consumption and broader edge-case equivalence still require comparison to the spec.
+- **HTTP/2**: H2C prior knowledge, HPACK, SETTINGS, flow control, and error frames exist with
+  integration coverage. Concurrent stream multiplexing and a full stream-state machine remain gaps.
+
+The parity matrix records implementation coverage, not proof of complete Python parity.
+Closed historical beads are implementation history; their closure alone does not establish
+full subsystem equivalence.
 
 ### Non-Negotiables / Constraints
 
 - **Requires asupersync**: no Tokio support (by design).
-- **Rust 1.95+**: the asupersync 0.4 dependency graph (`sysinfo`) needs rustc 1.95; edition 2024.
+- **Rust 1.95+**: edition 2024; repository checks use the pinned toolchain in `rust-toolchain.toml`.
 - **Early development**: API will change before v1.0.
 
 ---
@@ -710,7 +749,7 @@ Tokio's spawn model makes cancel-correctness difficult - tasks can outlive their
 
 ### Can I use this in production?
 
-Not production-ready yet. This is v0.1.2 in active development; the TCP server exists (built on `asupersync::net`),
+Not production-ready yet. This is v0.4.4 in active development; the TCP server exists (built on `asupersync::net`),
 but parity and production hardening are tracked under `bd-uz2s`.
 
 ### How fast is it?
@@ -735,7 +774,8 @@ Each dependency is a maintenance burden, security surface, and compile-time cost
 
 ### How do validation errors compare to FastAPI?
 
-Identical format. The same client code that handles FastAPI 422 responses will work with fastapi_rust:
+Validation errors use FastAPI's `detail` array with `type`, `loc`, and `msg` fields.
+Exact messages and rule coverage still need comparison against the specification:
 
 ```json
 {

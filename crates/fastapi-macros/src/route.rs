@@ -694,9 +694,15 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
 
         let ident = syn::Ident::new(&format!("__fastapi_arg_{i}"), Span::call_site());
         arg_extracts.push(quote! {
-            let #ident: #ty = match <#ty as fastapi_core::FromRequest>::from_request(ctx, req).await {
+            // Normalize errors through a generic function before matching. Matching
+            // Infallible directly would make the response conversion an unreachable
+            // call for optional extractors and emit warnings in consumer crates.
+            let #ident: #ty = match <#ty as fastapi_core::FromRequest>::from_request(ctx, req)
+                .await
+                .map_err(__into_response)
+            {
                 Ok(v) => v,
-                Err(e) => return __into_response(e),
+                Err(response) => return response,
             };
         });
         call_args.push(quote! { #ident });

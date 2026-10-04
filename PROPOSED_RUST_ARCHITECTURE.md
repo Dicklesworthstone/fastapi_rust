@@ -10,7 +10,7 @@
 
 ## Table of Contents
 
-0. [Parity Matrix (As Of 2026-02-11)](#0-parity-matrix-as-of-2026-02-11)
+0. [Parity Matrix (As Of 2026-10-04)](#0-parity-matrix-as-of-2026-10-04)
 1. [Design Principles](#1-design-principles)
 2. [Asupersync Integration](#2-asupersync-integration)
 3. [Crate Structure](#3-crate-structure)
@@ -26,18 +26,25 @@
 
 ---
 
-## 0. Parity Matrix (As Of 2026-02-11)
+## 0. Parity Matrix (As Of 2026-10-04)
 
 This section is a living, high-level parity view against the legacy FastAPI behaviors described in `EXISTING_FASTAPI_STRUCTURE.md`. It is intended to answer two questions quickly:
 
 - What is implemented today, and where is it in the Rust codebase?
 - What are the highest-impact gaps to close next for FastAPI parity?
 
+This is an implementation coverage audit, not a claim of complete Python parity.
+The 2026-10-04 review traced the facade, macro extraction wrappers, application
+dispatch, middleware, OpenAPI assembly, and TCP protocol paths against the spec.
+The workspace all-feature baseline passed on RCH at dfaa5a1; that proves the
+existing assertions passed on Linux, not that every spec behavior is covered.
+
 | Subsystem | Rust Location(s) | Status | Notes / Gaps |
 |---|---|---|---|
 | HTTP request parsing (HTTP/1.1) | `crates/fastapi-http/src/parser.rs` | Implemented | Focus: zero-copy parse; security hardening tests exist. |
 | Request body (Content-Length, chunked) | `crates/fastapi-http/src/body.rs` | Implemented | Async chunked stream now consumes trailers and avoids keep-alive read-ahead. |
-| TCP server + keep-alive | `crates/fastapi-http/src/server.rs` | Partial | Server exists and uses `asupersync::net`, but the end-to-end surface is still evolving and hardening. |
+| TCP server + keep-alive | `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/request_timeout.rs`, `crates/fastapi-http/tests/security.rs` | Implemented; parity not certified | Uses caller-owned `Cx`, runtime-clock deadlines, body parsing, and keep-alive. Security and timeout integration tests exercise the network path. |
+| Route macro runtime dispatch | `crates/fastapi-macros/src/route.rs`, `crates/fastapi/tests/macro_routes.rs` | Implemented | `<handler>_route()` returns a real `RouteEntry`: evaluate extractors, invoke the async handler, and convert errors/results into responses. Runtime registration uses `.route_entry(...)`. |
 | Routing + conflict detection | `crates/fastapi-core/src/routing.rs`, `crates/fastapi-router/src/trie.rs` | Implemented | Path params + converters supported; 405/OPTIONS behaviors present. |
 | App builder + request pipeline | `crates/fastapi-core/src/app.rs` | Implemented | Mounting, middleware execution, response mutations, background tasks integration. |
 | Extractors: Path/Query/Header/Cookie/Auth | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/dependency.rs` | Implemented | Large extractor surface; verify edge-case parity in spec as matrix expands. |
@@ -49,18 +56,23 @@ This section is a living, high-level parity view against the legacy FastAPI beha
 | Background tasks | `crates/fastapi-core/src/extract.rs` (BackgroundTasks) | Implemented | Server executes tasks after response in `crates/fastapi-http/src/server.rs`. |
 | Security primitives | `crates/fastapi-core/src/extract.rs` | Partial | Credential extractors exist; token validation logic is app-specific. |
 | OpenAPI schema/spec types | `crates/fastapi-openapi/src/*` | Implemented | OpenAPI 3.1 types and `JsonSchema` trait exist. |
-| OpenAPI generation (from routes/handlers) | `crates/fastapi-core/src/app.rs` (`OpenApiConfig`) | Partial | `RouteEntry` now preserves `fastapi_router::Route` metadata for macro-generated routes, and OpenAPI generation uses that metadata when present; still missing full handler/type-to-schema mapping. |
+| OpenAPI generation (from routes/handlers) | `crates/fastapi-core/src/app.rs`, `crates/fastapi-macros/src/route.rs`, `crates/fastapi-openapi/src/spec.rs` | Partial | Route metadata feeds operations, converted path parameters, JSON request-body references, and declared response references. The spec's Section 7.1 also requires collecting referenced models into component schemas and complete query/header metadata inference; those steps are not wired into `AppBuilder::generate_openapi_spec`. |
 | Docs pages (Swagger/ReDoc shells) | `crates/fastapi-core/src/docs.rs` | Implemented | HTML shells exist; assets expected via CDN/static hosting. |
 | Docs endpoints wiring (routes) | `crates/fastapi-core/src/app.rs` (`enable_docs`) | Implemented | `.enable_docs(DocsConfig)` mounts `/docs`, `/redoc`, and `/docs/oauth2-redirect` (paths configurable). |
 | Testing harness | `crates/fastapi-core/src/testing.rs` | Implemented | In-process TestClient + assertions. |
-| WebSockets | `crates/fastapi-core/src/websocket.rs`, `crates/fastapi-http/tests/websocket.rs` | Partial | Upgrade + frame parsing + ping/pong + close-handshake hardening are implemented with E2E coverage. Remaining parity tracked in `bd-z09e` (full FastAPI/Starlette surface and edge-case semantics). |
-| HTTP/2 | `crates/fastapi-http/src/http2.rs`, `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/http2.rs` | Partial | H2C prior-knowledge, HPACK encoding/decoding, bidirectional flow control (WINDOW_UPDATE + overflow detection), GOAWAY send/receive with payload validation, RST_STREAM, SETTINGS negotiation (all 6 RFC params), PUSH_PROMISE rejection, DATA/HEADERS stream-0 rejection, interleaved control frames during body reads, send-side flow control with h2_fc_clamp_send. 28 E2E tests, 405 unit tests. Remaining: concurrent streams (multiplexing), stream state machine. Tracked as `bd-2c9t`. |
+| WebSockets | `crates/fastapi-core/src/websocket.rs`, `crates/fastapi-http/tests/websocket.rs` | Partial | Upgrade, frames, ping/pong, and close-handshake hardening have network integration coverage. Exact FastAPI/Starlette surface equivalence remains unverified. Historical `bd-z09e` is absent from the current graph. |
+| HTTP/2 | `crates/fastapi-http/src/http2.rs`, `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/http2.rs` | Partial | H2C prior knowledge, HPACK, SETTINGS, flow control, GOAWAY/RST_STREAM, and frame validation exist. `server.rs` explicitly limits the connection to sequential streams; concurrent multiplexing and a full stream-state machine remain missing. Historical `bd-2c9t` is absent from the current graph. |
 
 **Highest-leverage gaps (parity):**
 
-- OpenAPI generation: map handlers/extractors/types to operations/schemas (remove placeholder behaviors).
+- OpenAPI generation: register referenced component schemas and infer query/header metadata (spec Section 7.1).
+- HTTP/2: multiplex streams and enforce their protocol state transitions; current server code documents sequential handling.
 - Validation rules: expand `Validate` derive + runtime validation to match spec exactly.
 - Security: flesh out auth flows and error semantics to match legacy FastAPI expectations.
+
+The macro/README correction is tracked as `bd-2sum`. The `bd-uz2s` epic covers
+this coverage matrix and gap audit. Completing that audit does not certify
+full FastAPI parity; the concrete implementation gaps above remain.
 
 ## 1. Design Principles
 

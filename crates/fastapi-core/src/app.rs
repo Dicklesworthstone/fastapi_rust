@@ -880,7 +880,7 @@ impl AppBuilder {
     /// Sets the API title (FastAPI's `FastAPI(title=...)`).
     ///
     /// Updates [`AppConfig::name`] and, when OpenAPI is enabled via
-    /// [`AppBuilder::openapi`] or [`AppBuilder::docs`], the `info.title` of the
+    /// [`AppBuilder::openapi`] or [`AppBuilder::enable_docs`], the `info.title` of the
     /// generated specification. Values set here are authoritative regardless of
     /// call order: they take precedence over [`AppConfig::name`] from a later
     /// [`AppBuilder::config`] and over the same fields on the [`OpenApiConfig`]
