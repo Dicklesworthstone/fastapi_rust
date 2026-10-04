@@ -1,1 +1,4 @@
 issue-prefix: fr
+sync:
+  # History pruning deletes files, which AGENTS.md forbids without permission.
+  history_enabled: false
