@@ -2629,19 +2629,19 @@ impl CompressionMiddleware {
 
     /// Checks if the client accepts gzip encoding.
     fn accepts_gzip(req: &Request) -> bool {
-        if let Some(accept_encoding) = req.headers().get("accept-encoding") {
-            if let Ok(value) = std::str::from_utf8(accept_encoding) {
-                // Parse Accept-Encoding header
-                // Examples: "gzip", "gzip, deflate", "gzip;q=1.0, identity;q=0.5"
-                for part in value.split(',') {
-                    let encoding = part.trim().split(';').next().unwrap_or("").trim();
-                    if encoding.eq_ignore_ascii_case("gzip") {
-                        return true;
-                    }
-                    // Also accept "*" which means any encoding
-                    if encoding == "*" {
-                        return true;
-                    }
+        if let Some(accept_encoding) = req.headers().get("accept-encoding")
+            && let Ok(value) = std::str::from_utf8(accept_encoding)
+        {
+            // Parse Accept-Encoding header
+            // Examples: "gzip", "gzip, deflate", "gzip;q=1.0, identity;q=0.5"
+            for part in value.split(',') {
+                let encoding = part.trim().split(';').next().unwrap_or("").trim();
+                if encoding.eq_ignore_ascii_case("gzip") {
+                    return true;
+                }
+                // Also accept "*" which means any encoding
+                if encoding == "*" {
+                    return true;
                 }
             }
         }
@@ -2722,12 +2722,12 @@ impl Middleware for CompressionMiddleware {
             }
 
             // Check content type
-            if let Some(content_type) = Self::get_content_type(&headers) {
-                if config.should_skip_content_type(&content_type) {
-                    return Response::with_status(status)
-                        .body(crate::response::ResponseBody::Bytes(body_bytes))
-                        .rebuild_with_headers(headers);
-                }
+            if let Some(content_type) = Self::get_content_type(&headers)
+                && config.should_skip_content_type(&content_type)
+            {
+                return Response::with_status(status)
+                    .body(crate::response::ResponseBody::Bytes(body_bytes))
+                    .rebuild_with_headers(headers);
             }
 
             // Compress the body
