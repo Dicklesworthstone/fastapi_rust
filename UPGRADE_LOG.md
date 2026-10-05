@@ -81,6 +81,14 @@ unconfirmed ownership. `rch jobs recover` acknowledged wrapper
 `rchw-ae839b0a-ec54-4d19-a6ad-f6f496aafe32` / build `30050444235505885`
 as terminal with exit 1 before retry. No tests ran in that attempt. Resumed
 dependency checks also use the 120000-ms source-transfer allowance.
+The next IndexMap attempt reached remote Cargo on hz4 but exhausted the
+existing 1800-second execution budget while compiler threads waited on filesystem
+I/O. RCH killed and verified the remote process group; exact wrapper
+`rchw-a6cc9d2c-4495-4373-829d-9927dc4a79c4` / build `30050444235505890`
+was recovered with terminal acknowledgement and exit 137. No passing result
+was inferred from that attempt. Retrying the same locked update on admissible
+worker ovh-a passed 333 affected tests; later dependencies changed only after
+that result. No daemon restart, other-agent cancellation, or local fallback.
 
 The latest wasm-bindgen-futures (0.4.79) adds a normal Tokio dependency under an
 Emscripten cfg, which Cargo records even on Linux. The project forbids this.
@@ -119,6 +127,10 @@ all seven intended versions without Tokio. No manual checksum edits were needed.
 | futures-io | 0.3.33 → 0.3.34 | [Source](https://github.com/rust-lang/futures-rs/releases/tag/0.3.34): Companion futures release. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | hermit-abi | 0.5.2 → 0.5.3 | [Source](https://github.com/hermit-os/hermit-rs/compare/356f491b8c68aaa893a4450b10b9c080f6d2e63a...c0b97d12a2f1f65610ba84e6f23fbb69fc70c0f7): fsync and docs; native regression only. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | hybrid-array | 0.4.13 → 0.4.15 | [Source](https://static.crates.io/crates/hybrid-array/hybrid-array-0.4.15.crate): New array sizes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| indexmap | 2.14.0 → 2.14.2 (already locked) | [Source](https://github.com/indexmap-rs/indexmap/blob/2.14.2/RELEASES.md): Macro hygiene and initialization. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| lazy_static | 1.5.0 → 1.5.1 | [Source](https://github.com/rust-lang-nursery/lazy-static.rs/compare/be7c1c43f264699f956b70ce8e29941bd1e61bde...4c1b9a170c157d679592e2682b13cc780c1db814): Docs/metadata; maintenance status. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| libc | 0.2.189 → 0.2.190 | [Source](https://static.crates.io/crates/libc/libc-0.2.190.crate): Platform bindings; native Linux checks. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| log | 0.4.33 → 0.4.34 (already locked) | [Source](https://github.com/rust-lang/log/releases/tag/0.4.34): Boxed logger alloc support. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
 ## Historical upgrade record
