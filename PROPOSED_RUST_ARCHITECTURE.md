@@ -54,7 +54,7 @@ existing assertions passed on Linux, not that every spec behavior is covered.
 | Validation derive | `crates/fastapi-core/src/validation.rs`, `crates/fastapi-macros/src/validate.rs` | Implemented | Current suite: length, range(gt/ge/lt/le), email, url, regex subset (anchors/classes/\\d/quantifiers), multiple_of, nested, phone, contains/starts_with/ends_with, custom paths. Still not full Pydantic parity. |
 | Responses (JSON/HTML/files) | `crates/fastapi-core/src/response.rs` | Partial | Core response types exist; advanced streaming/file semantics may need more parity work. |
 | Background tasks | `crates/fastapi-core/src/extract.rs` (BackgroundTasks) | Implemented | Server executes tasks after response in `crates/fastapi-http/src/server.rs`. |
-| Security primitives and middleware | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/middleware.rs`, `crates/fastapi-http/src/server.rs` | Partial | Credential extractors exist; token validation logic is app-specific. Credentialed CORS with `allow_any_origin()` authorizes every supplied origin. Static review also found HTTPS redirect gaps: it uses raw Host while optional forwarded-host admission validates X-Forwarded-Host, and colon-based port removal mishandles bracketed IPv6. These paths need targeted runtime regression coverage; the audit does not certify secure proxy configuration. |
+| Security primitives and middleware | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/middleware.rs`, `crates/fastapi-http/src/server.rs` | Partial | Credential extractors exist; token validation logic is app-specific. Credentialed CORS and HTTPS redirect inputs require careful configuration and targeted verification; see the security audit notes below. |
 | OpenAPI schema/spec types | `crates/fastapi-openapi/src/*` | Implemented | OpenAPI 3.1 types and `JsonSchema` trait exist. |
 | OpenAPI generation (from routes/handlers) | `crates/fastapi-core/src/app.rs`, `crates/fastapi-macros/src/route.rs`, `crates/fastapi-openapi/src/spec.rs` | Partial | Route metadata feeds operations, converted path parameters, JSON request-body references, and declared response references. The spec's Section 7.1 also requires collecting referenced models into component schemas and complete query/header metadata inference; those steps are not wired into `AppBuilder::generate_openapi_spec`. |
 | Docs pages (Swagger/ReDoc shells) | `crates/fastapi-core/src/docs.rs` | Implemented | HTML shells exist; assets expected via CDN/static hosting. |
@@ -62,6 +62,16 @@ existing assertions passed on Linux, not that every spec behavior is covered.
 | Testing harness | `crates/fastapi-core/src/testing.rs` | Implemented | In-process TestClient + assertions. |
 | WebSockets | `crates/fastapi-core/src/websocket.rs`, `crates/fastapi-http/tests/websocket.rs` | Partial | Upgrade, frames, ping/pong, and close-handshake hardening have network integration coverage. Exact FastAPI/Starlette surface equivalence remains unverified. Historical `bd-z09e` is absent from the current graph. |
 | HTTP/2 | `crates/fastapi-http/src/http2.rs`, `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/http2.rs` | Partial | H2C prior knowledge, HPACK, SETTINGS, flow control, GOAWAY/RST_STREAM, and frame validation exist. `server.rs` explicitly limits the connection to sequential streams; concurrent multiplexing and a full stream-state machine remain missing. Historical `bd-2c9t` is absent from the current graph. |
+
+Security audit notes: credentialed CORS with `allow_any_origin()` authorizes
+every supplied origin. Static review found that HTTPS redirects use raw Host
+while optional forwarded-host admission validates X-Forwarded-Host, and
+colon-based port removal mishandles bracketed IPv6. An additional static
+candidate combines a non-leading-slash request target, a catch-all route,
+and direct URL concatenation: `@evil.example/` with Host `good.example`
+could produce `https://good.example@evil.example/`. These paths need targeted
+runtime regression coverage; this audit does not certify secure proxy
+configuration or a live exploit.
 
 **Highest-leverage gaps (parity):**
 
