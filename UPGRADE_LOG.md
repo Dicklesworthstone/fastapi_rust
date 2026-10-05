@@ -69,9 +69,18 @@ The replacement worker passed epoch validation, then refused queue validation
 for the same pressure condition. Subsequent builds use RCH's admissible-worker
 selection and Cargo `--jobs 2` to reduce peak compiler memory. Test scope,
 assertions, and warning gates are unchanged; neither refusal ran tests.
-The data-encoding run first hit a source-sync timeout on hz4 before remote
-Cargo started. RCH retried on hz3, where 2110 workspace library tests passed.
-The failed sync is not test evidence; no local compilation fallback occurred.
+The data-encoding and hermit-abi runs hit source-sync timeouts on hz4 before
+remote Cargo started; hybrid-array hit the same timeout on hz3. RCH retried
+on another worker and each run passed 2110 workspace library tests. Failed
+syncs are not test evidence; no local compilation fallback occurred. Final
+checks use `RCH_SYNC_TIMEOUT_MS=120000` for source transfers after these
+observed 35000-ms failures. Compiler/test limits, assertions, and warning gates
+are unchanged; this transport allowance does not certify any product behavior.
+Indexmap validation also failed before remote Cargo started, and RCH retained
+unconfirmed ownership. `rch jobs recover` acknowledged wrapper
+`rchw-ae839b0a-ec54-4d19-a6ad-f6f496aafe32` / build `30050444235505885`
+as terminal with exit 1 before retry. No tests ran in that attempt. Resumed
+dependency checks also use the 120000-ms source-transfer allowance.
 
 The latest wasm-bindgen-futures (0.4.79) adds a normal Tokio dependency under an
 Emscripten cfg, which Cargo records even on Linux. The project forbids this.
@@ -109,6 +118,7 @@ all seven intended versions without Tokio. No manual checksum edits were needed.
 | find-msvc-tools | 0.1.9 → 0.1.14 (already locked) | [Source](https://github.com/rust-lang/cc-rs/blob/find-msvc-tools-v0.1.14/find-msvc-tools/CHANGELOG.md): MSRV 1.65 and cc integration. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0` passed in coupled cc validation. |
 | futures-io | 0.3.33 → 0.3.34 | [Source](https://github.com/rust-lang/futures-rs/releases/tag/0.3.34): Companion futures release. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | hermit-abi | 0.5.2 → 0.5.3 | [Source](https://github.com/hermit-os/hermit-rs/compare/356f491b8c68aaa893a4450b10b9c080f6d2e63a...c0b97d12a2f1f65610ba84e6f23fbb69fc70c0f7): fsync and docs; native regression only. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| hybrid-array | 0.4.13 → 0.4.15 | [Source](https://static.crates.io/crates/hybrid-array/hybrid-array-0.4.15.crate): New array sizes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
 ## Historical upgrade record
