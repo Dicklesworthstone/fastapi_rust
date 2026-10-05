@@ -134,6 +134,9 @@ all seven intended versions without Tokio. No manual checksum edits were needed.
 | lru | 0.18.2 → 0.18.5 | [Source](https://static.crates.io/crates/lru/lru-0.18.5.crate): Sparse constructor and retain. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | mio | 1.2.2 → 1.2.4 | [Source](https://static.crates.io/crates/mio/mio-1.2.4.crate): Named-pipe UAF and Unix readiness fixes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | num-integer | 0.1.46 → 0.1.47 | [Source](https://static.crates.io/crates/num-integer/num-integer-0.1.47.crate): u128 square-root fixes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| pest / derive / generator / meta | 2.8.8 → 2.9.2 | [Source](https://github.com/pest-parser/pest/releases/tag/v2.9.2): Coupled generator/derive/meta; Unicode 18. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| pkg-config | 0.3.33 → 0.3.34 | [Source](https://static.crates.io/crates/pkg-config/pkg-config-0.3.34.crate): MSRV 1.63; cflags controls. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| plist | 1.10.0 → 1.10.1 | [Source](https://static.crates.io/crates/plist/plist-1.10.1.crate): Migrated quick-xml 0.42 and base64 0.23 internally. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
 ## Historical upgrade record
