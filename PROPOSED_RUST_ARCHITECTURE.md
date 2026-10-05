@@ -47,7 +47,7 @@ existing assertions passed on Linux, not that every spec behavior is covered.
 | Route macro runtime dispatch | `crates/fastapi-macros/src/route.rs`, `crates/fastapi/tests/macro_routes.rs` | Implemented | `<handler>_route()` returns a real `RouteEntry`: evaluate extractors, invoke the async handler, and convert errors/results into responses. Runtime registration uses `.route_entry(...)`. |
 | Routing + conflict detection | `crates/fastapi-core/src/routing.rs`, `crates/fastapi-router/src/trie.rs` | Implemented | Path params + converters supported; 405/OPTIONS behaviors present. |
 | App builder + request pipeline | `crates/fastapi-core/src/app.rs` | Implemented | Mounting, middleware execution, response mutations, background tasks integration. |
-| Extractors: Path/Query/Header/Cookie/Auth | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/dependency.rs` | Implemented | Large extractor surface; verify edge-case parity in spec as matrix expands. |
+| Extractors: Path/Query/NamedHeader/Cookie/Auth | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/dependency.rs` | Implemented | Named headers use `NamedHeader<T, N>` with a `HeaderName` marker. Large extractor surface; verify edge-case parity in spec as matrix expands. |
 | Multipart/form-data + UploadFile semantics | `crates/fastapi-core/src/multipart.rs`, `crates/fastapi-core/src/extract.rs` | Partial | Parser/extractor exists, streamed request bodies are parsed incrementally (no full-body pre-buffer in extractor path), streamed part assembly flushes safe prefixes incrementally, and large streamed file parts can stay spool-backed through `MultipartForm` move-based file APIs (`take_file`/`into_files`) before `UploadFile` operations. Remaining gap: complete API-surface parity for fully streamed consumption and broader edge-case parity coverage. |
 | Dependency injection | `crates/fastapi-core/src/dependency.rs` | Implemented | Type-based `Depends<T>` with caching/overrides/scopes; differs from Python callable-based dependency declaration. |
 | Validation errors (422 format) | `crates/fastapi-core/src/error.rs` | Implemented | JSON shape is designed to be FastAPI-compatible; keep expanding exact rule coverage vs spec. |
@@ -88,7 +88,8 @@ full FastAPI parity; the concrete implementation gaps above remain.
 ### 1.2 Compile-Time Guarantees
 
 ```rust
-// Route type safety - invalid routes fail at compile time
+// Handler and extractor types are checked at compile time.
+// Route conflicts and non-final wildcards are validated during app construction.
 #[get("/items/{item_id}")]
 async fn get_item(
     cx: &Cx,
