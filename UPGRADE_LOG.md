@@ -37,12 +37,13 @@ link, corrected to `enable_docs`. Warning gates remain unchanged. Evidence:
 [fmt job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879709),
 [clippy job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879160),
 [docs job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879582).
-No open GitHub issues or PRs were found. Post-push CI verification is pending.
+No open GitHub issues or PRs were found. Aggregate post-push CI is pending.
 The preservation push at e942b6e passed formatting and macOS/Windows tests,
 then [Clippy](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37242247058/job/111553476317)
 reported two `collapsible_if` errors in compression middleware. The nested
 conditions are now equivalent short-circuit let chains; `-D warnings` stays
-unchanged. Final remote Clippy and the next pushed CI run remain pending.
+unchanged. Final remote Clippy passed with default and all features, and
+the strict hosted Clippy job passed at a8c265a. Aggregate CI remains pending.
 The scheduled workflow now uses explicit `+nightly` / `+1.95.0` selectors:
 otherwise the repository pin silently overrides the toolchain installed for
 the named latest-nightly or MSRV check. Existing warning gates and optional
@@ -59,7 +60,7 @@ Baseline: RCH `cargo test --workspace --all-features --locked` at dfaa5a1 passed
 The flate2 and futures upgrades passed their first workspace tests, but external
 checkout resets at 20:39:55 and 20:41:07 UTC removed those lockfile changes and
 the uncommitted source/doc edits. Original handwritten patches were recovered
-from the session log; dependency changes are being reapplied and retested.
+from the session log; dependency changes were reapplied and sequentially retested.
 Those earlier runs do not certify the recovered final checkout.
 
 Transitive updates are researched from published manifests, changelogs, and
@@ -78,7 +79,8 @@ forbidden runtime crates occurs in the 312-package lockfile.
 The refreshed `cargo audit --json` passed with zero known vulnerabilities,
 no advisory ignores, and the existing unmaintained bincode 1.3.3
 (RUSTSEC-2025-0141) / yaml-rust 0.4.5 (RUSTSEC-2024-0320) notices.
-Final normal-profile workspace gates are running; post-push CI is pending.
+Final normal-profile workspace tests and compiler gates passed as recorded
+below; the actual MSRV check and aggregate post-push CI remain pending.
 Scoped UBS static scans were run before this commit. The final changed Rust
 file (`extract.rs`) returned exit 1: eight critical pattern matches are four
 unchanged test-only panic assertions, three test-only request-header setup
@@ -89,6 +91,45 @@ five-file scan also returned 1 (161 critical pattern matches); sampled real
 middleware policy/redirect gaps are recorded in the existing architecture
 coverage matrix. This is not a clean UBS or comprehensive security result.
 UBS Cargo phases were explicitly not evaluated; compilation runs through RCH.
+
+The first final MSRV attempt stalled in source transfer on vmi1149989. At the
+observed `sync_up` phase, `execution_started=false`; the later recovered lease
+records execution as started, so no claim is made that Cargo never ran during
+cancellation/recovery. Exact wrapper
+`rchw-77ef5ef7-4dc3-4afb-9dbf-f53c91e98bbd` / build `30050444235506058`
+was recovered with terminal acknowledgement, exit 137, and a dead wrapper
+before retry on vmi1153651. The caller returned 143; neither result passes
+the MSRV gate. Compiler limits and the requested check remain unchanged.
+
+### Final workspace verification
+
+Code and lockfile revision: `a8c265a93acc4147fa65e94992fbd5cbeb9c5726`.
+All compiler commands below ran remotely through strict RCH, serialized with
+`--jobs 2`. These final commands use the normal development/test profiles;
+the earlier `profile.test.debug=0` scopes do not substitute for this suite.
+
+| Gate | Result |
+|---|---|
+| `cargo check --workspace --all-targets --locked --jobs 2` | Passed. |
+| `cargo clippy --workspace --all-targets --locked --jobs 2 -- -D warnings` | Passed. |
+| `cargo check --workspace --all-targets --all-features --locked --jobs 2` | Passed. |
+| `cargo clippy --workspace --all-targets --all-features --locked --jobs 2 -- -D warnings` | Passed. |
+| `cargo test --workspace --all-features --locked --quiet --jobs 2` | 2601 passed, zero failed; 188 existing ignores, including doctests. Includes the nine macro consumers and runnable Header example. |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features --locked --jobs 2` | Passed; flags forwarded through `RCH_ENV_ALLOWLIST=RUSTDOCFLAGS`. |
+| `cargo +1.95.0 check --workspace --all-targets --all-features --locked --jobs 2` | Pending after the acknowledged failed transfer/cancellation attempt above. |
+| `cargo fmt --check` and `git diff --check` | Passed locally after the Header import correction. |
+
+[Hosted CI at the same code/lock revision](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37257327749)
+is still in progress. Completed Windows job logs independently show all nine
+named macro consumers passing, no ignored consumers, and the Header example
+passing in both core doctest runs (26 passed; 135/131 existing ignores).
+Parent and reviewer retrieved the same primary logs; this counts as one
+hosted execution, not two independent runtime results.
+The latest generic-array 0.14.9 is excluded by the upstream
+[crypto-common 0.1.7 manifest](https://docs.rs/crate/crypto-common/0.1.7/source/Cargo.toml),
+which requires exactly `=0.14.7`. No dependency override or upstream patch is
+introduced to defeat that constraint. The seven-package wasm family remains
+held for the project's explicit Tokio ban, as documented above.
 
 The crossbeam-epoch validation was initially refused by RCH because worker
 vmi1264463 had critical memory pressure (exit 103). No tests ran and no local
