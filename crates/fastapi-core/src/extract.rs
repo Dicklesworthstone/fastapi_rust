@@ -4323,32 +4323,22 @@ mod state_tests {
 // Header Extractor
 // ============================================================================
 
-/// Header extractor for individual HTTP headers.
+/// A value paired with its HTTP header name.
 ///
-/// Extracts a single header value by name from the request. The header name
-/// is derived from the generic type's name, converting from snake_case to
-/// Header-Case (e.g., `x_request_id` -> `X-Request-Id`).
-///
-/// For required headers, extraction failure returns 400 Bad Request.
-/// Use `Option<Header<T>>` for optional headers.
+/// Use [`NamedHeader<T, N>`] to extract a request header whose name is supplied
+/// by a [`HeaderName`] marker. Required named headers return a 422 validation
+/// response when missing or invalid; `Option<NamedHeader<T, N>>` yields `None`
+/// on extraction failure.
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use fastapi_core::extract::Header;
 ///
-/// // Extract Authorization header (required)
-/// async fn protected(auth: Header<String>) -> impl IntoResponse {
-///     format!("Authorized with: {}", auth.0)
-/// }
-///
-/// // Extract optional header
-/// async fn optional_header(trace_id: Option<Header<String>>) -> impl IntoResponse {
-///     match trace_id {
-///         Some(Header(id)) => format!("Trace: {id}"),
-///         None => "No trace".into(),
-///     }
-/// }
+/// let request_id = Header::new("X-Request-Id", String::from("request-42"));
+/// assert_eq!(request_id.name, "X-Request-Id");
+/// assert_eq!(request_id.value, "request-42");
+/// assert_eq!(request_id.into_inner(), "request-42");
 /// ```
 #[derive(Debug, Clone)]
 pub struct Header<T> {
@@ -4467,7 +4457,7 @@ impl std::error::Error for HeaderExtractError {}
 
 impl IntoResponse for HeaderExtractError {
     fn into_response(self) -> crate::response::Response {
-        // Missing or invalid headers are client errors (400)
+        // Missing or invalid headers produce a 422 validation response.
         let error = match &self {
             HeaderExtractError::MissingHeader { name } => {
                 ValidationError::missing(crate::error::loc::header(name))

@@ -47,14 +47,14 @@ existing assertions passed on Linux, not that every spec behavior is covered.
 | Route macro runtime dispatch | `crates/fastapi-macros/src/route.rs`, `crates/fastapi/tests/macro_routes.rs` | Implemented | `<handler>_route()` returns a real `RouteEntry`: evaluate extractors, invoke the async handler, and convert errors/results into responses. Runtime registration uses `.route_entry(...)`. |
 | Routing + conflict detection | `crates/fastapi-core/src/routing.rs`, `crates/fastapi-router/src/trie.rs` | Implemented | Path params + converters supported; 405/OPTIONS behaviors present. |
 | App builder + request pipeline | `crates/fastapi-core/src/app.rs` | Implemented | Mounting, middleware execution, response mutations, background tasks integration. |
-| Extractors: Path/Query/Header/Cookie/Auth | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/dependency.rs` | Implemented | Large extractor surface; verify edge-case parity in spec as matrix expands. |
+| Extractors: Path/Query/NamedHeader/Cookie/Auth | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/dependency.rs` | Implemented | Named headers use `NamedHeader<T, N>` with a `HeaderName` marker. Large extractor surface; verify edge-case parity in spec as matrix expands. |
 | Multipart/form-data + UploadFile semantics | `crates/fastapi-core/src/multipart.rs`, `crates/fastapi-core/src/extract.rs` | Partial | Parser/extractor exists, streamed request bodies are parsed incrementally (no full-body pre-buffer in extractor path), streamed part assembly flushes safe prefixes incrementally, and large streamed file parts can stay spool-backed through `MultipartForm` move-based file APIs (`take_file`/`into_files`) before `UploadFile` operations. Remaining gap: complete API-surface parity for fully streamed consumption and broader edge-case parity coverage. |
 | Dependency injection | `crates/fastapi-core/src/dependency.rs` | Implemented | Type-based `Depends<T>` with caching/overrides/scopes; differs from Python callable-based dependency declaration. |
 | Validation errors (422 format) | `crates/fastapi-core/src/error.rs` | Implemented | JSON shape is designed to be FastAPI-compatible; keep expanding exact rule coverage vs spec. |
 | Validation derive | `crates/fastapi-core/src/validation.rs`, `crates/fastapi-macros/src/validate.rs` | Implemented | Current suite: length, range(gt/ge/lt/le), email, url, regex subset (anchors/classes/\\d/quantifiers), multiple_of, nested, phone, contains/starts_with/ends_with, custom paths. Still not full Pydantic parity. |
 | Responses (JSON/HTML/files) | `crates/fastapi-core/src/response.rs` | Partial | Core response types exist; advanced streaming/file semantics may need more parity work. |
 | Background tasks | `crates/fastapi-core/src/extract.rs` (BackgroundTasks) | Implemented | Server executes tasks after response in `crates/fastapi-http/src/server.rs`. |
-| Security primitives | `crates/fastapi-core/src/extract.rs` | Partial | Credential extractors exist; token validation logic is app-specific. |
+| Security primitives and middleware | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/middleware.rs`, `crates/fastapi-http/src/server.rs` | Partial | Credential extractors exist; token validation logic is app-specific. Credentialed CORS and HTTPS redirect inputs require careful configuration and targeted verification; see the security audit notes below. |
 | OpenAPI schema/spec types | `crates/fastapi-openapi/src/*` | Implemented | OpenAPI 3.1 types and `JsonSchema` trait exist. |
 | OpenAPI generation (from routes/handlers) | `crates/fastapi-core/src/app.rs`, `crates/fastapi-macros/src/route.rs`, `crates/fastapi-openapi/src/spec.rs` | Partial | Route metadata feeds operations, converted path parameters, JSON request-body references, and declared response references. The spec's Section 7.1 also requires collecting referenced models into component schemas and complete query/header metadata inference; those steps are not wired into `AppBuilder::generate_openapi_spec`. |
 | Docs pages (Swagger/ReDoc shells) | `crates/fastapi-core/src/docs.rs` | Implemented | HTML shells exist; assets expected via CDN/static hosting. |
@@ -62,6 +62,16 @@ existing assertions passed on Linux, not that every spec behavior is covered.
 | Testing harness | `crates/fastapi-core/src/testing.rs` | Implemented | In-process TestClient + assertions. |
 | WebSockets | `crates/fastapi-core/src/websocket.rs`, `crates/fastapi-http/tests/websocket.rs` | Partial | Upgrade, frames, ping/pong, and close-handshake hardening have network integration coverage. Exact FastAPI/Starlette surface equivalence remains unverified. Historical `bd-z09e` is absent from the current graph. |
 | HTTP/2 | `crates/fastapi-http/src/http2.rs`, `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/http2.rs` | Partial | H2C prior knowledge, HPACK, SETTINGS, flow control, GOAWAY/RST_STREAM, and frame validation exist. `server.rs` explicitly limits the connection to sequential streams; concurrent multiplexing and a full stream-state machine remain missing. Historical `bd-2c9t` is absent from the current graph. |
+
+Security audit notes: credentialed CORS with `allow_any_origin()` authorizes
+every supplied origin. Static review found that HTTPS redirects use raw Host
+while optional forwarded-host admission validates X-Forwarded-Host, and
+colon-based port removal mishandles bracketed IPv6. An additional static
+candidate combines a non-leading-slash request target, a catch-all route,
+and direct URL concatenation: `@evil.example/` with Host `good.example`
+could produce `https://good.example@evil.example/`. These paths need targeted
+runtime regression coverage; this audit does not certify secure proxy
+configuration or a live exploit.
 
 **Highest-leverage gaps (parity):**
 
@@ -88,7 +98,8 @@ full FastAPI parity; the concrete implementation gaps above remain.
 ### 1.2 Compile-Time Guarantees
 
 ```rust
-// Route type safety - invalid routes fail at compile time
+// Handler and extractor types are checked at compile time.
+// Route conflicts and non-final wildcards are validated during app construction.
 #[get("/items/{item_id}")]
 async fn get_item(
     cx: &Cx,
