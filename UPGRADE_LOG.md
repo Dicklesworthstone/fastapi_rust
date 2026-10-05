@@ -131,6 +131,8 @@ all seven intended versions without Tokio. No manual checksum edits were needed.
 | lazy_static | 1.5.0 → 1.5.1 | [Source](https://github.com/rust-lang-nursery/lazy-static.rs/compare/be7c1c43f264699f956b70ce8e29941bd1e61bde...4c1b9a170c157d679592e2682b13cc780c1db814): Docs/metadata; maintenance status. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | libc | 0.2.189 → 0.2.190 | [Source](https://static.crates.io/crates/libc/libc-0.2.190.crate): Platform bindings; native Linux checks. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | log | 0.4.33 → 0.4.34 (already locked) | [Source](https://github.com/rust-lang/log/releases/tag/0.4.34): Boxed logger alloc support. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| lru | 0.18.2 → 0.18.5 | [Source](https://static.crates.io/crates/lru/lru-0.18.5.crate): Sparse constructor and retain. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| mio | 1.2.2 → 1.2.4 | [Source](https://static.crates.io/crates/mio/mio-1.2.4.crate): Named-pipe UAF and Unix readiness fixes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
 ## Historical upgrade record
