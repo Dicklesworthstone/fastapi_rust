@@ -1,6 +1,6 @@
 # Dependency Upgrade Log
 
-## 2026-10-04 refresh (bd-3ffo)
+## 2026-10-04–05 refresh (bd-3ffo)
 
 The user explicitly requested `library-updater`. This section records registry
 research and per-dependency validation; it does not claim a performance win.
@@ -37,13 +37,14 @@ link, corrected to `enable_docs`. Warning gates remain unchanged. Evidence:
 [fmt job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879709),
 [clippy job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879160),
 [docs job](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/35760150887/job/106855879582).
-No open GitHub issues or PRs were found. Aggregate post-push CI is pending.
+No open GitHub issues or PRs were found, including the October 5 recheck.
 The preservation push at e942b6e passed formatting and macOS/Windows tests,
 then [Clippy](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37242247058/job/111553476317)
 reported two `collapsible_if` errors in compression middleware. The nested
 conditions are now equivalent short-circuit let chains; `-D warnings` stays
 unchanged. Final remote Clippy passed with default and all features, and
-the strict hosted Clippy job passed at a8c265a. Aggregate CI remains pending.
+the strict hosted Clippy job passed at a8c265a. The complete prior-graph
+hosted result at 6b358bd is recorded below.
 The scheduled workflow now uses explicit `+nightly` / `+1.95.0` selectors:
 otherwise the repository pin silently overrides the toolchain installed for
 the named latest-nightly or MSRV check. Existing warning gates and optional
@@ -53,7 +54,8 @@ Hosted CI at 62bc0d6 passed Clippy, formatting, documentation generation and
 security audit, but all three OS test jobs failed the newly runnable Header
 doctest: its import used the private `extract` module. The example now uses
 the public `fastapi_core::Header` re-export. Assertions and runnable status
-are preserved; final full tests and pushed CI must verify this correction.
+are preserved; final full tests and all three hosted OS jobs subsequently
+verified this correction at the prior dependency graph.
 [Ubuntu failure](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37251098519/job/111580578309).
 
 Baseline: RCH `cargo test --workspace --all-features --locked` at dfaa5a1 passed.
@@ -67,9 +69,9 @@ Transitive updates are researched from published manifests, changelogs, and
 tagged source before mutation. Each update gets affected-crate tests before the
 next update; the final workspace suite checks integration. Target-specific
 dependencies receive native regression checks, not cross-platform certification.
-No snapshots are regenerated. Final workspace checks are pending; the refreshed
-dependency audit is recorded below.
-All 46 researched package/family entries now have passing affected-crate
+No snapshots are regenerated. Prior-graph workspace checks and the refreshed
+dependency audit are recorded below.
+The initial 46 researched package/family entries have passing affected-crate
 tests. The final missed compatible patch, clap_lex 1.1.1 (published September
 14), passed 528 HTTP all-targets/all-feature tests. Benchmark harnesses ran
 in test mode; this is no throughput claim. Final `cargo update --dry-run`
@@ -79,8 +81,8 @@ forbidden runtime crates occurs in the 312-package lockfile.
 The refreshed `cargo audit --json` passed with zero known vulnerabilities,
 no advisory ignores, and the existing unmaintained bincode 1.3.3
 (RUSTSEC-2025-0141) / yaml-rust 0.4.5 (RUSTSEC-2024-0320) notices.
-Final normal-profile workspace tests and compiler gates passed as recorded
-below; the actual MSRV check and aggregate post-push CI remain pending.
+All seven prior-graph workspace gates, including actual Rust 1.95, passed as
+recorded below; all 13 hosted jobs subsequently passed at 6b358bd.
 Scoped UBS static scans were run before this commit. The final changed Rust
 file (`extract.rs`) returned exit 1: eight critical pattern matches are four
 unchanged test-only panic assertions, three test-only request-header setup
@@ -99,9 +101,12 @@ cancellation/recovery. Exact wrapper
 `rchw-77ef5ef7-4dc3-4afb-9dbf-f53c91e98bbd` / build `30050444235506058`
 was recovered with terminal acknowledgement, exit 137, and a dead wrapper
 before retry on vmi1153651. The caller returned 143; neither result passes
-the MSRV gate. Compiler limits and the requested check remain unchanged.
+the MSRV gate. Two subsequent attempts on vmi1153651 exhausted the unchanged
+1800-second limit and were acknowledged terminal with exit 137 before retry.
+The identical check then passed on admissible vmi1264463 in 235.1 seconds.
+Compiler limits and the requested check remained unchanged.
 
-### Final workspace verification
+### Prior-graph workspace verification
 
 Code and lockfile revision: `a8c265a93acc4147fa65e94992fbd5cbeb9c5726`.
 All compiler commands below ran remotely through strict RCH, serialized with
@@ -116,15 +121,42 @@ the earlier `profile.test.debug=0` scopes do not substitute for this suite.
 | `cargo clippy --workspace --all-targets --all-features --locked --jobs 2 -- -D warnings` | Passed. |
 | `cargo test --workspace --all-features --locked --quiet --jobs 2` | 2601 passed, zero failed; 188 existing ignores, including doctests. Includes the nine macro consumers and runnable Header example. |
 | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features --locked --jobs 2` | Passed; flags forwarded through `RCH_ENV_ALLOWLIST=RUSTDOCFLAGS`. |
-| `cargo +1.95.0 check --workspace --all-targets --all-features --locked --jobs 2` | Pending after the acknowledged failed transfer/cancellation attempt above. |
+| `cargo +1.95.0 check --workspace --all-targets --all-features --locked --jobs 2` | Passed remotely on vmi1264463 after the acknowledged failed attempts above. |
 | `cargo fmt --check` and `git diff --check` | Passed locally after the Header import correction. |
 
-[Hosted CI at the same code/lock revision](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37257327749)
-is still in progress. Completed Windows job logs independently show all nine
-named macro consumers passing, no ignored consumers, and the Header example
-passing in both core doctest runs (26 passed; 135/131 existing ignores).
-Parent and reviewer retrieved the same primary logs; this counts as one
-hosted execution, not two independent runtime results.
+[Hosted CI at a8c265a](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37257327749)
+was superseded by a metadata-only preservation push at
+`6b358bd8d7a2c312a542685b58c0961950a17bde`; source, lockfile and workflows
+were identical. Normal cancellation did not release the queued replacement;
+the exact superseded run was force-cancelled through GitHub's documented API,
+retaining its logs. [Replacement CI at 6b358bd](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37261029752)
+completed with all 13 jobs successful, including all five release targets.
+Raw Ubuntu, macOS and Windows logs show all nine named macro consumers
+passing with no ignored consumers, and the Header example passing in both
+core doctest runs (26 passed; 135/131 existing ignores). Parent and reviewer
+retrievals of the same logs count as one hosted execution per OS.
+
+### October 5 registry recheck
+
+While the prior graph was completing validation, powerfmt 0.2.1 (09:01 UTC)
+and unicase 2.10.0 (13:11 UTC) were published. Both were researched from primary
+registry metadata and upstream source before mutation, then updated separately;
+each passed 333 affected output tests through strict RCH before the next update.
+All 18 direct dependencies and seven Actions release selectors were rechecked
+and remained current. The sequential table below now contains 48 researched
+package/family entries. The current lockfile differs from the prior certified
+graph in these two releases; all seven workspace gates are being rerun and
+current-graph hosted CI remains pending. Prior-graph results do not certify
+these two updates. The current-graph resolver dry run proposes only the held
+seven-package wasm family plus Tokio; all 48 tested targets remain in the
+312-package lockfile, with none of the seven forbidden runtime crates.
+The October 5 audit again passed with zero known vulnerabilities, no advisory
+ignores, and the same two unmaintained notices. Local formatting and whitespace
+checks passed. UBS scoped to the changed lockfile/log/bead files returned 0
+(one detected Rust input, four informational items, no critical/warning
+matches). No Rust source changed in this continuation; this targeted result
+does not supersede the earlier source scan findings or certify security.
+
 The latest generic-array 0.14.9 is excluded by the upstream
 [crypto-common 0.1.7 manifest](https://docs.rs/crate/crypto-common/0.1.7/source/Cargo.toml),
 which requires exactly `=0.14.7`. No dependency override or upstream patch is
@@ -227,6 +259,8 @@ Smallvec also reaches asupersync and parking_lot_core. Before the next update, R
 | unicode-ident | 1.0.24 → 1.0.26 | [Source](https://github.com/dtolnay/unicode-ident/releases/tag/1.0.26): Unicode 18 identifier handling. | RCH `cargo test -p fastapi-macros --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | zerocopy | 0.8.55 → 0.8.59 | [Source](https://github.com/google/zerocopy/releases/tag/v0.8.59): Layout/read/transmute and paired derive fixes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | clap_lex | 1.1.0 → 1.1.1 | [Source](https://github.com/clap-rs/clap/compare/clap_lex-v1.1.0...clap_lex-v1.1.1): Missed compatible patch found in final dry-run; MSRV 1.85 unchanged; published-source comparison found internal OsStr spelling and packaging/lint maintenance, with no consumer API break identified. | RCH `cargo test -p fastapi-http --all-targets --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| powerfmt | 0.2.0 → 0.2.1 | [Source](https://github.com/jhpratt/powerfmt/blob/3dd45162a7e64d6b354675e4282d0550dce8bfc8/CHANGELOG.md): Published Oct5 09:01 UTC; MSRV rises to 1.79; optional macro fixes remain inactive through time; internal maintenance. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| unicase | 2.9.0 → 2.10.0 | [Source](https://github.com/seanmonstar/unicase/releases/tag/v2.10.0): Published Oct5 13:11 UTC; Unicode18 and three-character folding-order fixes change some equality results; MSRV undeclared; no normal dependencies. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
 ## Historical upgrade record
