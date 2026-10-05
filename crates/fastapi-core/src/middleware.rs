@@ -735,8 +735,8 @@ impl OriginPattern {
 ///     .allow_credentials(true)
 ///     .expose_headers(["X-Request-Id"]);
 ///
-/// // Also secure: any origin echoes back specific origin when credentials enabled
-/// // (not recommended - prefer explicit origins for security)
+/// // Allows credentialed requests from every supplied origin.
+/// // Use an explicit trusted origin list for private user data.
 /// let cors = Cors::new()
 ///     .allow_any_origin()
 ///     .allow_credentials(true);
