@@ -143,8 +143,9 @@ and unicase 2.10.0 (13:11 UTC) were published. Both were researched from primary
 registry metadata and upstream source before mutation, then updated separately;
 each passed 333 affected output tests through strict RCH before the next update.
 All 18 direct dependencies and seven Actions release selectors were rechecked
-and remained current. The sequential table below now contains 48 researched
-package/family entries. The current lockfile differs from the prior certified
+and remained current. The complete upgrade record now covers 48 researched
+package/family entries: 46 sequential-table rows plus the initial flate2 and
+direct syn entries. The current lockfile differs from the prior certified
 graph in these two releases; all seven workspace gates are being rerun and
 current-graph hosted CI remains pending. Prior-graph results do not certify
 these two updates. The current-graph resolver dry run proposes only the held
@@ -259,7 +260,7 @@ Smallvec also reaches asupersync and parking_lot_core. Before the next update, R
 | unicode-ident | 1.0.24 → 1.0.26 | [Source](https://github.com/dtolnay/unicode-ident/releases/tag/1.0.26): Unicode 18 identifier handling. | RCH `cargo test -p fastapi-macros --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | zerocopy | 0.8.55 → 0.8.59 | [Source](https://github.com/google/zerocopy/releases/tag/v0.8.59): Layout/read/transmute and paired derive fixes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | clap_lex | 1.1.0 → 1.1.1 | [Source](https://github.com/clap-rs/clap/compare/clap_lex-v1.1.0...clap_lex-v1.1.1): Missed compatible patch found in final dry-run; MSRV 1.85 unchanged; published-source comparison found internal OsStr spelling and packaging/lint maintenance, with no consumer API break identified. | RCH `cargo test -p fastapi-http --all-targets --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
-| powerfmt | 0.2.0 → 0.2.1 | [Source](https://github.com/jhpratt/powerfmt/blob/3dd45162a7e64d6b354675e4282d0550dce8bfc8/CHANGELOG.md): Published Oct5 09:01 UTC; MSRV rises to 1.79; optional macro fixes remain inactive through time; internal maintenance. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| powerfmt | 0.2.0 → 0.2.1 | [Source](https://github.com/jhpratt/powerfmt/blob/3dd45162a7e64d6b354675e4282d0550dce8bfc8/CHANGELOG.md): Published Oct5 09:01 UTC; MSRV rises to 1.79; fixes the always-exported `padded_width_of!` alternate flag; only optional procedural macros remain disabled through time. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | unicase | 2.9.0 → 2.10.0 | [Source](https://github.com/seanmonstar/unicase/releases/tag/v2.10.0): Published Oct5 13:11 UTC; Unicode18 and three-character folding-order fixes change some equality results; MSRV undeclared; no normal dependencies. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
