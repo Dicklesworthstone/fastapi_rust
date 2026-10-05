@@ -4333,7 +4333,7 @@ mod state_tests {
 /// # Example
 ///
 /// ```
-/// use fastapi_core::extract::Header;
+/// use fastapi_core::Header;
 ///
 /// let request_id = Header::new("X-Request-Id", String::from("request-42"));
 /// assert_eq!(request_id.name, "X-Request-Id");

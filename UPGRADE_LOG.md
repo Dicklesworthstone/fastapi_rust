@@ -48,6 +48,13 @@ otherwise the repository pin silently overrides the toolchain installed for
 the named latest-nightly or MSRV check. Existing warning gates and optional
 job policies are preserved.
 
+Hosted CI at 62bc0d6 passed Clippy, formatting, documentation generation and
+security audit, but all three OS test jobs failed the newly runnable Header
+doctest: its import used the private `extract` module. The example now uses
+the public `fastapi_core::Header` re-export. Assertions and runnable status
+are preserved; final full tests and pushed CI must verify this correction.
+[Ubuntu failure](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37251098519/job/111580578309).
+
 Baseline: RCH `cargo test --workspace --all-features --locked` at dfaa5a1 passed.
 The flate2 and futures upgrades passed their first workspace tests, but external
 checkout resets at 20:39:55 and 20:41:07 UTC removed those lockfile changes and
@@ -59,7 +66,29 @@ Transitive updates are researched from published manifests, changelogs, and
 tagged source before mutation. Each update gets affected-crate tests before the
 next update; the final workspace suite checks integration. Target-specific
 dependencies receive native regression checks, not cross-platform certification.
-No snapshots are regenerated. Final checks and security audit are pending.
+No snapshots are regenerated. Final workspace checks are pending; the refreshed
+dependency audit is recorded below.
+All 46 researched package/family entries now have passing affected-crate
+tests. The final missed compatible patch, clap_lex 1.1.1 (published September
+14), passed 528 HTTP all-targets/all-feature tests. Benchmark harnesses ran
+in test mode; this is no throughput claim. Final `cargo update --dry-run`
+now proposes only the held seven-package wasm family and its forbidden Tokio
+addition. All 46 tested target versions remain locked; none of the seven
+forbidden runtime crates occurs in the 312-package lockfile.
+The refreshed `cargo audit --json` passed with zero known vulnerabilities,
+no advisory ignores, and the existing unmaintained bincode 1.3.3
+(RUSTSEC-2025-0141) / yaml-rust 0.4.5 (RUSTSEC-2024-0320) notices.
+Final normal-profile workspace gates are running; post-push CI is pending.
+Scoped UBS static scans were run before this commit. The final changed Rust
+file (`extract.rs`) returned exit 1: eight critical pattern matches are four
+unchanged test-only panic assertions, three test-only request-header setup
+calls mistaken for response sinks, and public cookie-name comparison mistaken
+for secret comparison. Source and test-module boundaries were inspected;
+assertions were retained and no scanner suppression was added. The broader
+five-file scan also returned 1 (161 critical pattern matches); sampled real
+middleware policy/redirect gaps are recorded in the existing architecture
+coverage matrix. This is not a clean UBS or comprehensive security result.
+UBS Cargo phases were explicitly not evaluated; compilation runs through RCH.
 
 The crossbeam-epoch validation was initially refused by RCH because worker
 vmi1264463 had critical memory pressure (exit 103). No tests ran and no local
@@ -89,6 +118,14 @@ was recovered with terminal acknowledgement and exit 137. No passing result
 was inferred from that attempt. Retrying the same locked update on admissible
 worker ovh-a passed 333 affected tests; later dependencies changed only after
 that result. No daemon restart, other-agent cancellation, or local fallback.
+The log update was refused on ovh-a after its disk-pressure threshold was
+crossed; no tests ran there. The same locked update passed 333 tests on
+vmi1149989. Later regex-automata synchronization stalled for over twelve
+minutes on vmi1149989 with `execution_started=false`. Cancellation initially
+remained unconfirmed; recovery acknowledged exact wrapper
+`rchw-ced97431-9d61-4afb-8510-c396c8d9f787` / build `30050444235505946`
+as finished with exit 1 and no execution before retry on another worker.
+No later dependency changed while that validation was unresolved.
 
 The latest wasm-bindgen-futures (0.4.79) adds a normal Tokio dependency under an
 Emscripten cfg, which Cargo records even on Linux. The project forbids this.
@@ -100,6 +137,8 @@ lets Cargo update the exactly coupled family atomically; its dry run confirmed
 all seven intended versions without Tokio. No manual checksum edits were needed.
 
 ### Sequential transitive validation
+
+Smallvec also reaches asupersync and parking_lot_core. Before the next update, RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed all 2110 library tests on vmi1227854; this supplements the output-only check.
 
 | Package / coupled family | Before → after | Research | Tests |
 |---|---|---|---|
@@ -137,6 +176,16 @@ all seven intended versions without Tokio. No manual checksum edits were needed.
 | pest / derive / generator / meta | 2.8.8 → 2.9.2 | [Source](https://github.com/pest-parser/pest/releases/tag/v2.9.2): Coupled generator/derive/meta; Unicode 18. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | pkg-config | 0.3.33 → 0.3.34 | [Source](https://static.crates.io/crates/pkg-config/pkg-config-0.3.34.crate): MSRV 1.63; cflags controls. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 | plist | 1.10.0 → 1.10.1 | [Source](https://static.crates.io/crates/plist/plist-1.10.1.crate): Migrated quick-xml 0.42 and base64 0.23 internally. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| rand | 0.8.7 → 0.8.8 | [Source](https://static.crates.io/crates/rand/rand-0.8.8.crate): serde1 feature fix. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| regex-automata | 0.4.16 → 0.4.18 (already locked) | [Source](https://github.com/rust-lang/regex/compare/regex-automata-0.4.16...regex-automata-0.4.18): Configurable pool capacity. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| rustix | 1.1.4 → 1.1.5 | [Source](https://github.com/bytecodealliance/rustix/compare/v1.1.4...v1.1.5): MSRV 1.65; libc statx and timeout changes. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| signal-hook | 0.4.4 → 0.4.5 | [Source](https://static.crates.io/crates/signal-hook/signal-hook-0.4.5.crate): Close-on-exec; drops Android below API 21. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| smallvec | 1.15.2 → 1.16.2 | [Source](https://github.com/servo/rust-smallvec/releases/tag/v1.16.2): Retain/drop safety fixes. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| thiserror | 2.0.19 → 2.0.21 | [Source](https://github.com/dtolnay/thiserror/releases/tag/2.0.21): Coupled derive generic parsing fix. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| tinyvec | 1.12.0 → 1.13.3 | [Source](https://github.com/Lokathor/tinyvec/blob/v1.13.3/changelog.md): Initialization and alloc fixes. | RCH `cargo test -p fastapi-output --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| unicode-ident | 1.0.24 → 1.0.26 | [Source](https://github.com/dtolnay/unicode-ident/releases/tag/1.0.26): Unicode 18 identifier handling. | RCH `cargo test -p fastapi-macros --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| zerocopy | 0.8.55 → 0.8.59 | [Source](https://github.com/google/zerocopy/releases/tag/v0.8.59): Layout/read/transmute and paired derive fixes. | RCH `cargo test --workspace --all-features --lib --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
+| clap_lex | 1.1.0 → 1.1.1 | [Source](https://github.com/clap-rs/clap/compare/clap_lex-v1.1.0...clap_lex-v1.1.1): Missed compatible patch found in final dry-run; MSRV 1.85 unchanged; published-source comparison found internal OsStr spelling and packaging/lint maintenance, with no consumer API break identified. | RCH `cargo test -p fastapi-http --all-targets --all-features --locked --quiet --config profile.test.debug=0 --jobs 2` passed. |
 
 
 ## Historical upgrade record
