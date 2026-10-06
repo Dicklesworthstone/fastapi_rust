@@ -424,7 +424,7 @@ impl JsonSchema for serde_json::Value {
     }
 }
 
-impl<T: JsonSchema> JsonSchema for HashMap<String, T> {
+impl<T: JsonSchema, S: std::hash::BuildHasher> JsonSchema for HashMap<String, T, S> {
     fn schema() -> Schema {
         Schema::Object(ObjectSchema {
             additional_properties: Some(Box::new(T::schema())),

@@ -63,9 +63,12 @@ mod path_generation {
         builder.add_route(&route);
         let doc = builder.build();
 
-        let op = doc.paths["/users/{id:int}"].get.as_ref().unwrap();
+        assert!(!doc.paths.contains_key("/users/{id:int}"));
+        let op = doc.paths["/users/{id}"].get.as_ref().unwrap();
         assert_eq!(op.parameters.len(), 1);
         assert_eq!(op.parameters[0].name, "id");
+        assert!(matches!(op.parameters[0].location, ParameterLocation::Path));
+        assert!(op.parameters[0].required);
 
         // Check schema is integer
         let json = serde_json::to_string(&op.parameters[0]).unwrap();
@@ -81,7 +84,12 @@ mod path_generation {
         builder.add_route(&route);
         let doc = builder.build();
 
-        let op = doc.paths["/items/{item_id:uuid}"].get.as_ref().unwrap();
+        assert!(!doc.paths.contains_key("/items/{item_id:uuid}"));
+        let op = doc.paths["/items/{item_id}"].get.as_ref().unwrap();
+        assert_eq!(op.parameters.len(), 1);
+        assert_eq!(op.parameters[0].name, "item_id");
+        assert!(matches!(op.parameters[0].location, ParameterLocation::Path));
+        assert!(op.parameters[0].required);
         let json = serde_json::to_string(&op.parameters[0]).unwrap();
         assert!(json.contains(r#""type":"string""#));
         assert!(json.contains(r#""format":"uuid""#));
@@ -96,7 +104,11 @@ mod path_generation {
         builder.add_route(&route);
         let doc = builder.build();
 
-        let op = doc.paths["/users/{user_id:int}/posts/{post_id:int}"]
+        assert!(
+            !doc.paths
+                .contains_key("/users/{user_id:int}/posts/{post_id:int}")
+        );
+        let op = doc.paths["/users/{user_id}/posts/{post_id}"]
             .get
             .as_ref()
             .unwrap();
@@ -104,6 +116,13 @@ mod path_generation {
         assert_eq!(op.parameters.len(), 2);
         assert_eq!(op.parameters[0].name, "user_id");
         assert_eq!(op.parameters[1].name, "post_id");
+        for parameter in &op.parameters {
+            assert!(matches!(parameter.location, ParameterLocation::Path));
+            assert!(parameter.required);
+            let json = serde_json::to_string(parameter).unwrap();
+            assert!(json.contains(r#""type":"integer""#));
+            assert!(json.contains(r#""format":"int64""#));
+        }
     }
 
     #[test]
@@ -114,9 +133,12 @@ mod path_generation {
         builder.add_route(&route);
         let doc = builder.build();
 
-        let op = doc.paths["/files/{*filepath}"].get.as_ref().unwrap();
+        assert!(!doc.paths.contains_key("/files/{*filepath}"));
+        let op = doc.paths["/files/{filepath}"].get.as_ref().unwrap();
         assert_eq!(op.parameters.len(), 1);
         assert_eq!(op.parameters[0].name, "filepath");
+        assert!(matches!(op.parameters[0].location, ParameterLocation::Path));
+        assert!(op.parameters[0].required);
 
         // Wildcard is a string type
         let json = serde_json::to_string(&op.parameters[0]).unwrap();
@@ -148,10 +170,26 @@ mod path_generation {
             Some("create_item")
         );
 
-        // Check /items/{id:int} has PUT and DELETE
-        let item_path = &doc.paths["/items/{id:int}"];
+        // Check /items/{id} has PUT and DELETE
+        assert!(!doc.paths.contains_key("/items/{id:int}"));
+        let item_path = &doc.paths["/items/{id}"];
         assert!(item_path.put.is_some());
         assert!(item_path.delete.is_some());
+        for operation in [
+            item_path.put.as_ref().unwrap(),
+            item_path.delete.as_ref().unwrap(),
+        ] {
+            assert_eq!(operation.parameters.len(), 1);
+            assert_eq!(operation.parameters[0].name, "id");
+            assert!(matches!(
+                operation.parameters[0].location,
+                ParameterLocation::Path
+            ));
+            assert!(operation.parameters[0].required);
+            let json = serde_json::to_string(&operation.parameters[0]).unwrap();
+            assert!(json.contains(r#""type":"integer""#));
+            assert!(json.contains(r#""format":"int64""#));
+        }
     }
 }
 
@@ -284,7 +322,15 @@ mod request_body {
         builder.add_route(&route);
         let doc = builder.build();
 
-        let op = doc.paths["/users/{id:int}"].patch.as_ref().unwrap();
+        assert!(!doc.paths.contains_key("/users/{id:int}"));
+        let op = doc.paths["/users/{id}"].patch.as_ref().unwrap();
+        assert_eq!(op.parameters.len(), 1);
+        assert_eq!(op.parameters[0].name, "id");
+        assert!(matches!(op.parameters[0].location, ParameterLocation::Path));
+        assert!(op.parameters[0].required);
+        let json = serde_json::to_string(&op.parameters[0]).unwrap();
+        assert!(json.contains(r#""type":"integer""#));
+        assert!(json.contains(r#""format":"int64""#));
         let body = op.request_body.as_ref().unwrap();
 
         assert!(!body.required);
@@ -540,18 +586,35 @@ fn full_api_document_generation() {
     // Verify document structure
     assert_eq!(doc.openapi, "3.1.0");
     assert_eq!(doc.info.title, "User Management API");
-    assert_eq!(doc.paths.len(), 2); // /users and /users/{id:int}
+    assert_eq!(doc.paths.len(), 2); // /users and /users/{id}
 
     // Verify /users has GET and POST
     let users_path = &doc.paths["/users"];
     assert!(users_path.get.is_some());
     assert!(users_path.post.is_some());
 
-    // Verify /users/{id:int} has GET, PUT, DELETE
-    let user_path = &doc.paths["/users/{id:int}"];
+    // Verify /users/{id} has GET, PUT, DELETE
+    assert!(!doc.paths.contains_key("/users/{id:int}"));
+    let user_path = &doc.paths["/users/{id}"];
     assert!(user_path.get.is_some());
     assert!(user_path.put.is_some());
     assert!(user_path.delete.is_some());
+    for operation in [
+        user_path.get.as_ref().unwrap(),
+        user_path.put.as_ref().unwrap(),
+        user_path.delete.as_ref().unwrap(),
+    ] {
+        assert_eq!(operation.parameters.len(), 1);
+        assert_eq!(operation.parameters[0].name, "id");
+        assert!(matches!(
+            operation.parameters[0].location,
+            ParameterLocation::Path
+        ));
+        assert!(operation.parameters[0].required);
+        let json = serde_json::to_string(&operation.parameters[0]).unwrap();
+        assert!(json.contains(r#""type":"integer""#));
+        assert!(json.contains(r#""format":"int64""#));
+    }
 
     // Verify components/schemas
     let components = doc.components.as_ref().unwrap();

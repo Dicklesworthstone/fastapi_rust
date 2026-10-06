@@ -62,7 +62,7 @@ impl SerdeSchemaAttrs {
                     Meta::Path(path) if path.is_ident("default") => result.default = true,
                     Meta::Path(path) if path.is_ident("skip") => result.skip = true,
                     Meta::NameValue(value) if value.path.is_ident("default") => {
-                        result.default = true
+                        result.default = true;
                     }
                     Meta::NameValue(value) => {
                         if let Expr::Lit(ExprLit {
