@@ -1,6 +1,9 @@
 # OpenAPI Documentation
 
-> **Status (as of 2026-02-10)**: OpenAPI schema/spec types exist (`fastapi-openapi`), `#[derive(JsonSchema)]` exists, and `App` can serve an OpenAPI JSON endpoint. Full-coverage generation from all handler/extractor types is tracked under `bd-uz2s`.
+`App` serves an OpenAPI 3.1 document from registered route metadata. Route macros
+connect JSON models and responses, named query/header fields, and typed path
+parameters to this document. Full coverage of every extractor, serde representation
+and security flow remains incomplete; see the parity matrix and Beads.
 
 ## Concept
 
@@ -11,22 +14,47 @@ OpenAPI (formerly Swagger) provides machine-readable API documentation that can 
 The `fastapi-openapi` crate provides OpenAPI 3.1 types:
 
 ```rust
-use fastapi::openapi::{OpenApi, OpenApiBuilder, Info, Server};
+use fastapi_rust::openapi::OpenApiBuilder;
 
-let spec = OpenApiBuilder::new()
-    .info(Info {
-        title: "My API".into(),
-        version: "1.0.0".into(),
-        description: Some("A sample API".into()),
-        ..Default::default()
-    })
-    .server(Server {
-        url: "https://api.example.com".into(),
-        description: Some("Production".into()),
-        ..Default::default()
-    })
+let spec = OpenApiBuilder::new("My API", "1.0.0")
+    .description("A sample API")
+    .server("https://api.example.com", Some("Production".into()))
     .build();
 ```
+
+## Typed Path Parameters
+
+```rust
+use fastapi_rust::prelude::*;
+
+#[get("/users/{id}")]
+async fn get_user(_cx: &Cx, id: Path<i64>) -> Json<i64> {
+    Json(id.0)
+}
+
+let app = App::builder()
+    .openapi(fastapi_rust::OpenApiConfig::new())
+    .route_entry(get_user_route())
+    .build();
+```
+
+The served `/openapi.json` describes `id` as a required integer with `int64`
+format. For multiple placeholders, use one `Path<(String, i64)>` whose elements
+follow route order, or a named model deriving both `Deserialize` and `JsonSchema`.
+Named fields match serialized names, including symmetric serde renames and raw
+Rust identifiers such as `r#type`. Separate scalar `Path` arguments are rejected.
+
+Optional path extractors still describe required URL placeholders. Existing
+`Option<Path<T>>` extraction returns `None` for malformed values; it does not
+promise a 422 response. Optional named models omit JSON-null unions from path
+parameter schemas because URL values are text.
+
+Explicit `:int`, `:float` and `:uuid` converter schemas remain authoritative.
+Handler-specific narrowing on those converters is not fully represented. Literal
+tuples are supported; tuple aliases, recursive/custom schema references,
+directional serde attributes and arbitrary extractor metadata remain limits.
+Manually created `RouteEntry` values can use `.path_schema::<T>(&["id"])` while
+retaining parameter descriptions and examples from their router metadata.
 
 ## Missing / In Progress
 

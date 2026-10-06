@@ -169,7 +169,7 @@ fn extract_path_params(path: &str) -> Vec<String> {
             } else {
                 inner
             };
-            params.push(name.to_string());
+            params.push(name.strip_prefix('*').unwrap_or(name).to_string());
         }
     }
 
@@ -178,12 +178,15 @@ fn extract_path_params(path: &str) -> Vec<String> {
 
 /// Check if a type is a Path extractor and extract its inner type.
 fn is_path_extractor(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.last()
-    {
-        return segment.ident == "Path";
-    }
-    false
+    path_inner_type(ty).is_some()
+}
+
+/// Read a Path model, including an optional extractor wrapper.
+fn path_inner_type(ty: &Type) -> Option<&Type> {
+    let extractor = generic_types(ty, "Option")
+        .and_then(|types| types.first().copied())
+        .unwrap_or(ty);
+    generic_types(extractor, "Path").and_then(|types| types.first().copied())
 }
 
 /// Analyze function arguments to find Path extractors.
@@ -204,15 +207,10 @@ fn count_path_extractors(inputs: &syn::punctuated::Punctuated<FnArg, syn::token:
 
 /// Count tuple elements in a Path<(T1, T2, ...)> type.
 fn count_tuple_elements(ty: &Type) -> Option<usize> {
-    if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.last()
-        && segment.ident == "Path"
-        && let PathArguments::AngleBracketed(args) = &segment.arguments
-        && let Some(GenericArgument::Type(Type::Tuple(tuple))) = args.args.first()
-    {
-        return Some(tuple.elems.len());
-    }
-    None
+    let Type::Tuple(tuple) = path_inner_type(ty)? else {
+        return None;
+    };
+    Some(tuple.elems.len())
 }
 
 /// Check if a type is one of the context types that don't require FromRequest.
@@ -494,6 +492,17 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
             .into();
     }
 
+    // Each Path extractor receives the complete parameter set. Multiple scalar
+    // extractors would therefore read the first value repeatedly.
+    if path_extractor_count > 1 {
+        let error_msg = format!(
+            "handler '{fn_name}' has multiple Path extractors. Use one grouped Path tuple or named struct; separate scalar extractors each read the first parameter."
+        );
+        return syn::Error::new(fn_name.span(), error_msg)
+            .to_compile_error()
+            .into();
+    }
+
     // Validation 3: Check tuple arity matches parameter count
     for arg in fn_inputs {
         if let FnArg::Typed(pat_type) = arg
@@ -645,7 +654,18 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
             let optional = generic_types(ty, "Option").and_then(|types| types.first().copied());
             let extractor = optional.unwrap_or(ty);
             let required = optional.is_none();
-            if let Some(types) = generic_types(extractor, "Query") {
+            if let Some(model) = path_inner_type(ty) {
+                if let Type::Tuple(tuple) = model {
+                    let calls: Vec<_> = path_params
+                        .iter()
+                        .zip(&tuple.elems)
+                        .map(|(name, element)| quote! { .path_schema::<#element>(&[#name]) })
+                        .collect();
+                    Some(quote! { #(#calls)* })
+                } else {
+                    Some(quote! { .path_schema::<#model>(&[#(#path_params),*]) })
+                }
+            } else if let Some(types) = generic_types(extractor, "Query") {
                 let model = types.first()?;
                 Some(quote! { .query_schema::<#model>(#required) })
             } else if let Some(types) = generic_types(extractor, "NamedHeader") {

@@ -82,6 +82,15 @@ credentialed CORS configuration, a complete security audit, or a live exploit.
 - Validation rules: expand `Validate` derive + runtime validation to match spec exactly.
 - Security: flesh out auth flows and error semantics to match legacy FastAPI expectations.
 
+Unconverted path parameters now receive handler metadata through the same
+registration bridge: scalars describe the first placeholder, literal tuples map
+by route order, and named models use serialized field names. Metadata replaces
+only existing path schemas, preserving requiredness, descriptions and examples.
+Explicit numeric/UUID converters keep their schemas; narrower handler constraints
+on them, tuple aliases and unsupported serde representations remain outside this
+coverage. Macros require one grouped path extractor to prevent repeated reads of
+the first parameter. This follow-up is tracked as `fr-zphg`.
+
 The macro/README correction is tracked as `bd-2sum`; typed OpenAPI wiring and
 the authority/encoded-target redirect fix are tracked as `fr-z7jj` and `fr-e7f9`.
 The `bd-uz2s` epic covers

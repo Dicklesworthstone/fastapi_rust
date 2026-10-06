@@ -724,7 +724,13 @@ Current parity status and the concrete gap list are tracked in:
   parameters include their types and requiredness; symmetric serde renames and defaults
   feed query metadata. Converter paths become valid OpenAPI templates for both macro
   and manually registered routes.
-  Recursive/custom schema references, directional serde attributes, arbitrary extractor
+  Unconverted `Path<T>` parameters use scalar handler types, inline tuple order,
+  or the serialized field names of named `JsonSchema` models. Path parameters remain
+  required, including optional extractors. One grouped path extractor is required;
+  separate scalar path arguments are rejected instead of reading the first value twice.
+  Explicit numeric/UUID converter schemas remain authoritative, so narrower handler
+  constraints on those converters are not fully described. Tuple aliases,
+  recursive/custom schema references, directional serde attributes, arbitrary extractor
   metadata remain outside this coverage.
 - **HTTPS redirects**: use the server-admitted effective authority, preserve encoded
   origin targets and queries, and support bracketed IPv6 and configured HTTPS ports.

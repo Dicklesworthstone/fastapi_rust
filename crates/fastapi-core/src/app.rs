@@ -229,9 +229,27 @@ struct RouteOpenApi {
     request_body: Option<fastapi_openapi::RequestBody>,
     responses: HashMap<String, fastapi_openapi::Response>,
     parameters: Vec<fastapi_openapi::Parameter>,
+    path_schemas: HashMap<String, fastapi_openapi::Schema>,
 }
 
 impl RouteOpenApi {
+    /// URL parameters are text; absence-only schema null unions do not apply.
+    fn parameter_schema(mut schema: fastapi_openapi::Schema) -> fastapi_openapi::Schema {
+        while let fastapi_openapi::Schema::AnyOf(union) = &schema {
+            if union.any_of.len() != 2
+                || !matches!(&union.any_of[1], fastapi_openapi::Schema::Primitive(primitive)
+                    if matches!(primitive.schema_type, fastapi_openapi::SchemaType::Null))
+            {
+                break;
+            }
+            schema = union.any_of[0].clone();
+        }
+        if let fastapi_openapi::Schema::Primitive(primitive) = &mut schema {
+            primitive.nullable = false;
+        }
+        schema
+    }
+
     fn schema<T: fastapi_openapi::JsonSchema>(&mut self) -> fastapi_openapi::Schema {
         let schema = T::schema();
         if let Some(name) = T::schema_name() {
@@ -247,6 +265,13 @@ impl RouteOpenApi {
             operation.request_body = Some(body.clone());
         }
         operation.responses.extend(self.responses.clone());
+        for parameter in &mut operation.parameters {
+            if matches!(parameter.location, fastapi_openapi::ParameterLocation::Path)
+                && let Some(schema) = self.path_schemas.get(&parameter.name)
+            {
+                parameter.schema = Some(schema.clone());
+            }
+        }
         operation.parameters.extend(self.parameters.clone());
     }
 }
@@ -356,6 +381,47 @@ impl RouteEntry {
         self
     }
 
+    /// Describe unconverted path parameters using their handler types.
+    ///
+    /// Scalars describe the first supplied name, matching `Path<T>` extraction.
+    /// Object schemas describe matching fields by their serialized names. Route
+    /// macros describe tuple elements individually in route order. Explicit
+    /// integer, float and UUID converters retain their authoritative schemas.
+    #[must_use]
+    pub fn path_schema<T: fastapi_openapi::JsonSchema>(mut self, names: &[&str]) -> Self {
+        let schema = RouteOpenApi::parameter_schema(T::schema());
+        let route = self
+            .meta
+            .clone()
+            .unwrap_or_else(|| fastapi_router::Route::new(self.method, &self.path));
+        for (index, name) in names.iter().enumerate() {
+            let Some(parameter) = route.path_params.iter().find(|parameter| {
+                parameter.name == *name
+                    && matches!(
+                        parameter.converter,
+                        fastapi_router::Converter::Str | fastapi_router::Converter::Path
+                    )
+            }) else {
+                continue;
+            };
+            let field_schema = match &schema {
+                fastapi_openapi::Schema::Object(object) => {
+                    let Some(field) = object.properties.get(*name) else {
+                        continue;
+                    };
+                    field.clone()
+                }
+                _ if index == 0 => schema.clone(),
+                _ => continue,
+            };
+            self.openapi.path_schemas.insert(
+                parameter.name.clone(),
+                RouteOpenApi::parameter_schema(field_schema),
+            );
+        }
+        self
+    }
+
     /// Describe the fields of a typed query model. Optional extractors have no
     /// required parameters; required extractors retain the model's required fields.
     #[must_use]
@@ -363,20 +429,9 @@ impl RouteEntry {
         if let fastapi_openapi::Schema::Object(object) = T::schema() {
             let mut properties: Vec<_> = object.properties.into_iter().collect();
             properties.sort_by(|a, b| a.0.cmp(&b.0));
-            for (name, mut schema) in properties {
+            for (name, schema) in properties {
                 // An optional query field permits absence, not a JSON null value.
-                while let fastapi_openapi::Schema::AnyOf(union) = &schema {
-                    if union.any_of.len() != 2
-                        || !matches!(&union.any_of[1], fastapi_openapi::Schema::Primitive(primitive)
-                            if matches!(primitive.schema_type, fastapi_openapi::SchemaType::Null))
-                    {
-                        break;
-                    }
-                    schema = union.any_of[0].clone();
-                }
-                if let fastapi_openapi::Schema::Primitive(primitive) = &mut schema {
-                    primitive.nullable = false;
-                }
+                let schema = RouteOpenApi::parameter_schema(schema);
                 self.openapi.parameters.push(fastapi_openapi::Parameter {
                     required: required && object.required.contains(&name),
                     name,

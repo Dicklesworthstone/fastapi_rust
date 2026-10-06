@@ -199,6 +199,315 @@ fn schema_app() -> App {
         .build()
 }
 
+type SmallPathId = std::primitive::u32;
+
+#[get("/small/{id}")]
+async fn small_path(_cx: &Cx, id: Path<SmallPathId>) -> Json<u32> {
+    Json(id.0)
+}
+
+#[post("/small/{id}")]
+async fn string_path(_cx: &Cx, id: Path<String>) -> Json<String> {
+    Json(id.0)
+}
+
+#[get("/pairs/{label}/{id}")]
+async fn tuple_path(_cx: &Cx, values: Path<(String, i64)>) -> Json<String> {
+    Json(format!("{}:{}", values.0.0, values.0.1))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct NamedPath {
+    #[serde(rename = "userId", default)]
+    user_id: Option<u32>,
+    r#type: String,
+}
+
+type NamedPathAlias = NamedPath;
+
+#[get("/named/{type}/{userId}")]
+async fn named_path(_cx: &Cx, values: Path<NamedPathAlias>) -> Json<String> {
+    Json(format!(
+        "{}:{}",
+        values.0.r#type,
+        values.0.user_id.unwrap_or_default()
+    ))
+}
+
+#[get("/nullable/{type}/{userId}")]
+async fn nullable_path(_cx: &Cx, values: Path<Option<NamedPath>>) -> Json<String> {
+    Json(values.0.map_or_else(String::new, |values| {
+        format!("{}:{}", values.r#type, values.user_id.unwrap_or_default())
+    }))
+}
+
+#[get("/maybe/{id}")]
+async fn optional_path(_cx: &Cx, value: Option<Path<i64>>) -> Json<Option<i64>> {
+    Json(value.map(|value| value.0))
+}
+
+#[get("/wild/{*id}")]
+async fn wildcard_path(_cx: &Cx, value: Path<i64>) -> Json<i64> {
+    Json(value.0)
+}
+
+#[get("/uuid/{id:uuid}")]
+async fn uuid_path(_cx: &Cx, value: Path<String>) -> Json<String> {
+    Json(value.0)
+}
+
+fn path_schema_app() -> App {
+    App::builder()
+        .openapi(fastapi_rust::OpenApiConfig::new())
+        .route_entry(small_path_route())
+        .route_entry(string_path_route())
+        .route_entry(tuple_path_route())
+        .route_entry(named_path_route())
+        .route_entry(nullable_path_route())
+        .route_entry(optional_path_route())
+        .route_entry(wildcard_path_route())
+        .route_entry(uuid_path_route())
+        .build()
+}
+
+fn assert_path_parameters(spec: &serde_json::Value, path: &str, expected: &[(&str, &str, &str)]) {
+    let parameters = spec["paths"][path]["get"]["parameters"]
+        .as_array()
+        .expect("path parameters");
+    assert_eq!(parameters.len(), expected.len(), "{path}");
+    for (parameter, (name, kind, format)) in parameters.iter().zip(expected) {
+        assert_eq!(parameter["name"], *name, "{path}");
+        assert_eq!(parameter["in"], "path");
+        assert_eq!(parameter["required"], true);
+        assert_eq!(parameter["schema"]["type"], *kind, "{path}");
+        assert_eq!(
+            parameter["schema"]["format"].as_str().unwrap_or_default(),
+            *format,
+            "{path}"
+        );
+        assert!(parameter["schema"]["anyOf"].is_null());
+    }
+}
+
+#[test]
+fn served_path_schemas_follow_scalar_alias_tuple_order_and_named_serde_fields() {
+    let client = TestClient::new(path_schema_app());
+    let spec: serde_json::Value = client
+        .get("/openapi.json")
+        .send()
+        .json()
+        .expect("served OpenAPI");
+    assert_path_parameters(&spec, "/small/{id}", &[("id", "integer", "uint32")]);
+    assert_path_parameters(
+        &spec,
+        "/pairs/{label}/{id}",
+        &[("label", "string", ""), ("id", "integer", "int64")],
+    );
+    assert_path_parameters(
+        &spec,
+        "/named/{type}/{userId}",
+        &[("type", "string", ""), ("userId", "integer", "uint32")],
+    );
+    assert_eq!(
+        spec["paths"]["/small/{id}"]["post"]["parameters"][0]["schema"]["type"],
+        "string"
+    );
+    for id in [0, u32::MAX] {
+        let response = client.get(&format!("/small/{id}")).send();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.json::<u32>().expect("scalar alias"), id);
+    }
+    assert_eq!(client.get("/small/-1").send().status().as_u16(), 422);
+    assert_eq!(
+        client.get("/small/4294967296").send().status().as_u16(),
+        422
+    );
+    assert_eq!(
+        client
+            .post("/small/raw-text")
+            .send()
+            .json::<String>()
+            .expect("string path"),
+        "raw-text"
+    );
+    assert_eq!(
+        client
+            .get("/pairs/chapter/-7")
+            .send()
+            .json::<String>()
+            .expect("tuple path"),
+        "chapter:-7"
+    );
+    let invalid_tuple = client.get("/pairs/chapter/not-an-integer").send();
+    assert_eq!(invalid_tuple.status().as_u16(), 422);
+    assert_eq!(
+        invalid_tuple
+            .json::<serde_json::Value>()
+            .expect("tuple error")["detail"][0]["loc"],
+        serde_json::json!(["path", "id"])
+    );
+    assert_eq!(
+        client
+            .get("/named/book/19")
+            .send()
+            .json::<String>()
+            .expect("named path"),
+        "book:19"
+    );
+    let invalid_named = client.get("/named/book/not-an-integer").send();
+    assert_eq!(invalid_named.status().as_u16(), 422);
+    assert_eq!(
+        invalid_named
+            .json::<serde_json::Value>()
+            .expect("named error")["detail"][0]["loc"],
+        serde_json::json!(["path", "userId"])
+    );
+}
+
+#[test]
+fn path_schemas_keep_optional_values_required_and_normalize_wildcard_names() {
+    let client = TestClient::new(path_schema_app());
+    let spec: serde_json::Value = client
+        .get("/openapi.json")
+        .send()
+        .json()
+        .expect("served OpenAPI");
+    for path in ["/maybe/{id}", "/wild/{id}"] {
+        let parameters = spec["paths"][path]["get"]["parameters"]
+            .as_array()
+            .expect("one typed path parameter");
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters[0]["name"], "id");
+        assert_eq!(parameters[0]["in"], "path");
+        assert_eq!(parameters[0]["required"], true);
+        assert_eq!(parameters[0]["schema"]["type"], "integer");
+        assert_eq!(parameters[0]["schema"]["format"], "int64");
+    }
+    assert!(spec["paths"]["/wild/{*id}"].is_null());
+    let named = &spec["paths"]["/nullable/{type}/{userId}"]["get"]["parameters"];
+    assert_eq!(
+        named.as_array().expect("nullable named parameters").len(),
+        2
+    );
+    assert_eq!(named[0]["schema"]["type"], "string");
+    assert_eq!(named[1]["schema"]["type"], "integer");
+    assert_eq!(named[1]["schema"]["format"], "uint32");
+    assert_eq!(named[0]["required"], true);
+    assert_eq!(named[1]["required"], true);
+    assert!(named[0]["schema"]["anyOf"].is_null());
+    assert!(named[1]["schema"]["anyOf"].is_null());
+    assert_eq!(
+        client
+            .get("/nullable/book/23")
+            .send()
+            .json::<String>()
+            .expect("nullable named path"),
+        "book:23"
+    );
+    assert_eq!(
+        client.get("/nullable/book/bad").send().status().as_u16(),
+        422
+    );
+    assert_eq!(
+        client
+            .get("/wild/7")
+            .send()
+            .json::<i64>()
+            .expect("wildcard id"),
+        7
+    );
+    assert_eq!(client.get("/wild/a/b").send().status().as_u16(), 422);
+    assert_eq!(
+        client
+            .get("/maybe/42")
+            .send()
+            .json::<Option<i64>>()
+            .expect("optional id"),
+        Some(42)
+    );
+    let malformed_optional = client.get("/maybe/bad").send();
+    assert_eq!(malformed_optional.status().as_u16(), 200);
+    assert_eq!(
+        malformed_optional
+            .json::<Option<i64>>()
+            .expect("optional extraction policy"),
+        None
+    );
+}
+
+#[test]
+fn typed_path_metadata_preserves_manual_examples_and_explicit_converter_guards() {
+    let mut route = fastapi_rust::router::Route::new(Method::Get, "/manual/{id}");
+    route.path_params[0] = route.path_params[0]
+        .clone()
+        .with_title("Record identifier")
+        .with_description("Identifier supplied by the caller")
+        .deprecated()
+        .with_named_example("small", serde_json::json!(1));
+    let manual = fastapi_rust::fastapi_core::RouteEntry::from_route(route, |_ctx, _req| {
+        Box::pin(std::future::ready(Response::ok()))
+    })
+    .path_schema::<i32>(&["id"]);
+    let client = TestClient::new(
+        App::builder()
+            .openapi(fastapi_rust::OpenApiConfig::new())
+            .route_entry(manual)
+            .route_entry(uuid_path_route())
+            .route_entry(aliased_item_route())
+            .get("/untyped/{id:int}", |_ctx, _req| async { Response::ok() })
+            .build(),
+    );
+    let spec: serde_json::Value = client
+        .get("/openapi.json")
+        .send()
+        .json()
+        .expect("served OpenAPI");
+    let parameters = spec["paths"]["/manual/{id}"]["get"]["parameters"]
+        .as_array()
+        .expect("one manually described path parameter");
+    assert_eq!(parameters.len(), 1);
+    let parameter = &parameters[0];
+    assert_eq!(parameter["name"], "id");
+    assert_eq!(parameter["required"], true);
+    assert_eq!(parameter["schema"]["type"], "integer");
+    assert_eq!(parameter["schema"]["format"], "int32");
+    assert_eq!(parameter["title"], "Record identifier");
+    assert_eq!(
+        parameter["description"],
+        "Identifier supplied by the caller"
+    );
+    assert_eq!(parameter["deprecated"], true);
+    assert!(parameter["example"].is_null());
+    assert_eq!(parameter["examples"]["small"]["value"], 1);
+    for path in ["/aliases/{id}", "/untyped/{id}"] {
+        let schema = &spec["paths"][path]["get"]["parameters"][0]["schema"];
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int64");
+    }
+    let uuid = "123e4567-e89b-12d3-a456-426614174000";
+    let uuid_schema = &spec["paths"]["/uuid/{id}"]["get"]["parameters"][0]["schema"];
+    assert_eq!(uuid_schema["type"], "string");
+    assert_eq!(uuid_schema["format"], "uuid");
+    assert_eq!(
+        client
+            .get(&format!("/uuid/{uuid}"))
+            .send()
+            .json::<String>()
+            .expect("validated UUID"),
+        uuid
+    );
+    assert_eq!(client.get("/uuid/bad").send().status().as_u16(), 404);
+    assert_eq!(
+        client
+            .get("/aliases/not-an-integer")
+            .send()
+            .status()
+            .as_u16(),
+        404
+    );
+    assert_eq!(client.get("/untyped/bad").send().status().as_u16(), 404);
+}
+
 #[test]
 fn served_openapi_nullable_models_and_map_values_match_real_json_requests() {
     let client = TestClient::new(schema_app());
@@ -296,6 +605,33 @@ fn assert_schema_references_resolve(spec: &serde_json::Value, value: &serde_json
         }
         _ => {}
     }
+}
+
+#[test]
+fn served_openapi_path_type_matches_integer_handler_without_converter() {
+    let client = TestClient::new(app());
+    let valid = client.get("/items/42").send();
+    assert_eq!(valid.status().as_u16(), 200);
+    assert_eq!(valid.json::<Item>().expect("typed item").id, 42);
+    assert_eq!(
+        client.get("/items/not-an-integer").send().status().as_u16(),
+        422
+    );
+
+    let spec: serde_json::Value = client
+        .get("/openapi.json")
+        .send()
+        .json()
+        .expect("served OpenAPI");
+    let parameters = spec["paths"]["/items/{id}"]["get"]["parameters"]
+        .as_array()
+        .expect("path parameters");
+    assert_eq!(parameters.len(), 1);
+    assert_eq!(parameters[0]["name"], "id");
+    assert_eq!(parameters[0]["in"], "path");
+    assert_eq!(parameters[0]["required"], true);
+    assert_eq!(parameters[0]["schema"]["type"], "integer");
+    assert_eq!(parameters[0]["schema"]["format"], "int64");
 }
 
 #[test]

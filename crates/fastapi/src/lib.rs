@@ -58,6 +58,29 @@
 //! }
 //! ```
 //!
+//! Group multiple URL parameters in one tuple or named `Path` model. Separate
+//! scalar extractors would each read the first placeholder, so macros reject them:
+//!
+//! ```compile_fail
+//! use fastapi_rust::prelude::*;
+//!
+//! #[get("/pair/{first}/{second}")]
+//! async fn ambiguous_path(_cx: &Cx, first: Path<i64>, second: Path<i64>) -> Json<i64> {
+//!     Json(first.0 + second.0)
+//! }
+//! ```
+//!
+//! Tuple arity is checked for optional path extractors too:
+//!
+//! ```compile_fail
+//! use fastapi_rust::prelude::*;
+//!
+//! #[get("/single/{id}")]
+//! async fn wrong_path_arity(_cx: &Cx, values: Option<Path<(i64, i64)>>) -> Json<bool> {
+//!     Json(values.is_some())
+//! }
+//! ```
+//!
 //! # Design Philosophy
 //!
 //! This framework is built with the following principles:
