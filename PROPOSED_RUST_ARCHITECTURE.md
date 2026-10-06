@@ -43,7 +43,7 @@ existing assertions passed on Linux, not that every spec behavior is covered.
 |---|---|---|---|
 | HTTP request parsing (HTTP/1.1) | `crates/fastapi-http/src/parser.rs` | Implemented | Focus: zero-copy parse; security hardening tests exist. |
 | Request body (Content-Length, chunked) | `crates/fastapi-http/src/body.rs` | Implemented | Async chunked stream now consumes trailers and avoids keep-alive read-ahead. |
-| TCP server + keep-alive | `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/request_timeout.rs`, `crates/fastapi-http/tests/security.rs` | Implemented; parity not certified | Uses caller-owned `Cx`, runtime-clock deadlines, body parsing, and keep-alive. Security and timeout integration tests exercise the network path. |
+| TCP server + keep-alive | `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/request_timeout.rs`, `crates/fastapi-http/tests/security.rs` | Implemented; parity not certified | Uses caller-owned `Cx`, runtime-clock deadlines, body parsing, and keep-alive. Timeout integration tests and inline HTTPS redirect TCP tests exercise network paths; `tests/security.rs` exercises the parser. |
 | Route macro runtime dispatch | `crates/fastapi-macros/src/route.rs`, `crates/fastapi/tests/macro_routes.rs` | Implemented | `<handler>_route()` returns a real `RouteEntry`: evaluate extractors, invoke the async handler, and convert errors/results into responses. Runtime registration uses `.route_entry(...)`. |
 | Routing + conflict detection | `crates/fastapi-core/src/routing.rs`, `crates/fastapi-router/src/trie.rs` | Implemented | Path params + converters supported; 405/OPTIONS behaviors present. |
 | App builder + request pipeline | `crates/fastapi-core/src/app.rs` | Implemented | Mounting, middleware execution, response mutations, background tasks integration. |
@@ -56,7 +56,7 @@ existing assertions passed on Linux, not that every spec behavior is covered.
 | Background tasks | `crates/fastapi-core/src/extract.rs` (BackgroundTasks) | Implemented | Server executes tasks after response in `crates/fastapi-http/src/server.rs`. |
 | Security primitives and middleware | `crates/fastapi-core/src/extract.rs`, `crates/fastapi-core/src/middleware.rs`, `crates/fastapi-http/src/server.rs` | Partial | Credential extractors exist; token validation logic is app-specific. Credentialed CORS and HTTPS redirect inputs require careful configuration and targeted verification; see the security audit notes below. |
 | OpenAPI schema/spec types | `crates/fastapi-openapi/src/*` | Implemented | OpenAPI 3.1 types and `JsonSchema` trait exist. |
-| OpenAPI generation (from routes/handlers) | `crates/fastapi-core/src/app.rs`, `crates/fastapi-macros/src/route.rs`, `crates/fastapi-openapi/src/spec.rs` | Partial | Route metadata feeds operations, converted path parameters, JSON request-body references, and declared response references. The spec's Section 7.1 also requires collecting referenced models into component schemas and complete query/header metadata inference; those steps are not wired into `AppBuilder::generate_openapi_spec`. |
+| OpenAPI generation (from routes/handlers) | `crates/fastapi-core/src/app.rs`, `crates/fastapi-macros/src/route.rs`, `crates/fastapi-openapi/src/spec.rs`, `crates/fastapi/tests/macro_routes.rs` | Typed route wiring implemented; parity partial | `RouteEntry` carries named JSON model components and inline primitive/container/null-union schemas into the served document. JSON success responses are inferred, explicit statuses/descriptions retained, and named query/header fields include types and requiredness. Symmetric serde rename/rename_all/default/skip feed named model fields. Converter templates normalize for macro and manual route registration. Recursive/custom references, directional serde, and arbitrary extractor metadata remain gaps. |
 | Docs pages (Swagger/ReDoc shells) | `crates/fastapi-core/src/docs.rs` | Implemented | HTML shells exist; assets expected via CDN/static hosting. |
 | Docs endpoints wiring (routes) | `crates/fastapi-core/src/app.rs` (`enable_docs`) | Implemented | `.enable_docs(DocsConfig)` mounts `/docs`, `/redoc`, and `/docs/oauth2-redirect` (paths configurable). |
 | Testing harness | `crates/fastapi-core/src/testing.rs` | Implemented | In-process TestClient + assertions. |
@@ -64,23 +64,27 @@ existing assertions passed on Linux, not that every spec behavior is covered.
 | HTTP/2 | `crates/fastapi-http/src/http2.rs`, `crates/fastapi-http/src/server.rs`, `crates/fastapi-http/tests/http2.rs` | Partial | H2C prior knowledge, HPACK, SETTINGS, flow control, GOAWAY/RST_STREAM, and frame validation exist. `server.rs` explicitly limits the connection to sequential streams; concurrent multiplexing and a full stream-state machine remain missing. Historical `bd-2c9t` is absent from the current graph. |
 
 Security audit notes: credentialed CORS with `allow_any_origin()` authorizes
-every supplied origin. Static review found that HTTPS redirects use raw Host
-while optional forwarded-host admission validates X-Forwarded-Host, and
-colon-based port removal mishandles bracketed IPv6. An additional static
-candidate combines a non-leading-slash request target, a catch-all route,
-and direct URL concatenation: `@evil.example/` with Host `good.example`
-could produce `https://good.example@evil.example/`. These paths need targeted
-runtime regression coverage; this audit does not certify secure proxy
-configuration or a live exploit.
+every supplied origin. HTTPS redirects now share strict authority parsing with
+server host admission, use the admitted effective host, and preserve the original
+encoded origin target. Bracketed IPv6 and configured HTTPS ports are supported;
+malformed supplied ports, userinfo, and unsafe/non-origin redirect targets return
+400 without Location. Inline tests include real TCP parser/admission/middleware
+handoffs with trusted and untrusted forwarded-host configurations. Standalone
+middleware validates ordinary Host syntax without authorizing it against a host
+allow-list. Existing forwarded scheme-header trust, other request-target forms,
+TLS, and complete proxy policy remain outside this fix. This does not certify
+credentialed CORS configuration, a complete security audit, or a live exploit.
 
 **Highest-leverage gaps (parity):**
 
-- OpenAPI generation: register referenced component schemas and infer query/header metadata (spec Section 7.1).
+- OpenAPI generation: extend recursive/custom schema references, directional serde behavior, and metadata beyond supported typed macro extractors (spec Section 7.1).
 - HTTP/2: multiplex streams and enforce their protocol state transitions; current server code documents sequential handling.
 - Validation rules: expand `Validate` derive + runtime validation to match spec exactly.
 - Security: flesh out auth flows and error semantics to match legacy FastAPI expectations.
 
-The macro/README correction is tracked as `bd-2sum`. The `bd-uz2s` epic covers
+The macro/README correction is tracked as `bd-2sum`; typed OpenAPI wiring and
+the authority/encoded-target redirect fix are tracked as `fr-z7jj` and `fr-e7f9`.
+The `bd-uz2s` epic covers
 this coverage matrix and gap audit. Completing that audit does not certify
 full FastAPI parity; the concrete implementation gaps above remain.
 

@@ -143,7 +143,7 @@ fn parse_field_serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
     out
 }
 
-fn apply_rename_all(rule: &str, s: &str) -> String {
+pub(super) fn apply_rename_all(rule: &str, s: &str) -> String {
     // This mirrors serde's common rename_all rules for struct field names.
     // It's intentionally conservative: it only operates on ASCII identifiers.
     match rule {

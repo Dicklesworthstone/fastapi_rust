@@ -46,6 +46,18 @@
 //! }
 //! ```
 //!
+//! Declared success schemas still require the successful return type to produce
+//! that model, including handlers returning `Result`:
+//!
+//! ```compile_fail
+//! use fastapi_rust::{get, Cx, HttpError, Json};
+//!
+//! #[get("/wrong-model", response(200, u32))]
+//! async fn wrong_model(_cx: &Cx) -> Result<Json<String>, HttpError> {
+//!     Ok(Json("different model".to_string()))
+//! }
+//! ```
+//!
 //! # Design Philosophy
 //!
 //! This framework is built with the following principles:
@@ -259,9 +271,9 @@ pub use fastapi_router;
 pub use fastapi_core::{
     App, AppBuilder, AppConfig, Cors, CorsConfig, Cx, DefaultConfig, DefaultDependencyConfig,
     DependencyOverrides, DependencyScope, Depends, DependsConfig, FromDependency, FromRequest,
-    HttpError, IntoResponse, Method, NoCache, Request, RequestId, RequestIdConfig,
-    RequestIdMiddleware, Response, ResponseBody, StateContainer, StatusCode, ValidationError,
-    ValidationErrors,
+    HttpError, IntoResponse, Method, NoCache, OpenApiConfig, Request, RequestAuthority, RequestId,
+    RequestIdConfig, RequestIdMiddleware, Response, ResponseBody, StateContainer, StatusCode,
+    ValidationError, ValidationErrors,
 };
 
 // Re-export extractors

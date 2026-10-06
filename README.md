@@ -73,7 +73,7 @@ struct Item {
     price: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct SearchParams {
     q: String,
     limit: Option<usize>,
@@ -116,6 +116,7 @@ fn main() {
     let app = App::builder()
         .title("My API")
         .version("1.0.0")
+        .openapi(fastapi_rust::OpenApiConfig::new())
         .route_entry(get_item_route())
         .route_entry(create_item_route())
         .route_entry(search_route())
@@ -140,6 +141,11 @@ Register the runtime entry with
 `.route_entry(...)`; it runs extractors, calls the handler, and converts its
 result into a response. Invalid request values produce an HTTP error; unsupported
 extractor types fail to compile.
+
+With `.openapi(OpenApiConfig::new())`, `/openapi.json` includes the registered
+JSON model schemas, inferred JSON success responses, and typed query/header
+parameters. JSON body, JSON response, and query model types used in route macros
+must implement `JsonSchema`; named headers use a schema-capable value type.
 
 ---
 
@@ -216,7 +222,7 @@ goal; the dependency inventory is recorded in `Cargo.lock` and `UPGRADE_LOG.md`.
 | Structured concurrency | **asupersync** | Tokio spawn | Actix-rt | Tokio |
 | Cancel-correct shutdown | **Native** | Manual | Manual | Manual |
 | Dependency injection | **Native + cache** | State only | Data only | Managed |
-| OpenAPI generation | **Compile-time** | External | External | External |
+| OpenAPI generation | **Derived schemas; registration-time assembly** | External | External | External |
 | Deterministic testing | **Lab runtime** | No | No | No |
 | Runtime | **asupersync** | Tokio | Actix-rt | Tokio |
 | FastAPI-style errors | **Yes (422 format)** | No | No | No |
@@ -347,7 +353,7 @@ Extract typed data from requests declaratively:
 use fastapi_rust::prelude::*;
 use fastapi_rust::extractors::{Accept, Authorization, NamedHeader};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct SearchParams {
     q: String,
 }
@@ -363,7 +369,7 @@ async fn get_user(
     Json(format!("User {}: {}", id.0, q.0.q))
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct CreateItem {
     name: String,
 }
@@ -673,7 +679,7 @@ let app = App::builder()
 | `asupersync not found` | Missing dependency | Add `asupersync` to Cargo.toml |
 | Handler needs a request context | Context must come from the caller | Accept `&Cx` or `&RequestContext`; pass the caller's `Cx` to `TcpServer::serve_app` |
 | Route conflicts | Overlapping path patterns | Check for `{param}` vs literal conflicts |
-| JSON handler does not compile | Body type lacks `Deserialize` | Add serde derive to your type |
+| JSON handler does not compile | Model lacks `Deserialize`, `Serialize`, or `JsonSchema` | Derive the traits needed by the JSON extractor, response, and route documentation |
 | Middleware not running | Wrong registration order | Check middleware ordering |
 
 ### Debugging Tips
@@ -708,13 +714,22 @@ Current parity status and the concrete gap list are tracked in:
 - `PROPOSED_RUST_ARCHITECTURE.md` (Section 0: Parity Matrix)
 - Beads (`br ready`, `br show <id>`) with coverage/gap audit epic `bd-uz2s`
 
-### Current Coverage and Limits (As Of 2026-10-04)
+### Current Coverage and Limits
 
 - **Route macros**: runtime entries execute extractors and handlers; consumer tests cover JSON,
   path parameters, cancellation checkpoints, and error responses.
-- **OpenAPI generation**: route metadata maps to operations, path parameters, and declared
-  request/response schema references. Automatic registration of every referenced component schema
-  and complete extractor metadata inference still need work.
+- **OpenAPI generation**: macro runtime entries register named JSON models, inline primitive,
+  list/map/nullable schemas, infer `Json<T>` and `Result<Json<T>, E>` success responses,
+  and retain declared response statuses/descriptions. Named query fields and `NamedHeader`
+  parameters include their types and requiredness; symmetric serde renames and defaults
+  feed query metadata. Converter paths become valid OpenAPI templates for both macro
+  and manually registered routes.
+  Recursive/custom schema references, directional serde attributes, arbitrary extractor
+  metadata remain outside this coverage.
+- **HTTPS redirects**: use the server-admitted effective authority, preserve encoded
+  origin targets and queries, and support bracketed IPv6 and configured HTTPS ports.
+  Malformed authority/target inputs return 400 without a redirect. Proxy scheme-header
+  trust, other request-target forms, and TLS remain separate configuration/protocol limits.
 - **TCP server**: HTTP/1.1 keep-alive, request deadlines, body streaming, and protocol upgrades
   have integration coverage. Production hardening remains an ongoing goal.
 - **WebSockets**: handshake, frames, ping/pong, and close handling have integration tests.

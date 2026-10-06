@@ -881,7 +881,7 @@ impl OpenApiBuilder {
     ///
     /// This is a convenience bridge used by integration tests and by higher-level crates.
     #[allow(clippy::too_many_lines)]
-    pub fn add_route(&mut self, route: &fastapi_router::Route) {
+    pub fn add_route(&mut self, route: &fastapi_router::Route) -> Option<&mut Operation> {
         use fastapi_router::Converter as RouteConverter;
 
         fn param_schema(conv: RouteConverter) -> Schema {
@@ -982,17 +982,31 @@ impl OpenApiBuilder {
         }
         op.responses = responses;
 
-        let path_item = self.paths.entry(route.path.clone()).or_default();
-        match route.method.as_str() {
-            "GET" => path_item.get = Some(op),
-            "POST" => path_item.post = Some(op),
-            "PUT" => path_item.put = Some(op),
-            "DELETE" => path_item.delete = Some(op),
-            "PATCH" => path_item.patch = Some(op),
-            "OPTIONS" => path_item.options = Some(op),
-            "HEAD" => path_item.head = Some(op),
-            _ => {}
+        // Converter suffixes belong to the router, not OpenAPI path templates.
+        let mut path = route.path.clone();
+        for parameter in &route.path_params {
+            path = path.replace(
+                &format!("{{*{}}}", parameter.name),
+                &format!("{{{}}}", parameter.name),
+            );
+            if let Some(start) = path.find(&format!("{{{}:", parameter.name))
+                && let Some(end) = path[start..].find('}')
+            {
+                path.replace_range(start..=start + end, &format!("{{{}}}", parameter.name));
+            }
         }
+        let path_item = self.paths.entry(path).or_default();
+        let slot = match route.method.as_str() {
+            "GET" => &mut path_item.get,
+            "POST" => &mut path_item.post,
+            "PUT" => &mut path_item.put,
+            "DELETE" => &mut path_item.delete,
+            "PATCH" => &mut path_item.patch,
+            "OPTIONS" => &mut path_item.options,
+            "HEAD" => &mut path_item.head,
+            _ => return None,
+        };
+        Some(slot.insert(op))
     }
 
     /// Add multiple routes.

@@ -20,6 +20,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{
     Attribute, Data, DeriveInput, Expr, ExprLit, Fields, GenericArgument, Lit, Meta, MetaNameValue,
     PathArguments, Type, parse_macro_input,
@@ -33,6 +34,55 @@ struct SchemaAttrs {
     format: Option<String>,
     nullable: bool,
     skip: bool,
+}
+
+/// Symmetric serde field naming and defaults shared by input/output schemas.
+#[derive(Default)]
+struct SerdeSchemaAttrs {
+    rename: Option<String>,
+    rename_all: Option<String>,
+    default: bool,
+    skip: bool,
+}
+
+impl SerdeSchemaAttrs {
+    fn from_attributes(attributes: &[Attribute]) -> Self {
+        let mut result = Self::default();
+        for attribute in attributes
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("serde"))
+        {
+            let Ok(items) = attribute.parse_args_with(
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                continue;
+            };
+            for item in items {
+                match item {
+                    Meta::Path(path) if path.is_ident("default") => result.default = true,
+                    Meta::Path(path) if path.is_ident("skip") => result.skip = true,
+                    Meta::NameValue(value) if value.path.is_ident("default") => {
+                        result.default = true
+                    }
+                    Meta::NameValue(value) => {
+                        if let Expr::Lit(ExprLit {
+                            lit: Lit::Str(name),
+                            ..
+                        }) = value.value
+                        {
+                            if value.path.is_ident("rename") {
+                                result.rename = Some(name.value());
+                            } else if value.path.is_ident("rename_all") {
+                                result.rename_all = Some(name.value());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        result
+    }
 }
 
 impl SchemaAttrs {
@@ -138,11 +188,8 @@ fn generate_type_schema(ty: &Type, attrs: &SchemaAttrs) -> TokenStream2 {
         let inner_schema = generate_type_schema(inner, &SchemaAttrs::default());
         return quote! {
             {
-                let mut schema = #inner_schema;
-                if let fastapi_openapi::Schema::Primitive(ref mut p) = schema {
-                    p.nullable = true;
-                }
-                schema
+                let schema = #inner_schema;
+                schema.nullable()
             }
         };
     }
@@ -274,6 +321,7 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
 
     // Parse struct-level attributes
     let struct_attrs = SchemaAttrs::from_attributes(&input.attrs);
+    let serde_attrs = SerdeSchemaAttrs::from_attributes(&input.attrs);
     let title = struct_attrs.title.as_ref().map_or_else(
         || quote! { Some(#name_str.to_string()) },
         |t| quote! { Some(#t.to_string()) },
@@ -291,11 +339,20 @@ pub fn derive_json_schema_impl(input: TokenStream) -> TokenStream {
                 .iter()
                 .filter_map(|f| {
                     let attrs = SchemaAttrs::from_attributes(&f.attrs);
-                    if attrs.skip {
+                    let field_serde = SerdeSchemaAttrs::from_attributes(&f.attrs);
+                    if attrs.skip || field_serde.skip {
                         return None;
                     }
-                    let field_name = f.ident.as_ref()?.to_string();
-                    let is_optional = unwrap_option_type(&f.ty).is_some();
+                    let field_name = f.ident.as_ref()?.unraw().to_string();
+                    let field_name = field_serde.rename.unwrap_or_else(|| {
+                        serde_attrs.rename_all.as_ref().map_or_else(
+                            || field_name.clone(),
+                            |rule| crate::response_model::apply_rename_all(rule, &field_name),
+                        )
+                    });
+                    let is_optional = unwrap_option_type(&f.ty).is_some()
+                        || field_serde.default
+                        || serde_attrs.default;
                     Some(FieldInfo {
                         name: field_name,
                         ty: f.ty.clone(),

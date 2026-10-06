@@ -11,16 +11,64 @@ pub enum Schema {
     Boolean(bool),
     /// Reference to another schema.
     Ref(RefSchema),
-    /// Object schema.
-    Object(ObjectSchema),
-    /// Array schema.
-    Array(ArraySchema),
-    /// Primitive type schema.
-    Primitive(PrimitiveSchema),
     /// Enum schema (string values).
     Enum(EnumSchema),
     /// OneOf schema (union type).
     OneOf(OneOfSchema),
+    /// AnyOf schema (a union whose branches may overlap).
+    AnyOf(AnyOfSchema),
+    /// Array schema.
+    #[serde(serialize_with = "serialize_array_schema")]
+    Array(ArraySchema),
+    /// Primitive type schema.
+    #[serde(serialize_with = "serialize_primitive_schema")]
+    Primitive(PrimitiveSchema),
+    /// Object schema. Keep the all-optional object variant last when decoding.
+    #[serde(serialize_with = "serialize_object_schema")]
+    Object(ObjectSchema),
+}
+
+#[derive(Serialize)]
+struct TypedSchema<'a, T> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(flatten)]
+    schema: &'a T,
+}
+
+fn serialize_primitive_schema<S: serde::Serializer>(
+    schema: &PrimitiveSchema,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if schema.nullable {
+        let mut non_null = schema.clone();
+        non_null.nullable = false;
+        Schema::any_of(vec![Schema::Primitive(non_null), <()>::schema()]).serialize(serializer)
+    } else {
+        schema.serialize(serializer)
+    }
+}
+
+fn serialize_object_schema<S: serde::Serializer>(
+    schema: &ObjectSchema,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    TypedSchema {
+        kind: "object",
+        schema,
+    }
+    .serialize(serializer)
+}
+
+fn serialize_array_schema<S: serde::Serializer>(
+    schema: &ArraySchema,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    TypedSchema {
+        kind: "array",
+        schema,
+    }
+    .serialize(serializer)
 }
 
 impl Schema {
@@ -71,13 +119,15 @@ impl Schema {
         })
     }
 
-    /// Set nullable on this schema (if primitive).
+    /// Permit null. Non-primitive schemas use a union with the null schema.
     #[must_use]
     pub fn nullable(mut self) -> Self {
         if let Schema::Primitive(ref mut p) = self {
             p.nullable = true;
+            self
+        } else {
+            Self::any_of(vec![self, <()>::schema()])
         }
-        self
     }
 
     /// Set title on this schema (if object).
@@ -110,6 +160,11 @@ impl Schema {
     pub fn one_of(schemas: Vec<Schema>) -> Self {
         Schema::OneOf(OneOfSchema { one_of: schemas })
     }
+
+    /// Create an inclusive union, permitting values accepted by any branch.
+    pub fn any_of(schemas: Vec<Schema>) -> Self {
+        Schema::AnyOf(AnyOfSchema { any_of: schemas })
+    }
 }
 
 /// Schema reference.
@@ -136,7 +191,11 @@ pub struct ObjectSchema {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required: Vec<String>,
     /// Additional properties schema.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "additionalProperties",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub additional_properties: Option<Box<Schema>>,
 }
 
@@ -146,10 +205,10 @@ pub struct ArraySchema {
     /// Item schema.
     pub items: Box<Schema>,
     /// Minimum items.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "minItems", default, skip_serializing_if = "Option::is_none")]
     pub min_items: Option<usize>,
     /// Maximum items.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "maxItems", default, skip_serializing_if = "Option::is_none")]
     pub max_items: Option<usize>,
 }
 
@@ -170,6 +229,14 @@ pub struct OneOfSchema {
     /// List of possible schemas.
     #[serde(rename = "oneOf")]
     pub one_of: Vec<Schema>,
+}
+
+/// Inclusive union, used for nullable types whose inner schema may allow null.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnyOfSchema {
+    /// Alternatives; a value must match at least one.
+    #[serde(rename = "anyOf")]
+    pub any_of: Vec<Schema>,
 }
 
 /// Primitive type schema.
@@ -308,15 +375,73 @@ impl JsonSchema for bool {
     }
 }
 
+macro_rules! integer_schema {
+    ($ty:ty, $format:expr) => {
+        impl JsonSchema for $ty {
+            fn schema() -> Schema {
+                Schema::integer($format)
+            }
+        }
+    };
+}
+
+integer_schema!(i8, Some("int8"));
+integer_schema!(i16, Some("int16"));
+integer_schema!(u8, Some("uint8"));
+integer_schema!(u16, Some("uint16"));
+integer_schema!(u32, Some("uint32"));
+integer_schema!(u64, Some("uint64"));
+integer_schema!(isize, Some("int64"));
+integer_schema!(usize, Some("uint64"));
+integer_schema!(i128, None);
+integer_schema!(u128, None);
+
+impl JsonSchema for f32 {
+    fn schema() -> Schema {
+        Schema::number(Some("float"))
+    }
+}
+
+impl JsonSchema for &str {
+    fn schema() -> Schema {
+        Schema::string()
+    }
+}
+
+impl JsonSchema for () {
+    fn schema() -> Schema {
+        Schema::Primitive(PrimitiveSchema {
+            schema_type: SchemaType::Null,
+            format: None,
+            nullable: false,
+        })
+    }
+}
+
+impl JsonSchema for serde_json::Value {
+    fn schema() -> Schema {
+        Schema::Boolean(true)
+    }
+}
+
+impl<T: JsonSchema> JsonSchema for HashMap<String, T> {
+    fn schema() -> Schema {
+        Schema::Object(ObjectSchema {
+            additional_properties: Some(Box::new(T::schema())),
+            ..ObjectSchema::default()
+        })
+    }
+}
+
+impl<T: JsonSchema> JsonSchema for std::collections::BTreeMap<String, T> {
+    fn schema() -> Schema {
+        <HashMap<String, T>>::schema()
+    }
+}
+
 impl<T: JsonSchema> JsonSchema for Option<T> {
     fn schema() -> Schema {
-        match T::schema() {
-            Schema::Primitive(mut p) => {
-                p.nullable = true;
-                Schema::Primitive(p)
-            }
-            other => other,
-        }
+        T::schema().nullable()
     }
 }
 
@@ -327,5 +452,55 @@ impl<T: JsonSchema> JsonSchema for Vec<T> {
             min_items: None,
             max_items: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_array_uses_json_schema_keywords_and_round_trips() {
+        let schema = Schema::Array(ArraySchema {
+            items: Box::new(Schema::integer(None)),
+            min_items: Some(2),
+            max_items: Some(4),
+        });
+        let json = serde_json::to_value(schema).unwrap();
+        assert_eq!(json["type"], "array");
+        assert_eq!(json["minItems"], 2);
+        assert_eq!(json["maxItems"], 4);
+        assert!(json["min_items"].is_null());
+        assert!(json["max_items"].is_null());
+        let decoded: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert!(
+            matches!(&decoded, Schema::Array(array) if array.min_items == Some(2) && array.max_items == Some(4))
+        );
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn optional_array_schema_accepts_real_null_and_retains_item_type() {
+        let json = serde_json::to_value(<Option<Vec<String>>>::schema()).unwrap();
+        assert_eq!(json["anyOf"][0]["type"], "array");
+        assert_eq!(json["anyOf"][0]["items"]["type"], "string");
+        assert_eq!(json["anyOf"][1]["type"], "null");
+        let decoded: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(&decoded, Schema::AnyOf(_)));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn nullable_unions_allow_overlapping_null_branches() {
+        let any_json = serde_json::to_value(<Option<serde_json::Value>>::schema()).unwrap();
+        assert_eq!(any_json["anyOf"][0], true);
+        assert_eq!(any_json["anyOf"][1]["type"], "null");
+        assert!(any_json["oneOf"].is_null());
+        let nested = serde_json::to_value(<Option<Option<Vec<String>>>>::schema()).unwrap();
+        assert_eq!(nested["anyOf"][0]["anyOf"][1]["type"], "null");
+        assert_eq!(nested["anyOf"][1]["type"], "null");
+        let null = serde_json::to_value(<Option<()>>::schema()).unwrap();
+        assert_eq!(null["anyOf"][0]["type"], "null");
+        assert_eq!(null["anyOf"][1]["type"], "null");
     }
 }

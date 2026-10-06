@@ -270,10 +270,37 @@ fn get_extractable_types(
         .collect()
 }
 
+/// Read type arguments while preserving qualification and nested generic types.
+fn generic_types<'a>(ty: &'a Type, name: &str) -> Option<Vec<&'a Type>> {
+    let Type::Path(path) = ty else { return None };
+    let segment = path.path.segments.last()?;
+    if segment.ident != name {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    Some(
+        arguments
+            .args
+            .iter()
+            .filter_map(|argument| {
+                if let GenericArgument::Type(ty) = argument {
+                    Some(ty)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Body extractor information for OpenAPI request body generation.
 struct BodyExtractorInfo {
     /// The inner type name (e.g., "CreateUser" from Json<CreateUser>).
     type_name: String,
+    /// The complete inner type, preserving generic arguments and qualification.
+    ty: Type,
     /// The content type (e.g., "application/json").
     content_type: &'static str,
     /// Whether the body is required (not Option<Json<T>>).
@@ -312,6 +339,7 @@ fn extract_json_info(ty: &Type) -> Option<BodyExtractorInfo> {
         let type_name = extract_type_name(inner_ty);
         return Some(BodyExtractorInfo {
             type_name,
+            ty: inner_ty.clone(),
             content_type: "application/json",
             required: true,
         });
@@ -571,12 +599,64 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
     };
 
     // Generate request body builder call if a body extractor is present
-    let request_body_call = find_body_extractor(fn_inputs).map(|info| {
+    let body_info = find_body_extractor(fn_inputs);
+    let request_body_call = body_info.as_ref().map(|info| {
         let schema = &info.type_name;
         let content_type = info.content_type;
         let required = info.required;
         quote! { .request_body(#schema, #content_type, #required) }
     });
+    let request_schema_call = body_info.as_ref().map(|info| {
+        let ty = &info.ty;
+        let required = info.required;
+        quote! { .request_schema::<#ty>(#required) }
+    });
+
+    let mut typed_response_calls: Vec<proc_macro2::TokenStream> = attrs
+        .responses
+        .iter()
+        .map(|resp| {
+            let status = resp.status;
+            let ty = &resp.type_path;
+            let description = resp.description.as_deref().unwrap_or("Successful response");
+            quote! { .response_schema::<#ty>(#status, #description) }
+        })
+        .collect();
+    if !attrs
+        .responses
+        .iter()
+        .any(|response| response.status == 200)
+        && let ReturnType::Type(_, return_ty) = fn_output
+    {
+        let success_ty = generic_types(return_ty, "Result")
+            .and_then(|types| types.first().copied())
+            .unwrap_or(return_ty);
+        if let Some(info) = extract_json_info(success_ty) {
+            let ty = info.ty;
+            typed_response_calls
+                .push(quote! { .response_schema::<#ty>(200, "Successful response") });
+        }
+    }
+
+    let parameter_calls: Vec<_> = fn_inputs
+        .iter()
+        .filter_map(extract_param_type)
+        .filter_map(|ty| {
+            let optional = generic_types(ty, "Option").and_then(|types| types.first().copied());
+            let extractor = optional.unwrap_or(ty);
+            let required = optional.is_none();
+            if let Some(types) = generic_types(extractor, "Query") {
+                let model = types.first()?;
+                Some(quote! { .query_schema::<#model>(#required) })
+            } else if let Some(types) = generic_types(extractor, "NamedHeader") {
+                let value = types.first()?;
+                let name = types.get(1)?;
+                Some(quote! { .header_schema::<#value, #name>(#required) })
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // Generate compile-time assertions for declared response types
     // Each declared response type must implement JsonSchema
@@ -614,7 +694,18 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
     // Generate response type verification (compile-time check that return matches declared)
     // This uses a marker trait to verify the handler's return type can produce the declared schema
     let response_type_checks: Vec<proc_macro2::TokenStream> =
-        if let Some(ref return_ty) = get_return_type(fn_output) {
+        if let Some(return_ty) = get_return_type(fn_output) {
+            // A declared 200 schema describes the successful branch, while
+            // errors retain their own status and response conversion.
+            let return_ty = match fn_output {
+                ReturnType::Type(_, ty) => {
+                    let success_ty = generic_types(ty, "Result")
+                        .and_then(|types| types.first().copied())
+                        .unwrap_or(ty);
+                    quote! { #success_ty }
+                }
+                ReturnType::Default => return_ty,
+            };
             attrs
                 .responses
                 .iter()
@@ -766,6 +857,9 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
                     __into_response(out)
                 }) as fastapi_core::BoxFuture<'_, fastapi_core::Response>
             })
+            #request_schema_call
+            #(#typed_response_calls)*
+            #(#parameter_calls)*
         }
 
         // Static registration for route discovery

@@ -147,7 +147,7 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
 ///     description: Option<String>,
 /// }
 /// ```
-#[proc_macro_derive(JsonSchema, attributes(schema))]
+#[proc_macro_derive(JsonSchema, attributes(schema, serde))]
 pub fn derive_json_schema(input: TokenStream) -> TokenStream {
     openapi::derive_json_schema_impl(input)
 }

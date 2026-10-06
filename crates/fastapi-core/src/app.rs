@@ -217,8 +217,38 @@ pub struct RouteEntry {
     /// When routes are created by proc-macros, we preserve a full `fastapi_router::Route`
     /// so OpenAPI generation can use stable operation IDs, tags, parameters, etc.
     meta: Option<fastapi_router::Route>,
+    /// Typed metadata generated at registration, never on the request hot path.
+    openapi: RouteOpenApi,
     /// The handler function.
     handler: Arc<BoxHandler>,
+}
+
+#[derive(Clone, Default)]
+struct RouteOpenApi {
+    schemas: HashMap<String, fastapi_openapi::Schema>,
+    request_body: Option<fastapi_openapi::RequestBody>,
+    responses: HashMap<String, fastapi_openapi::Response>,
+    parameters: Vec<fastapi_openapi::Parameter>,
+}
+
+impl RouteOpenApi {
+    fn schema<T: fastapi_openapi::JsonSchema>(&mut self) -> fastapi_openapi::Schema {
+        let schema = T::schema();
+        if let Some(name) = T::schema_name() {
+            self.schemas.entry(name.to_string()).or_insert(schema);
+            fastapi_openapi::Schema::reference(name)
+        } else {
+            schema
+        }
+    }
+
+    fn apply(&self, operation: &mut fastapi_openapi::Operation) {
+        if let Some(body) = &self.request_body {
+            operation.request_body = Some(body.clone());
+        }
+        operation.responses.extend(self.responses.clone());
+        operation.parameters.extend(self.parameters.clone());
+    }
 }
 
 impl RouteEntry {
@@ -257,6 +287,7 @@ impl RouteEntry {
             method,
             path: path.into(),
             meta: None,
+            openapi: RouteOpenApi::default(),
             handler: Arc::new(handler),
         }
     }
@@ -283,6 +314,104 @@ impl RouteEntry {
     /// Returns the preserved route metadata, if any.
     pub fn route_meta(&self) -> Option<&fastapi_router::Route> {
         self.meta.as_ref()
+    }
+
+    /// Describe a typed JSON request body and register its named model, if any.
+    #[must_use]
+    pub fn request_schema<T: fastapi_openapi::JsonSchema>(mut self, required: bool) -> Self {
+        let schema = self.openapi.schema::<T>();
+        self.openapi.request_body = Some(fastapi_openapi::RequestBody {
+            required,
+            content: HashMap::from([(
+                "application/json".to_string(),
+                fastapi_openapi::MediaType {
+                    schema: Some(schema),
+                },
+            )]),
+            description: None,
+        });
+        self
+    }
+
+    /// Describe a typed JSON response, preserving its status and description.
+    #[must_use]
+    pub fn response_schema<T: fastapi_openapi::JsonSchema>(
+        mut self,
+        status: u16,
+        description: impl Into<String>,
+    ) -> Self {
+        let schema = self.openapi.schema::<T>();
+        self.openapi.responses.insert(
+            status.to_string(),
+            fastapi_openapi::Response {
+                description: description.into(),
+                content: HashMap::from([(
+                    "application/json".to_string(),
+                    fastapi_openapi::MediaType {
+                        schema: Some(schema),
+                    },
+                )]),
+            },
+        );
+        self
+    }
+
+    /// Describe the fields of a typed query model. Optional extractors have no
+    /// required parameters; required extractors retain the model's required fields.
+    #[must_use]
+    pub fn query_schema<T: fastapi_openapi::JsonSchema>(mut self, required: bool) -> Self {
+        if let fastapi_openapi::Schema::Object(object) = T::schema() {
+            let mut properties: Vec<_> = object.properties.into_iter().collect();
+            properties.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, mut schema) in properties {
+                // An optional query field permits absence, not a JSON null value.
+                while let fastapi_openapi::Schema::AnyOf(union) = &schema {
+                    if union.any_of.len() != 2
+                        || !matches!(&union.any_of[1], fastapi_openapi::Schema::Primitive(primitive)
+                            if matches!(primitive.schema_type, fastapi_openapi::SchemaType::Null))
+                    {
+                        break;
+                    }
+                    schema = union.any_of[0].clone();
+                }
+                if let fastapi_openapi::Schema::Primitive(primitive) = &mut schema {
+                    primitive.nullable = false;
+                }
+                self.openapi.parameters.push(fastapi_openapi::Parameter {
+                    required: required && object.required.contains(&name),
+                    name,
+                    location: fastapi_openapi::ParameterLocation::Query,
+                    schema: Some(schema),
+                    title: None,
+                    description: None,
+                    deprecated: false,
+                    example: None,
+                    examples: HashMap::new(),
+                });
+            }
+        }
+        self
+    }
+
+    /// Describe a named header using its actual HeaderName marker constant.
+    #[must_use]
+    pub fn header_schema<T: fastapi_openapi::JsonSchema, N: crate::extract::HeaderName>(
+        mut self,
+        required: bool,
+    ) -> Self {
+        let schema = self.openapi.schema::<T>();
+        self.openapi.parameters.push(fastapi_openapi::Parameter {
+            name: N::NAME.to_string(),
+            location: fastapi_openapi::ParameterLocation::Header,
+            required,
+            schema: Some(schema),
+            title: None,
+            description: None,
+            deprecated: false,
+            example: None,
+            examples: HashMap::new(),
+        });
+        self
     }
 
     /// Calls the handler with the given context and request.
@@ -1426,8 +1555,7 @@ impl AppBuilder {
 
     /// Generate an OpenAPI spec from registered routes.
     fn generate_openapi_spec(&self, config: &OpenApiConfig) -> fastapi_openapi::OpenApi {
-        use fastapi_openapi::{OpenApiBuilder, Operation, Response as OAResponse};
-        use std::collections::HashMap;
+        use fastapi_openapi::OpenApiBuilder;
 
         let mut builder = OpenApiBuilder::new(&config.title, &config.version);
 
@@ -1448,23 +1576,11 @@ impl AppBuilder {
 
         // Add operations for each registered route
         for entry in &self.routes {
-            if let Some(route) = entry.route_meta() {
-                builder.add_route(route);
-                continue;
+            for (name, schema) in &entry.openapi.schemas {
+                builder.registry().register(name, schema.clone());
             }
-
-            // Create a basic operation with default response
-            let mut responses = HashMap::new();
-            responses.insert(
-                "200".to_string(),
-                OAResponse {
-                    description: "Successful response".to_string(),
-                    content: HashMap::new(),
-                },
-            );
-
-            let operation = Operation {
-                operation_id: Some(format!(
+            let fallback = entry.route_meta().is_none().then(|| {
+                Route::new(entry.method, &entry.path).operation_id(format!(
                     "{}_{}",
                     entry.method.as_str().to_lowercase(),
                     entry
@@ -1472,17 +1588,13 @@ impl AppBuilder {
                         .replace('/', "_")
                         .replace(['{', '}'], "")
                         .trim_matches('_')
-                )),
-                summary: None,
-                description: None,
-                tags: Vec::new(),
-                parameters: Vec::new(),
-                request_body: None,
-                responses,
-                deprecated: false,
-            };
-
-            builder = builder.operation(entry.method.as_str(), &entry.path, operation);
+                ))
+            });
+            if let Some(route) = entry.route_meta().or(fallback.as_ref())
+                && let Some(operation) = builder.add_route(route)
+            {
+                entry.openapi.apply(operation);
+            }
         }
 
         builder.build()
