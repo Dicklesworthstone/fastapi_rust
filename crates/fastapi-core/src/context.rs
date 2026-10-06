@@ -232,7 +232,9 @@ impl RequestContext {
 
     /// Returns the cleanup stack for registering cleanup functions.
     ///
-    /// Cleanup functions run after the handler completes in LIFO order.
+    /// Request owners run these functions in LIFO order after consuming the response
+    /// and executing background tasks. Direct `App::handle` callers must do this
+    /// themselves. Dropping the context does not execute asynchronous cleanup.
     #[must_use]
     pub fn cleanup_stack(&self) -> &CleanupStack {
         &self.cleanup_stack

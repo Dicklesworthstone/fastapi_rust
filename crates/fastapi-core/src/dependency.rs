@@ -63,16 +63,18 @@ pub enum DependencyScope {
 /// Type alias for cleanup functions.
 ///
 /// A cleanup function is an async closure that performs teardown work after
-/// the request handler completes. Cleanup functions run in LIFO (last-in,
+/// response consumption and background work complete. Cleanup functions run in LIFO (last-in,
 /// first-out) order, similar to Python's `contextlib.ExitStack`.
 pub type CleanupFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
-/// Stack of cleanup functions to run after handler completion.
+/// Stack of cleanup functions to run at request completion.
 ///
 /// `CleanupStack` provides generator-style dependency lifecycle management
 /// similar to FastAPI's `yield` dependencies. Cleanup functions are registered
-/// during dependency resolution and run in LIFO order after the handler
-/// completes, even on error or panic.
+/// during dependency resolution. Request owners run them in LIFO order after
+/// response consumption and background tasks, including completed error responses
+/// and HTTP response-write errors. Handler panics or dropping the whole request
+/// future can bypass teardown; dropping this stack does not run async callbacks.
 ///
 /// # Example
 ///
@@ -221,11 +223,11 @@ impl std::fmt::Debug for CleanupStack {
     }
 }
 
-/// Trait for dependencies that require cleanup after handler completion.
+/// Trait for dependencies that require cleanup at request completion.
 ///
 /// This is similar to FastAPI's `yield` dependencies. Dependencies implementing
 /// this trait can perform setup logic and register cleanup functions that
-/// run after the request handler completes.
+/// run after response consumption and background tasks complete.
 ///
 /// # Example
 ///
@@ -264,8 +266,9 @@ pub trait FromDependencyWithCleanup: Clone + Send + Sync + 'static {
 
     /// Set up the dependency and optionally return a cleanup function.
     ///
-    /// The cleanup function (if provided) will run after the request handler
-    /// completes, even on error or panic.
+    /// Request owners run the cleanup function (if provided) after consuming the
+    /// response and executing background tasks. Completed error responses also run
+    /// cleanup. Handler panics and dropping the request future are not covered.
     fn setup(
         ctx: &RequestContext,
         req: &mut Request,
@@ -2238,8 +2241,8 @@ mod tests {
 
     #[test]
     fn cleanup_runs_after_handler_error() {
-        // Test that cleanups run even when handler returns an error (bd-35r4)
-        // This simulates the server calling run_cleanups after any handler result
+        // Unit coverage of a manual drain alongside an error (bd-35r4).
+        // Actual request-owner error teardown is covered by public consumer tests.
 
         let cleanup_ran = Arc::new(AtomicBool::new(false));
         let cleanup_ran_clone = Arc::clone(&cleanup_ran);
@@ -2257,7 +2260,7 @@ mod tests {
         let handler_result: Result<(), HttpError> =
             Err(HttpError::new(StatusCode::INTERNAL_SERVER_ERROR).with_detail("handler failed"));
 
-        // Server always runs cleanups after handler, regardless of result
+        // Manually drain; this unit test does not execute a server or handler.
         futures_executor::block_on(ctx.cleanup_stack().run_cleanups());
 
         assert!(

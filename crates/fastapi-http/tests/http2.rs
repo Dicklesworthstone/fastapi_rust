@@ -6,6 +6,128 @@ use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+#[test]
+fn http2_dispatch_modes_finalize_stream_and_background_resources() {
+    for mode in 0..3 {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler_events = Arc::clone(&events);
+        let app = App::builder()
+            .get("/", move |ctx: &RequestContext, req: &mut Request| {
+                std::future::ready(cleanup_response(ctx, req, Arc::clone(&handler_events)))
+            })
+            .build();
+        let (server, addr, server_thread) = match mode {
+            0 => spawn_server(app),
+            1 => spawn_server_handler(&(Arc::new(app) as Arc<dyn fastapi_core::Handler>)),
+            _ => spawn_cleanup_closure(Arc::clone(&events)),
+        };
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        stream.write_all(PREFACE).expect("preface");
+        write_frame(&mut stream, 0x4, 0, 0, &[]);
+        read_settings_handshake(&mut stream);
+        write_frame(&mut stream, 0x4, 1, 0, &[]);
+        let headers = [
+            0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab,
+            0x90, 0xf4, 0xff,
+        ];
+        for stream_id in [1, 3] {
+            write_frame(&mut stream, 0x1, 0x5, stream_id, &headers);
+            let response_headers = read_header_block(&mut stream, stream_id);
+            let decoded = fastapi_http::http2::HpackDecoder::new()
+                .decode(&response_headers)
+                .expect("headers");
+            assert!(decoded.contains(&(b":status".to_vec(), b"200".to_vec())));
+            assert_eq!(read_data_body(&mut stream, stream_id), b"live h2 resource");
+        }
+        // Joining the actual server guarantees completion, rather than racing DATA delivery.
+        stream.shutdown(Shutdown::Both).expect("close client");
+        server.shutdown();
+        drop(TcpStream::connect(addr));
+        server_thread.join().expect("cleanup server join");
+        assert_eq!(
+            *events.lock().expect("events"),
+            [
+                "body",
+                "background",
+                "cleanup",
+                "body",
+                "background",
+                "cleanup"
+            ]
+        );
+    }
+}
+
+fn cleanup_response(
+    ctx: &RequestContext,
+    req: &mut Request,
+    events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+) -> Response {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let released = Arc::new(AtomicBool::new(false));
+    let cleanup_released = Arc::clone(&released);
+    let cleanup_events = Arc::clone(&events);
+    ctx.cleanup_stack().push(Box::new(move || {
+        Box::pin(async move {
+            cleanup_released.store(true, Ordering::SeqCst);
+            cleanup_events.lock().expect("events").push("cleanup");
+        })
+    }));
+    let background_events = Arc::clone(&events);
+    let background_released = Arc::clone(&released);
+    let tasks = fastapi_core::BackgroundTasks::new();
+    tasks.add(move || {
+        assert!(!background_released.load(Ordering::SeqCst));
+        background_events.lock().expect("events").push("background");
+    });
+    req.insert_extension(tasks);
+    let body = asupersync::stream::iter(std::iter::once_with(move || {
+        assert!(!released.load(Ordering::SeqCst));
+        events.lock().expect("events").push("body");
+        b"live h2 resource".to_vec()
+    }));
+    Response::ok().body(ResponseBody::stream(body))
+}
+
+fn spawn_cleanup_closure(
+    events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+) -> (Arc<TcpServer>, SocketAddr, std::thread::JoinHandle<()>) {
+    let server = Arc::new(TcpServer::new(ServerConfig::new("127.0.0.1:0")));
+    let thread_server = Arc::clone(&server);
+    let (addr_tx, addr_rx) = mpsc::channel();
+    let server_thread = std::thread::spawn(move || {
+        let runtime = http2_test_runtime();
+        runtime.block_on(async move {
+            let cx = runtime_cx();
+            let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            addr_tx
+                .send(listener.local_addr().expect("address"))
+                .expect("send address");
+            let result = thread_server
+                .serve_on(&cx, listener, move |ctx, req| {
+                    std::future::ready(cleanup_response(&ctx, req, Arc::clone(&events)))
+                })
+                .await;
+            assert!(
+                matches!(result, Err(fastapi_http::ServerError::Shutdown)),
+                "explicit server drain must return Shutdown: {result:?}"
+            );
+        });
+    });
+    (
+        server,
+        addr_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("address"),
+        server_thread,
+    )
+}
+
 const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 fn http2_test_runtime() -> asupersync::runtime::Runtime {

@@ -248,15 +248,7 @@ pub struct RequestLine<'a> {
                                  │
                                  ▼
  ┌─────────────────────────────────────────────────────────────────┐
- │  8. Cleanup Stack (LIFO order)                                  │
- │     - Run cleanup functions from DependsCleanup                 │
- │     - Release resources (DB connections, etc.)                  │
- │     - Runs even on error/panic                                  │
- └─────────────────────────────────────────────────────────────────┘
-                                 │
-                                 ▼
- ┌─────────────────────────────────────────────────────────────────┐
- │  9. Middleware.after() (reverse order)                          │
+ │  8. Middleware.after() (reverse order)                          │
  │     - Add response headers                                      │
  │     - Log request/response                                      │
  │     - Compress response body                                    │
@@ -264,15 +256,31 @@ pub struct RequestLine<'a> {
                                  │
                                  ▼
  ┌─────────────────────────────────────────────────────────────────┐
- │  10. Send Response (fastapi-http)                               │
- │      - Write status line and headers                            │
- │      - Stream body (chunked if needed)                          │
+ │  9. Send Response (fastapi-http)                                │
+ │     - Write status line and headers                             │
+ │     - Stream body (chunked if needed)                            │
+ └─────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+ ┌─────────────────────────────────────────────────────────────────┐
+ │  10. Finalize request                                          │
+ │      - Background tasks after successful response write          │
+ │      - Dependency cleanup stack in LIFO order                    │
+ │      - Cleanup also attempted after HTTP write errors             │
  └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Key Design Decisions
+
+The server owns finalization after response transmission, preserving dependency
+resources while streamed bodies and background tasks use them. HTTP/1 handler
+timeouts retain already registered callbacks after abandoning the handler.
+Completed WebSocket handlers finalize their separate context. Test helpers collect
+finite streams first. Direct `App::handle` callers must finalize their own context.
+Handler, stream, background-task, or destructor panics and dropping the complete
+request future can bypass async teardown; callbacks have no automatic timeout.
 
 ### 1. Zero-Copy HTTP Parsing
 

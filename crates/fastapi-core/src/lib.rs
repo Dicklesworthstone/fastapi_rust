@@ -74,8 +74,9 @@ pub mod websocket;
 
 pub use context::{CancelledError, IntoOutcome, RequestContext};
 pub use dependency::{
-    DefaultConfig, DefaultDependencyConfig, DependencyCache, DependencyOverrides, DependencyScope,
-    Depends, DependsCleanup, DependsConfig, FromDependency, FromDependencyWithCleanup, NoCache,
+    CleanupFn, DefaultConfig, DefaultDependencyConfig, DependencyCache, DependencyOverrides,
+    DependencyScope, Depends, DependsCleanup, DependsConfig, FromDependency,
+    FromDependencyWithCleanup, NoCache,
 };
 pub use digest::{DigestAlgorithm, DigestAuth, DigestAuthError, DigestAuthErrorKind, DigestQop};
 pub use error::{HttpError, LocItem, ValidationError, ValidationErrors};

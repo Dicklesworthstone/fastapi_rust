@@ -787,7 +787,7 @@ where
         // is delivered; the request Cx must NOT be cancel-marked here because
         // it shares cancel state with this connection's Cx, and the 504 still
         // has to be written on this connection.
-        let mut response = match timeout_at(deadline, handler(ctx, &mut request)).await {
+        let mut response = match timeout_at(deadline, handler(ctx.clone(), &mut request)).await {
             Ok(response) => response,
             Err(_elapsed) => {
                 // The abandoned handler may not have consumed the request
@@ -808,16 +808,35 @@ where
         };
 
         let response_write = response_writer.write(response);
-        write_response(&mut stream, response_write).await?;
-
-        if let Some(tasks) = App::take_background_tasks(&mut request) {
-            tasks.execute_all().await;
-        }
+        let written = write_response(&mut stream, response_write)
+            .await
+            .map_err(ServerError::Io);
+        finish_request(&ctx, &mut request, written).await?;
 
         if !server_will_keep_alive {
             return Ok(());
         }
     }
+}
+
+/// Finalize registered resources even if transmitting the response failed.
+/// Background work retains its successful-write policy and resource lifetime.
+async fn finish_request(
+    ctx: &RequestContext,
+    request: &mut Request,
+    written: Result<(), ServerError>,
+) -> Result<(), ServerError> {
+    if written.is_ok()
+        && let Some(tasks) = App::take_background_tasks(request)
+    {
+        tasks.execute_all().await;
+    }
+    let pending = ctx.cleanup_stack().len();
+    let completed = ctx.cleanup_stack().run_cleanups().await;
+    if completed < pending {
+        ctx.trace("Dependency cleanup callback panicked; remaining callbacks were attempted");
+    }
+    written
 }
 
 async fn process_connection_http2<H, Fut>(
@@ -1132,8 +1151,8 @@ where
                     continue;
                 }
 
-                let response = handler(ctx, &mut request).await;
-                process_connection_http2_write_response(
+                let response = handler(ctx.clone(), &mut request).await;
+                let written = process_connection_http2_write_response(
                     &mut framed,
                     response,
                     stream_id,
@@ -1141,11 +1160,8 @@ where
                     recv_max_frame_size,
                     Some(&mut flow_control),
                 )
-                .await?;
-
-                if let Some(tasks) = App::take_background_tasks(&mut request) {
-                    tasks.execute_all().await;
-                }
+                .await;
+                finish_request(&ctx, &mut request, written).await?;
             }
             http2::FrameType::WindowUpdate => {
                 validate_window_update_payload(&frame.payload)?;
@@ -2687,6 +2703,7 @@ impl TcpServer {
 
                 let ws = fastapi_core::WebSocket::new(stream, buffered);
                 let _ = app.handle_websocket(&ws_ctx, &mut request, ws).await;
+                finish_request(&ws_ctx, &mut request, Ok(())).await?;
                 return Ok(());
             }
 
@@ -2746,11 +2763,10 @@ impl TcpServer {
             if let ResponseWrite::Full(ref bytes) = response_write {
                 self.record_bytes_out(bytes.len() as u64);
             }
-            write_response(&mut stream, response_write).await?;
-
-            if let Some(tasks) = App::take_background_tasks(&mut request) {
-                tasks.execute_all().await;
-            }
+            let written = write_response(&mut stream, response_write)
+                .await
+                .map_err(ServerError::Io);
+            finish_request(&ctx, &mut request, written).await?;
 
             if !server_will_keep_alive {
                 return Ok(());
@@ -3112,19 +3128,17 @@ impl TcpServer {
                     let response = app.handle(&ctx, &mut request).await;
 
                     // Send response on the same stream.
-                    self.write_h2_response(
-                        &mut framed,
-                        response,
-                        stream_id,
-                        peer_max_frame_size,
-                        recv_max_frame_size,
-                        Some(&mut flow_control),
-                    )
-                    .await?;
-
-                    if let Some(tasks) = App::take_background_tasks(&mut request) {
-                        tasks.execute_all().await;
-                    }
+                    let written = self
+                        .write_h2_response(
+                            &mut framed,
+                            response,
+                            stream_id,
+                            peer_max_frame_size,
+                            recv_max_frame_size,
+                            Some(&mut flow_control),
+                        )
+                        .await;
+                    finish_request(&ctx, &mut request, written).await?;
 
                     // Yield to keep cancellation responsive.
                     asupersync::runtime::yield_now().await;
@@ -3665,15 +3679,17 @@ impl TcpServer {
                     }
 
                     let response = handler.call(&ctx, &mut request).await;
-                    self.write_h2_response(
-                        &mut framed,
-                        response,
-                        stream_id,
-                        peer_max_frame_size,
-                        recv_max_frame_size,
-                        Some(&mut flow_control),
-                    )
-                    .await?;
+                    let written = self
+                        .write_h2_response(
+                            &mut framed,
+                            response,
+                            stream_id,
+                            peer_max_frame_size,
+                            recv_max_frame_size,
+                            Some(&mut flow_control),
+                        )
+                        .await;
+                    finish_request(&ctx, &mut request, written).await?;
                 }
                 http2::FrameType::WindowUpdate => {
                     validate_window_update_payload(&frame.payload)?;
@@ -3826,7 +3842,10 @@ impl TcpServer {
             if let ResponseWrite::Full(ref bytes) = response_write {
                 self.record_bytes_out(bytes.len() as u64);
             }
-            write_response(&mut stream, response_write).await?;
+            let written = write_response(&mut stream, response_write)
+                .await
+                .map_err(ServerError::Io);
+            finish_request(&ctx, &mut request, written).await?;
 
             if !server_will_keep_alive {
                 return Ok(());

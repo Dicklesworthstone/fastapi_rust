@@ -612,7 +612,7 @@ impl std::fmt::Debug for WebSocketRouteEntry {
 ///
 /// State is stored by type and can be accessed by handlers through
 /// the `State<T>` extractor.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct StateContainer {
     state: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
@@ -638,6 +638,13 @@ impl StateContainer {
         self.state
             .get(&TypeId::of::<T>())
             .and_then(|v| Arc::clone(v).downcast::<T>().ok())
+    }
+
+    /// Borrow a typed value without cloning its shared allocation.
+    pub(crate) fn get_ref<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.state
+            .get(&TypeId::of::<T>())
+            .and_then(|value| value.downcast_ref::<T>())
     }
 
     /// Returns true if the state container contains a value of type T.
@@ -1928,7 +1935,16 @@ impl App {
     ///
     /// This matches the request against registered routes, runs middleware,
     /// and returns the response.
+    ///
+    /// The caller owns response consumption and request finalization. After consuming
+    /// the response, execute any background tasks, then await
+    /// `ctx.cleanup_stack().run_cleanups()`. The HTTP server and TestClient do this
+    /// automatically. Finalizing here would release dependencies before streamed
+    /// bodies and background tasks finish using them.
     pub async fn handle(&self, ctx: &RequestContext, req: &mut Request) -> Response {
+        req.insert_extension(crate::extract::AppState::from_container(Arc::clone(
+            &self.state,
+        )));
         // Use the trie-based router for efficient matching with path parameter extraction
         match self.router.lookup(req.path(), req.method()) {
             RouteLookup::Match(route_match) => {
@@ -1988,6 +2004,9 @@ impl App {
         req: &mut Request,
         ws: crate::websocket::WebSocket,
     ) -> Result<(), crate::websocket::WebSocketError> {
+        req.insert_extension(crate::extract::AppState::from_container(Arc::clone(
+            &self.state,
+        )));
         match self.ws_router.lookup(req.path(), Method::Get) {
             RouteLookup::Match(route_match) => {
                 let entry = self

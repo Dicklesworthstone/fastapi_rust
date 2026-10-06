@@ -15,8 +15,107 @@
 // not await, `Result<_, HttpError>`), so the pedantic lints about them are noise here.
 #![allow(clippy::unused_async, clippy::result_large_err)]
 
+use fastapi_rust::ResponseBody;
 use fastapi_rust::prelude::*;
 use fastapi_rust::testing::TestClient;
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone)]
+struct CleanupEvents(Arc<Mutex<Vec<&'static str>>>);
+
+impl CleanupEvents {
+    fn record(&self, event: &'static str) {
+        self.0.lock().expect("cleanup events mutex").push(event);
+    }
+
+    fn snapshot(&self) -> Vec<&'static str> {
+        self.0.lock().expect("cleanup events mutex").clone()
+    }
+}
+
+#[derive(Clone)]
+struct InnerResource(CleanupEvents);
+
+impl FromDependencyWithCleanup for InnerResource {
+    type Value = Self;
+    type Error = HttpError;
+
+    async fn setup(
+        ctx: &RequestContext,
+        req: &mut Request,
+    ) -> Result<(Self, Option<CleanupFn>), Self::Error> {
+        let events = State::<CleanupEvents>::from_request(ctx, req)
+            .await
+            .map_err(|err| HttpError::internal().with_detail(err.to_string()))?
+            .0;
+        events.record("setup inner");
+        let cleanup_events = events.clone();
+        let cleanup: CleanupFn = Box::new(move || {
+            Box::pin(async move {
+                cleanup_events.record("cleanup inner");
+            })
+        });
+        Ok((Self(events), Some(cleanup)))
+    }
+}
+
+#[derive(Clone)]
+struct OuterResource(CleanupEvents);
+
+impl FromDependencyWithCleanup for OuterResource {
+    type Value = Self;
+    type Error = HttpError;
+
+    async fn setup(
+        ctx: &RequestContext,
+        req: &mut Request,
+    ) -> Result<(Self, Option<CleanupFn>), Self::Error> {
+        let inner = DependsCleanup::<InnerResource>::from_request(ctx, req).await?;
+        let events = inner.0.0;
+        events.record("setup outer");
+        let cleanup_events = events.clone();
+        let cleanup: CleanupFn = Box::new(move || {
+            Box::pin(async move {
+                cleanup_events.record("cleanup outer");
+            })
+        });
+        Ok((Self(events), Some(cleanup)))
+    }
+}
+
+#[get("/cleanup")]
+async fn cleanup_route(
+    _cx: &Cx,
+    outer: DependsCleanup<OuterResource>,
+    inner: DependsCleanup<InnerResource>,
+) -> &'static str {
+    assert!(Arc::ptr_eq(&outer.0.0.0, &inner.0.0.0));
+    outer.0.0.record("handler");
+    "resource used"
+}
+
+#[test]
+fn test_client_runs_cached_dependency_cleanup_in_lifo_order() {
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let app = App::builder()
+        .state(events.clone())
+        .route_entry(cleanup_route_route())
+        .build();
+    let client = TestClient::new(app);
+    let response = client.get("/cleanup").send();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text(), "resource used");
+    assert_eq!(
+        events.snapshot(),
+        [
+            "setup inner",
+            "setup outer",
+            "handler",
+            "cleanup outer",
+            "cleanup inner"
+        ]
+    );
+}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 struct Item {
@@ -25,10 +124,294 @@ struct Item {
     price: f64,
 }
 
+#[get("/cleanup-error")]
+async fn cleanup_error(
+    _cx: &Cx,
+    inner: DependsCleanup<InnerResource>,
+) -> Result<&'static str, HttpError> {
+    inner.0.0.record("handler error");
+    Err(HttpError::bad_request().with_detail("resource operation failed"))
+}
+
+#[get("/cleanup-query")]
+async fn cleanup_query(
+    _cx: &Cx,
+    inner: DependsCleanup<InnerResource>,
+    _query: Query<SearchParams>,
+) -> &'static str {
+    inner.0.0.record("handler");
+    "valid query"
+}
+
+#[derive(Clone)]
+struct FailedOuter;
+
+impl FromDependencyWithCleanup for FailedOuter {
+    type Value = Self;
+    type Error = HttpError;
+
+    async fn setup(
+        ctx: &RequestContext,
+        req: &mut Request,
+    ) -> Result<(Self, Option<CleanupFn>), Self::Error> {
+        let inner = DependsCleanup::<InnerResource>::from_request(ctx, req).await?;
+        inner.0.0.record("outer setup error");
+        Err(HttpError::bad_request().with_detail("outer acquisition failed"))
+    }
+}
+
+#[get("/cleanup-setup-error")]
+async fn cleanup_setup_error(_cx: &Cx, _outer: DependsCleanup<FailedOuter>) -> &'static str {
+    "handler must not run"
+}
+
+#[get("/cleanup-uncached")]
+async fn cleanup_uncached(
+    _cx: &Cx,
+    first: DependsCleanup<InnerResource, NoCache>,
+    second: DependsCleanup<InnerResource, NoCache>,
+) -> &'static str {
+    assert!(Arc::ptr_eq(&first.0.0.0, &second.0.0.0));
+    first.0.0.record("handler");
+    "two acquisitions"
+}
+
+fn cleanup_client(events: &CleanupEvents) -> TestClient<App> {
+    TestClient::new(
+        App::builder()
+            .state(events.clone())
+            .route_entry(cleanup_error_route())
+            .route_entry(cleanup_query_route())
+            .route_entry(cleanup_setup_error_route())
+            .route_entry(cleanup_uncached_route())
+            .build(),
+    )
+}
+
+#[test]
+fn test_client_cleanup_preserves_handler_error_response() {
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let client = cleanup_client(&events);
+    let response = client.get("/cleanup-error").send();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = response.json().expect("error JSON");
+    assert_eq!(error["detail"], "resource operation failed");
+    assert_eq!(
+        events.snapshot(),
+        ["setup inner", "handler error", "cleanup inner"]
+    );
+}
+
+#[test]
+fn test_client_cleanup_runs_after_later_extractor_rejection() {
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let client = cleanup_client(&events);
+    let response = client.get("/cleanup-query?q=valid&limit=invalid").send();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let error: serde_json::Value = response.json().expect("validation JSON");
+    assert!(
+        !error["detail"]
+            .as_array()
+            .expect("validation errors")
+            .is_empty()
+    );
+    assert_eq!(events.snapshot(), ["setup inner", "cleanup inner"]);
+}
+
+#[test]
+fn test_client_cleanup_releases_inner_when_outer_setup_fails() {
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let client = cleanup_client(&events);
+    let response = client.get("/cleanup-setup-error").send();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = response.json().expect("error JSON");
+    assert_eq!(error["detail"], "outer acquisition failed");
+    assert_eq!(
+        events.snapshot(),
+        ["setup inner", "outer setup error", "cleanup inner"]
+    );
+}
+
+#[test]
+fn test_client_cleanup_releases_each_uncached_acquisition() {
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let client = cleanup_client(&events);
+    let response = client.get("/cleanup-uncached").send();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text(), "two acquisitions");
+    assert_eq!(
+        events.snapshot(),
+        [
+            "setup inner",
+            "setup inner",
+            "handler",
+            "cleanup inner",
+            "cleanup inner"
+        ]
+    );
+}
+
+struct CleanupMiddleware(CleanupEvents);
+
+struct AcquireAndStopMiddleware;
+
+impl fastapi_rust::core::Middleware for AcquireAndStopMiddleware {
+    fn before<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> fastapi_rust::core::BoxFuture<'a, fastapi_rust::core::ControlFlow> {
+        Box::pin(async move {
+            let inner = DependsCleanup::<InnerResource>::from_request(ctx, req)
+                .await
+                .expect("middleware resource");
+            inner.0.0.record("middleware stop");
+            fastapi_rust::core::ControlFlow::Break(
+                Response::with_status(StatusCode::FORBIDDEN)
+                    .body(ResponseBody::Bytes(b"stopped by middleware".to_vec())),
+            )
+        })
+    }
+}
+
+#[test]
+fn test_client_cleanup_releases_middleware_resource_after_short_circuit() {
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let client = TestClient::new(
+        App::builder()
+            .state(events.clone())
+            .middleware(AcquireAndStopMiddleware)
+            .route_entry(cleanup_route_route())
+            .build(),
+    );
+    let response = client.get("/cleanup").send();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.text(), "stopped by middleware");
+    assert_eq!(
+        events.snapshot(),
+        ["setup inner", "middleware stop", "cleanup inner"]
+    );
+}
+
+impl fastapi_rust::core::Middleware for CleanupMiddleware {
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        _req: &'a Request,
+        response: Response,
+    ) -> fastapi_rust::core::middleware::BoxFuture<'a, Response> {
+        Box::pin(async move {
+            self.0.record("middleware after");
+            response.header("x-resource-lifecycle", b"completed middleware".to_vec())
+        })
+    }
+}
+
+#[test]
+fn test_client_cleanup_waits_for_response_middleware() {
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let client = TestClient::new(
+        App::builder()
+            .state(events.clone())
+            .middleware(CleanupMiddleware(events.clone()))
+            .route_entry(cleanup_route_route())
+            .build(),
+    );
+    let response = client.get("/cleanup").send();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text(), "resource used");
+    assert_eq!(
+        response.header("x-resource-lifecycle"),
+        Some(b"completed middleware".as_slice())
+    );
+    assert_eq!(
+        events.snapshot(),
+        [
+            "setup inner",
+            "setup outer",
+            "handler",
+            "middleware after",
+            "cleanup outer",
+            "cleanup inner"
+        ]
+    );
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct SearchParams {
     q: String,
     limit: Option<usize>,
+}
+
+#[derive(Clone)]
+struct ConfiguredName(&'static str);
+
+#[get("/configured-state")]
+async fn configured_state(_cx: &Cx, name: State<ConfiguredName>) -> String {
+    name.0.0.to_string()
+}
+
+struct StateObserver(Arc<Mutex<Vec<String>>>);
+
+impl fastapi_rust::core::Middleware for StateObserver {
+    fn before<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> fastapi_rust::core::middleware::BoxFuture<'a, fastapi_rust::core::ControlFlow> {
+        Box::pin(async move {
+            let name = State::<ConfiguredName>::from_request(ctx, req)
+                .await
+                .expect("configured middleware state");
+            self.0
+                .lock()
+                .expect("observations")
+                .push(name.0.0.to_string());
+            fastapi_rust::core::ControlFlow::Continue
+        })
+    }
+}
+
+#[test]
+fn configured_state_reaches_middleware_and_handler_without_cross_app_leaks() {
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let first = TestClient::new(
+        App::builder()
+            .state(ConfiguredName("first"))
+            .middleware(StateObserver(Arc::clone(&observations)))
+            .route_entry(configured_state_route())
+            .build(),
+    );
+    let second = TestClient::new(
+        App::builder()
+            .state(ConfiguredName("second"))
+            .middleware(StateObserver(Arc::clone(&observations)))
+            .route_entry(configured_state_route())
+            .build(),
+    );
+    for (client, expected) in [(&first, "first"), (&second, "second"), (&first, "first")] {
+        let response = client.get("/configured-state").send();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text(), expected);
+    }
+    assert_eq!(
+        *observations.lock().expect("observations"),
+        ["first", "second", "first"]
+    );
+}
+
+#[test]
+fn missing_configured_state_still_returns_configuration_error() {
+    let client = TestClient::new(App::builder().route_entry(configured_state_route()).build());
+    let response = client.get("/configured-state").send();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error: serde_json::Value = response.json().expect("configuration error");
+    assert!(
+        error["detail"]
+            .as_str()
+            .expect("error detail")
+            .contains("State type not found")
+    );
 }
 
 #[get("/items/{id}")]

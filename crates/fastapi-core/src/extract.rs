@@ -3969,12 +3969,7 @@ impl<'de> Deserializer<'de> for QueryFieldDeserializer<'de> {
 /// ```
 #[derive(Debug, Default, Clone)]
 pub struct AppState {
-    inner: std::sync::Arc<
-        std::collections::HashMap<
-            std::any::TypeId,
-            std::sync::Arc<dyn std::any::Any + Send + Sync>,
-        >,
-    >,
+    inner: std::sync::Arc<crate::app::StateContainer>,
 }
 
 impl AppState {
@@ -3982,7 +3977,7 @@ impl AppState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: std::sync::Arc::new(std::collections::HashMap::new()),
+            inner: std::sync::Arc::new(crate::app::StateContainer::new()),
         }
     }
 
@@ -3991,29 +3986,25 @@ impl AppState {
     /// The value must be `Send + Sync + 'static` to be safely shared across
     /// requests and threads.
     #[must_use]
-    pub fn with<T: Send + Sync + 'static>(self, value: T) -> Self {
-        let mut map = match std::sync::Arc::try_unwrap(self.inner) {
-            Ok(map) => map,
-            Err(arc) => (*arc).clone(),
-        };
-        map.insert(std::any::TypeId::of::<T>(), std::sync::Arc::new(value));
-        Self {
-            inner: std::sync::Arc::new(map),
-        }
+    pub fn with<T: Send + Sync + 'static>(mut self, value: T) -> Self {
+        std::sync::Arc::make_mut(&mut self.inner).insert(value);
+        self
+    }
+
+    pub(crate) fn from_container(inner: std::sync::Arc<crate::app::StateContainer>) -> Self {
+        Self { inner }
     }
 
     /// Get a reference to a typed state value.
     #[must_use]
     pub fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
-        self.inner
-            .get(&std::any::TypeId::of::<T>())
-            .and_then(|arc| arc.downcast_ref::<T>())
+        self.inner.get_ref::<T>()
     }
 
     /// Check if state contains a value of type T.
     #[must_use]
     pub fn contains<T: Send + Sync + 'static>(&self) -> bool {
-        self.inner.contains_key(&std::any::TypeId::of::<T>())
+        self.inner.contains::<T>()
     }
 
     /// Return the number of state values.

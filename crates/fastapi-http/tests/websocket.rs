@@ -6,6 +6,102 @@ use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+#[test]
+fn websocket_completion_releases_resources_from_its_configured_state() {
+    for return_error in [false, true] {
+        let (cleanup_tx, cleanup_rx) = mpsc::channel::<&'static str>();
+        let app = App::builder()
+            .state(cleanup_tx)
+            .websocket(
+                "/ws",
+                move |ctx: &RequestContext, req: &mut Request, mut ws: WebSocket| {
+                    let ctx = ctx.clone();
+                    let cleanup_tx = req
+                        .get_extension::<fastapi_core::AppState>()
+                        .expect("configured WebSocket state")
+                        .get::<mpsc::Sender<&'static str>>()
+                        .expect("configured cleanup sender")
+                        .clone();
+                    async move {
+                        ctx.cleanup_stack().push(Box::new(move || {
+                            Box::pin(async move {
+                                cleanup_tx.send("released").expect("cleanup signal");
+                            })
+                        }));
+                        let message = ws.read_text().await?;
+                        ws.send_text(&message).await?;
+                        if return_error {
+                            Err(WebSocketError::Protocol(
+                                "handler returned an error after echo",
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                },
+            )
+            .build();
+        let server = Arc::new(TcpServer::new(ServerConfig::new("127.0.0.1:0")));
+        let thread_server = Arc::clone(&server);
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let reactor = asupersync::runtime::reactor::create_reactor().expect("reactor");
+            let runtime = RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let cx = asupersync::Cx::current().expect("runtime Cx");
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind");
+                addr_tx
+                    .send(listener.local_addr().expect("address"))
+                    .expect("send address");
+                let result = thread_server
+                    .serve_on_app(&cx, listener, Arc::new(app))
+                    .await;
+                assert!(
+                    matches!(result, Err(fastapi_http::ServerError::Shutdown)),
+                    "explicit server drain must return Shutdown: {result:?}"
+                );
+            });
+        });
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server address");
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let request = format!(
+            "GET /ws HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).expect("handshake");
+        assert!(read_until_double_crlf(&mut stream, 16384).starts_with(b"HTTP/1.1 101"));
+        stream
+            .write_all(&ws_masked_frame(0x1, b"live resource", [1, 2, 3, 4]))
+            .expect("message");
+        let (opcode, payload) = ws_read_unmasked_frame(&mut stream);
+        assert_eq!(opcode, 0x1);
+        assert_eq!(payload, b"live resource");
+        assert_eq!(
+            cleanup_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("WebSocket cleanup"),
+            "released"
+        );
+        assert!(matches!(
+            cleanup_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected)
+        ));
+        let _ = stream.shutdown(Shutdown::Both);
+        server.shutdown();
+        drop(TcpStream::connect(addr));
+        server_thread.join().expect("WebSocket server join");
+    }
+}
+
 fn read_until_double_crlf(stream: &mut TcpStream, limit: usize) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 1024];

@@ -78,6 +78,34 @@ async fn handler(_cx: &Cx, _dep: Depends<CounterDep, NoCache>) -> StatusCode {
 }
 ```
 
+
+## Dependencies with teardown
+
+Implement `FromDependencyWithCleanup` and extract `DependsCleanup<T>` when a
+dependency acquires a resource that must be released. Return the value and an
+optional `CleanupFn` from `setup`. These types are exported by
+`fastapi_rust::prelude::*`.
+
+Request-scoped cached dependencies register their callback once. Callbacks run in
+reverse registration order, after middleware, response body consumption, and
+background tasks. The HTTP/1.1 and HTTP/2 servers, `TestClient`, and `TestServer`
+perform this finalization. Completed WebSocket handlers finalize their own context.
+HTTP response-write errors still attempt cleanup and preserve the write error;
+background tasks run only after a successful write. HTTP/1.1 handler timeouts retain
+and finalize callbacks that were registered before the handler was abandoned.
+
+`TestClient` and `TestServer` collect finite streams before releasing dependencies.
+Their synchronous calls wait for stream completion; use a live async client for
+infinite streams. If you call `App::handle` directly, consume the response, take and
+execute background tasks with `App::take_background_tasks`, then await
+`ctx.cleanup_stack().run_cleanups()` yourself.
+
+Cleanup callback creation and polling panics are caught so remaining callbacks are
+attempted. Handler, body-stream, background-task, or destructor panics and dropping
+the entire request or cleanup future can bypass teardown. Setup interrupted before
+callback registration is not covered. Cleanup callbacks have no automatic timeout,
+and request/function scopes share the same completion stack.
+
 ## Next Steps
 
 - [Configuration](configuration.md) - Configure application state

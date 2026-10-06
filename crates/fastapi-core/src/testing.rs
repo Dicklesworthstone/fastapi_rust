@@ -95,6 +95,40 @@ pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+/// Collect finite response streams before synchronous test owners release resources.
+async fn collect_response(_cx: &Cx, response: Response) -> Response {
+    if !matches!(response.body_ref(), ResponseBody::Stream(_)) {
+        return response;
+    }
+    let (status, headers, body) = response.into_parts();
+    let body = match body {
+        ResponseBody::Stream(mut stream) => {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+                bytes.extend_from_slice(&chunk);
+            }
+            ResponseBody::Bytes(bytes)
+        }
+        body => body,
+    };
+    Response::with_status(status)
+        .body(body)
+        .rebuild_with_headers(headers)
+}
+
+async fn finish_test_request(
+    ctx: &RequestContext,
+    request: &mut Request,
+    response: Response,
+) -> Response {
+    let response = collect_response(ctx.cx(), response).await;
+    if let Some(tasks) = crate::app::App::take_background_tasks(request) {
+        tasks.execute_all().await;
+    }
+    ctx.cleanup_stack().run_cleanups().await;
+    response
+}
+
 /// A simple cookie jar for maintaining cookies across requests.
 ///
 /// Cookies are stored as name-value pairs and automatically
@@ -861,8 +895,11 @@ impl<H: Handler + 'static> TestClient<H> {
         let ctx =
             RequestContext::with_overrides(cx, request_id, Arc::clone(&self.dependency_overrides));
 
-        // The TestClient API is synchronous; run the async handler to completion.
-        let response = crate::testing::block_on(self.handler.call(&ctx, &mut request));
+        // Complete body consumption and deferred work before releasing dependencies.
+        let response = block_on(async {
+            let response = self.handler.call(&ctx, &mut request).await;
+            finish_test_request(&ctx, &mut request, response).await
+        });
 
         // Extract cookies from response
         {
@@ -1021,6 +1058,10 @@ impl<'a, H: Handler + 'static> RequestBuilder<'a, H> {
     }
 
     /// Sends the request and returns the response.
+    ///
+    /// Finite response streams are collected before background tasks and dependency
+    /// cleanup run. This synchronous call waits for stream completion; use a live
+    /// async client for infinite streams such as long-lived SSE subscriptions.
     ///
     /// # Example
     ///
@@ -2203,7 +2244,10 @@ impl<H: Handler + 'static> CancellationTest<H> {
         ctx.cx().set_cancel_requested(true);
 
         let mut request = Request::new(Method::Get, "/test");
-        let response = crate::testing::block_on(self.handler.call(&ctx, &mut request));
+        let response = block_on(async {
+            let response = self.handler.call(&ctx, &mut request).await;
+            finish_test_request(&ctx, &mut request, response).await
+        });
 
         // Check if handler returned a cancellation-related status
         let is_cancelled_response = response.status().as_u16() == 499
@@ -2224,7 +2268,10 @@ impl<H: Handler + 'static> CancellationTest<H> {
         let ctx = RequestContext::new(cx, 1);
         let mut request = Request::new(Method::Get, "/test");
 
-        let response = crate::testing::block_on(self.handler.call(&ctx, &mut request));
+        let response = block_on(async {
+            let response = self.handler.call(&ctx, &mut request).await;
+            finish_test_request(&ctx, &mut request, response).await
+        });
 
         CancellationTestResult {
             completed: true,
@@ -2255,7 +2302,10 @@ impl<H: Handler + 'static> CancellationTest<H> {
         }
 
         let mut request = Request::new(Method::Get, path);
-        let response = crate::testing::block_on(self.handler.call(&ctx, &mut request));
+        let response = block_on(async {
+            let response = self.handler.call(&ctx, &mut request).await;
+            finish_test_request(&ctx, &mut request, response).await
+        });
 
         let is_cancelled = ctx.is_cancelled();
         let is_cancelled_response =
@@ -4548,8 +4598,11 @@ impl TestServer {
             .unwrap_or_else(|| Arc::new(crate::dependency::DependencyOverrides::new()));
         let ctx = RequestContext::with_overrides(cx, request_id, dependency_overrides);
 
-        // Execute the App handler synchronously
-        let response = crate::testing::block_on(app.handle(&ctx, &mut request));
+        // Consume finite streams while their dependency resources are still live.
+        let response = block_on(async {
+            let response = app.handle(&ctx, &mut request).await;
+            collect_response(ctx.cx(), response).await
+        });
 
         let duration = start_time.elapsed();
         let status_code = response.status().as_u16();
@@ -4568,8 +4621,17 @@ impl TestServer {
 
         // Serialize the Response to HTTP/1.1 bytes and send
         let response_bytes = Self::serialize_response(response);
-        let _ = stream.write_all(&response_bytes);
-        let _ = stream.flush();
+        let written = stream
+            .write_all(&response_bytes)
+            .and_then(|()| stream.flush());
+        block_on(async {
+            if written.is_ok()
+                && let Some(tasks) = crate::app::App::take_background_tasks(&mut request)
+            {
+                tasks.execute_all().await;
+            }
+            ctx.cleanup_stack().run_cleanups().await;
+        });
         graceful_close(&stream);
     }
 
@@ -4655,9 +4717,7 @@ impl TestServer {
             ResponseBody::Empty => Vec::new(),
             ResponseBody::Bytes(b) => b,
             ResponseBody::Stream(_) => {
-                // For streaming responses in test context, we can't easily
-                // collect the stream synchronously. Return empty body.
-                Vec::new()
+                unreachable!("TestServer collects response streams before serialization")
             }
         };
 
@@ -7320,6 +7380,94 @@ mod test_server_tests {
     use crate::app::App;
     use serial_test::serial;
     use std::net::TcpStream as StdTcpStreamAlias;
+
+    fn streaming_cleanup_app(events: Arc<Mutex<Vec<&'static str>>>) -> App {
+        App::builder()
+            .get(
+                "/resource-stream",
+                move |ctx: &RequestContext, req: &mut Request| {
+                    let released = Arc::new(AtomicBool::new(false));
+                    let cleanup_released = Arc::clone(&released);
+                    let cleanup_events = Arc::clone(&events);
+                    ctx.cleanup_stack().push(Box::new(move || {
+                        Box::pin(async move {
+                            cleanup_released.store(true, std::sync::atomic::Ordering::SeqCst);
+                            cleanup_events.lock().push("cleanup");
+                        })
+                    }));
+                    let tasks = crate::request::BackgroundTasks::new();
+                    let background_released = Arc::clone(&released);
+                    let background_events = Arc::clone(&events);
+                    tasks.add(move || {
+                        assert!(!background_released.load(std::sync::atomic::Ordering::SeqCst));
+                        background_events.lock().push("background");
+                    });
+                    req.insert_extension(tasks);
+                    let body_events = Arc::clone(&events);
+                    let chunks = asupersync::stream::iter(std::iter::once_with(move || {
+                        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+                        body_events.lock().push("body");
+                        b"resource still live".to_vec()
+                    }));
+                    std::future::ready(
+                        Response::ok()
+                            .header("content-type", b"text/plain".to_vec())
+                            .header("set-cookie", b"lifecycle=live; Path=/".to_vec())
+                            .body(ResponseBody::stream(chunks)),
+                    )
+                },
+            )
+            .build()
+    }
+
+    #[test]
+    fn test_client_collects_stream_before_background_and_cleanup() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let client = TestClient::new(streaming_cleanup_app(Arc::clone(&events)));
+        let response = client.get("/resource-stream").send();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text(), "resource still live");
+        assert_eq!(
+            response.header("content-type"),
+            Some(b"text/plain".as_slice())
+        );
+        assert_eq!(client.cookies().get("lifecycle"), Some("live"));
+        assert_eq!(*events.lock(), ["body", "background", "cleanup"]);
+    }
+
+    #[test]
+    #[serial(testing_network)]
+    fn test_server_collects_stream_before_background_and_cleanup() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let server = TestServer::start(streaming_cleanup_app(Arc::clone(&events)));
+        let response = send_request(
+            server.addr(),
+            b"GET /resource-stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.ends_with("resource still live"));
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("content-type: text/plain")
+        );
+        assert_eq!(*events.lock(), ["body", "background", "cleanup"]);
+    }
+
+    #[test]
+    fn cancellation_test_finalizes_completed_streaming_request() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let test = CancellationTest::new(streaming_cleanup_app(Arc::clone(&events)));
+        let result = test.test_with_cancel_callback("/resource-stream", |_| false);
+        assert!(result.completed);
+        let response = result.response.expect("completed response");
+        assert_eq!(response.status(), StatusCode::OK);
+        match response.body_ref() {
+            ResponseBody::Bytes(body) => assert_eq!(body, b"resource still live"),
+            body => panic!("expected consumed response body, got {body:?}"),
+        }
+        assert_eq!(*events.lock(), ["body", "background", "cleanup"]);
+    }
 
     fn make_test_app() -> App {
         App::builder()

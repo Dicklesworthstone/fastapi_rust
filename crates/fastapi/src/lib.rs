@@ -292,11 +292,12 @@ pub use fastapi_router;
 
 // Re-export commonly used types
 pub use fastapi_core::{
-    App, AppBuilder, AppConfig, Cors, CorsConfig, Cx, DefaultConfig, DefaultDependencyConfig,
-    DependencyOverrides, DependencyScope, Depends, DependsConfig, FromDependency, FromRequest,
-    HttpError, IntoResponse, Method, NoCache, OpenApiConfig, Request, RequestAuthority, RequestId,
-    RequestIdConfig, RequestIdMiddleware, Response, ResponseBody, StateContainer, StatusCode,
-    ValidationError, ValidationErrors,
+    App, AppBuilder, AppConfig, CleanupFn, Cors, CorsConfig, Cx, DefaultConfig,
+    DefaultDependencyConfig, DependencyOverrides, DependencyScope, Depends, DependsCleanup,
+    DependsConfig, FromDependency, FromDependencyWithCleanup, FromRequest, HttpError, IntoResponse,
+    Method, NoCache, OpenApiConfig, Request, RequestAuthority, RequestId, RequestIdConfig,
+    RequestIdMiddleware, Response, ResponseBody, StateContainer, StatusCode, ValidationError,
+    ValidationErrors,
 };
 
 // Re-export extractors
@@ -392,6 +393,7 @@ pub mod prelude {
         // Auth
         BasicAuth,
         BearerToken,
+        CleanupFn,
         Cookie,
         Cors,
         CorsConfig,
@@ -402,8 +404,10 @@ pub mod prelude {
         DependencyOverrides,
         DependencyScope,
         Depends,
+        DependsCleanup,
         DependsConfig,
         FromDependency,
+        FromDependencyWithCleanup,
         FromRequest,
         Header,
         HttpError,
