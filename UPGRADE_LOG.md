@@ -164,16 +164,41 @@ macOS release binary compiled successfully, then artifact creation failed
 with `ENOTFOUND`; this is not a successful release job or an all-green CI run.
 [Current-graph CI](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37357680149).
 The subsequently implemented typed OpenAPI and HTTPS redirect capabilities
-(`fr-z7jj`, `fr-e7f9`) require fresh source validation; these dependency-graph
-results do not certify that new code. The current-graph resolver dry run proposes only the held
+(`fr-z7jj`, `fr-e7f9`) passed fresh source validation on October 6 UTC, with
+the seven workspace gates: default and all-feature all-target checks and
+strict Clippy, the full all-feature suite, documentation, and actual Rust
+1.95. Normal profiles and compiler deadlines remain unchanged. The full
+suite ran 2,575 ordinary tests and 51 doctests successfully, zero failures,
+and 188 existing ignores. All 14 macro consumers, the expanded raw-identifier
+query case, all three real TCP redirect regressions, and the mismatched
+response-model compile-fail doctest passed. A separate `--show-output`
+doctest confirmed the intended `ResponseProduces<u32>` mismatch was the
+sole compiler error. All eight documentation indexes were retrieved. An
+additional documentation run passed with `-D warnings` set explicitly using
+Cargo's forced `env.RUSTDOCFLAGS` configuration; the remote command and
+terminal receipt make that strict gate directly reviewable.
+The first full-suite attempt failed seven stale converter/wildcard path
+lookups. Primary OpenAPI rules and independent source review justified
+canonical document keys; route constructors and all existing semantic
+assertions remain, with additional raw-key rejection and mandatory path
+parameter checks. Earlier compiler, Clippy, deadline, cancellation, and
+disk-write failures remain retained; they are not passing attempts.
+Fresh hosted CI on the final source remains required for `bd-3ffo`.
+
+The current-graph resolver dry run proposes only the held
 seven-package wasm family plus Tokio; all 48 tested targets remain in the
 312-package lockfile, with none of the seven forbidden runtime crates.
 The October 5 audit again passed with zero known vulnerabilities, no advisory
 ignores, and the same two unmaintained notices. Local formatting and whitespace
 checks passed. UBS scoped to the changed lockfile/log/bead files returned 0
 (one detected Rust input, four informational items, no critical/warning
-matches). No Rust source changed in this continuation; this targeted result
+matches). No Rust source changed in that dependency-only continuation; its targeted result
 does not supersede the earlier source scan findings or certify security.
+The subsequent 16-file capability source scan returned 1: 171 critical,
+2,340 warning, and 821 informational pattern matches. Changed redirect
+authority/target sinks and test-only matches were inspected; no scanner
+suppression was added. This is neither an exhaustive finding audit nor a
+clean security certificate. Compilation checks ran exclusively through RCH.
 
 The latest generic-array 0.14.9 is excluded by the upstream
 [crypto-common 0.1.7 manifest](https://docs.rs/crate/crypto-common/0.1.7/source/Cargo.toml),
