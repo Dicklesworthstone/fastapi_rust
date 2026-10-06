@@ -530,6 +530,11 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
     // Collect types that need FromRequest validation
     let extractable_types = get_extractable_types(fn_inputs);
 
+    let security_calls: Vec<_> = extractable_types
+        .iter()
+        .map(|ty| quote! { .security_schema::<#ty>() })
+        .collect();
+
     // Generate compile-time assertions for FromRequest
     // These assertions will fail to compile if a type doesn't implement FromRequest
     let from_request_checks: Vec<proc_macro2::TokenStream> = extractable_types
@@ -880,6 +885,7 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
             #request_schema_call
             #(#typed_response_calls)*
             #(#parameter_calls)*
+            #(#security_calls)*
         }
 
         // Static registration for route discovery

@@ -732,6 +732,15 @@ Current parity status and the concrete gap list are tracked in:
   constraints on those converters are not fully described. Tuple aliases,
   recursive/custom schema references, directional serde attributes, arbitrary extractor
   metadata remain outside this coverage.
+  `BearerToken`, `BasicAuth`, and `OAuth2PasswordBearer` register security schemes
+  and operation requirements through their extractor traits, including type aliases.
+  Default OAuth2 documentation uses `/token` and empty scopes. Required extractors
+  form a conjunction; optional-only authentication includes an anonymous alternative.
+  Manual route requirements retain their alternatives and scopes, with explicit
+  definitions registered through `RouteEntry::security_scheme`. Conflicting or
+  missing definitions are rejected during document construction. These declarations
+  do not validate tokens/passwords, enforce OAuth scopes, or create token endpoints;
+  custom configuration is explicit metadata.
 - **HTTPS redirects**: use the server-admitted effective authority, preserve encoded
   origin targets and queries, and support bracketed IPv6 and configured HTTPS ports.
   Malformed authority/target inputs return 400 without a redirect. Proxy scheme-header

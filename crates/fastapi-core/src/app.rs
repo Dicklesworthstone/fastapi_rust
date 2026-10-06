@@ -230,6 +230,8 @@ struct RouteOpenApi {
     responses: HashMap<String, fastapi_openapi::Response>,
     parameters: Vec<fastapi_openapi::Parameter>,
     path_schemas: HashMap<String, fastapi_openapi::Schema>,
+    security: Vec<fastapi_openapi::SecurityMetadata>,
+    security_schemes: HashMap<String, fastapi_openapi::SecurityScheme>,
 }
 
 impl RouteOpenApi {
@@ -273,6 +275,53 @@ impl RouteOpenApi {
             }
         }
         operation.parameters.extend(self.parameters.clone());
+        self.apply_security(operation);
+    }
+
+    fn apply_security(&self, operation: &mut fastapi_openapi::Operation) {
+        if self.security.is_empty() {
+            return;
+        }
+        let mut required = fastapi_openapi::SecurityRequirement::new();
+        for metadata in self.security.iter().filter(|metadata| metadata.required) {
+            let scopes = required.entry(metadata.name.clone()).or_default();
+            for scope in &metadata.scopes {
+                if !scopes.contains(scope) {
+                    scopes.push(scope.clone());
+                }
+            }
+        }
+        if !required.is_empty() {
+            if operation.security.is_empty() {
+                operation.security.push(required);
+            } else {
+                for alternative in &mut operation.security {
+                    for (name, required_scopes) in &required {
+                        let scopes = alternative.entry(name.clone()).or_default();
+                        for scope in required_scopes {
+                            if !scopes.contains(scope) {
+                                scopes.push(scope.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        } else if operation.security.is_empty() {
+            // Optional extractors cannot restrict admission. Each scheme is an
+            // alternative to anonymous access, not another mandatory credential.
+            operation
+                .security
+                .push(fastapi_openapi::SecurityRequirement::new());
+            for metadata in &self.security {
+                let alternative = fastapi_openapi::SecurityRequirement::from([(
+                    metadata.name.clone(),
+                    metadata.scopes.clone(),
+                )]);
+                if !operation.security.contains(&alternative) {
+                    operation.security.push(alternative);
+                }
+            }
+        }
     }
 }
 
@@ -419,6 +468,32 @@ impl RouteEntry {
                 RouteOpenApi::parameter_schema(field_schema),
             );
         }
+        self
+    }
+
+    /// Describe authentication from an extractor, including qualified types and aliases.
+    /// Optional extractors permit anonymous access unless another extractor or
+    /// an explicitly declared route requirement makes authentication mandatory.
+    #[must_use]
+    pub fn security_schema<T: crate::extract::FromRequest>(mut self) -> Self {
+        if let Some(metadata) = T::security_metadata() {
+            self.openapi.security.push(metadata);
+        }
+        self
+    }
+
+    /// Register an explicit scheme definition for this route's security metadata.
+    ///
+    /// This overrides an inferred definition with the same name for this entry.
+    /// Every route using that name must agree on the definition. Requirements
+    /// and runtime authentication behavior are unchanged by this declaration.
+    #[must_use]
+    pub fn security_scheme(
+        mut self,
+        name: impl Into<String>,
+        scheme: fastapi_openapi::SecurityScheme,
+    ) -> Self {
+        self.openapi.security_schemes.insert(name.into(), scheme);
         self
     }
 
@@ -1634,6 +1709,17 @@ impl AppBuilder {
             for (name, schema) in &entry.openapi.schemas {
                 builder.registry().register(name, schema.clone());
             }
+            for metadata in &entry.openapi.security {
+                let scheme = entry
+                    .openapi
+                    .security_schemes
+                    .get(&metadata.name)
+                    .unwrap_or(&metadata.scheme);
+                builder = builder.security_scheme(&metadata.name, scheme.clone());
+            }
+            for (name, scheme) in &entry.openapi.security_schemes {
+                builder = builder.security_scheme(name, scheme.clone());
+            }
             let fallback = entry.route_meta().is_none().then(|| {
                 Route::new(entry.method, &entry.path).operation_id(format!(
                     "{}_{}",
@@ -2103,6 +2189,61 @@ mod tests {
     fn test_context() -> RequestContext {
         let cx = asupersync::Cx::for_testing();
         RequestContext::new(cx, 1)
+    }
+
+    #[test]
+    fn typed_security_keeps_manual_alternatives_and_merges_required_scopes() {
+        use fastapi_openapi::{Operation, SecurityMetadata, SecurityScheme};
+
+        let mut required = SecurityMetadata::new("OAuth", SecurityScheme::password("/token"));
+        required.scopes = vec!["write".to_owned(), "read".to_owned()];
+        let mut optional = SecurityMetadata::new("Basic", SecurityScheme::basic());
+        optional.required = false;
+        let metadata = RouteOpenApi {
+            security: vec![required, optional.clone()],
+            ..Default::default()
+        };
+        let mut operation = Operation {
+            security: vec![
+                HashMap::from([("OAuth".to_owned(), vec!["read".to_owned()])]),
+                HashMap::from([("ApiKey".to_owned(), Vec::new())]),
+            ],
+            ..Default::default()
+        };
+        metadata.apply(&mut operation);
+        assert_eq!(operation.security.len(), 2);
+        assert_eq!(
+            operation.security[0],
+            HashMap::from([(
+                "OAuth".to_owned(),
+                vec!["read".to_owned(), "write".to_owned()]
+            )]),
+        );
+        assert_eq!(
+            operation.security[1],
+            HashMap::from([
+                ("ApiKey".to_owned(), Vec::new()),
+                (
+                    "OAuth".to_owned(),
+                    vec!["write".to_owned(), "read".to_owned()]
+                ),
+            ]),
+        );
+
+        // An optional extractor also leaves a solely manual requirement mandatory.
+        let metadata = RouteOpenApi {
+            security: vec![optional],
+            ..Default::default()
+        };
+        let mut operation = Operation {
+            security: vec![HashMap::from([("ApiKey".to_owned(), Vec::new())])],
+            ..Default::default()
+        };
+        metadata.apply(&mut operation);
+        assert_eq!(
+            operation.security,
+            [HashMap::from([("ApiKey".to_owned(), Vec::new())])]
+        );
     }
 
     #[test]

@@ -208,6 +208,14 @@ pub trait FromRequest: Sized {
     /// Error type when extraction fails.
     type Error: IntoResponse;
 
+    /// Describe authentication performed by this extractor for OpenAPI.
+    ///
+    /// Route registration calls this once; it does not extract credentials or
+    /// authorize requests. Ordinary extractors have no security metadata.
+    fn security_metadata() -> Option<fastapi_openapi::SecurityMetadata> {
+        None
+    }
+
     /// Extract a value from the request.
     ///
     /// # Parameters
@@ -477,6 +485,13 @@ mod multipart_extractor_tests {
 // Implement for Option to make extractors optional
 impl<T: FromRequest> FromRequest for Option<T> {
     type Error = std::convert::Infallible;
+
+    fn security_metadata() -> Option<fastapi_openapi::SecurityMetadata> {
+        T::security_metadata().map(|mut metadata| {
+            metadata.required = false;
+            metadata
+        })
+    }
 
     async fn from_request(ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
         Ok(T::from_request(ctx, req).await.ok())
@@ -4930,6 +4945,13 @@ impl IntoResponse for OAuth2BearerError {
 impl FromRequest for OAuth2PasswordBearer {
     type Error = OAuth2BearerError;
 
+    fn security_metadata() -> Option<fastapi_openapi::SecurityMetadata> {
+        Some(fastapi_openapi::SecurityMetadata::new(
+            "OAuth2PasswordBearer",
+            fastapi_openapi::SecurityScheme::password("/token"),
+        ))
+    }
+
     async fn from_request(_ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
         // Get the Authorization header
         let auth_header = req
@@ -5183,6 +5205,13 @@ impl IntoResponse for BasicAuthError {
 impl FromRequest for BasicAuth {
     type Error = BasicAuthError;
 
+    fn security_metadata() -> Option<fastapi_openapi::SecurityMetadata> {
+        Some(fastapi_openapi::SecurityMetadata::new(
+            "BasicAuth",
+            fastapi_openapi::SecurityScheme::basic(),
+        ))
+    }
+
     async fn from_request(_ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
         // Get the Authorization header
         let auth_header = req
@@ -5333,6 +5362,13 @@ impl IntoResponse for BearerTokenError {
 
 impl FromRequest for BearerToken {
     type Error = BearerTokenError;
+
+    fn security_metadata() -> Option<fastapi_openapi::SecurityMetadata> {
+        Some(fastapi_openapi::SecurityMetadata::new(
+            "BearerToken",
+            fastapi_openapi::SecurityScheme::bearer(),
+        ))
+    }
 
     async fn from_request(_ctx: &RequestContext, req: &mut Request) -> Result<Self, Self::Error> {
         let auth_header = req

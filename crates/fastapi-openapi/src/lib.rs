@@ -42,7 +42,8 @@ pub use schema::{
     RefSchema, Schema, SchemaType,
 };
 pub use spec::{
-    Components, Example, HasParamMeta, Info, MediaType, OpenApi, OpenApiBuilder, Operation,
-    ParamMeta, Parameter, ParameterLocation, PathItem, RequestBody, Response, SchemaRegistry,
-    SchemaRegistryMut, Server, Tag,
+    ApiKeyLocation, Components, Example, HasParamMeta, Info, MediaType, OAuthFlows,
+    OAuthPasswordFlow, OpenApi, OpenApiBuilder, Operation, ParamMeta, Parameter, ParameterLocation,
+    PathItem, RequestBody, Response, SchemaRegistry, SchemaRegistryMut, SecurityMetadata,
+    SecurityRequirement, SecurityScheme, Server, Tag,
 };

@@ -158,6 +158,419 @@ impl fastapi_rust::extract::HeaderName for PageHeader {
     const NAME: &'static str = "X-Page";
 }
 
+#[get("/protected/bearer")]
+async fn protected_bearer(_cx: &Cx, token: BearerToken) -> Json<String> {
+    Json(token.token().to_owned())
+}
+
+#[test]
+fn required_bearer_extraction_has_served_security_metadata() {
+    let client = TestClient::new(
+        App::builder()
+            .openapi(fastapi_rust::OpenApiConfig::new())
+            .route_entry(protected_bearer_route())
+            .build(),
+    );
+    let missing = client.get("/protected/bearer").send();
+    assert_eq!(missing.status_code(), 401);
+    assert_eq!(missing.header_str("www-authenticate"), Some("Bearer"));
+    let wrong_scheme = client
+        .get("/protected/bearer")
+        .header("authorization", "Basic dXNlcjpwYXNz")
+        .send();
+    assert_eq!(wrong_scheme.status_code(), 401);
+    assert_eq!(wrong_scheme.header_str("www-authenticate"), Some("Bearer"));
+    let valid = client
+        .get("/protected/bearer")
+        .header("authorization", "Bearer opaque-token")
+        .send();
+    assert_eq!(valid.status_code(), 200);
+    assert_eq!(
+        valid.json::<String>().expect("extracted token"),
+        "opaque-token"
+    );
+    let document = client
+        .get("/openapi.json")
+        .send()
+        .json::<serde_json::Value>()
+        .expect("served OpenAPI");
+    assert_eq!(
+        document["paths"]["/protected/bearer"]["get"]["security"],
+        serde_json::json!([{ "BearerToken": [] }]),
+    );
+    assert_eq!(
+        document["components"]["securitySchemes"]["BearerToken"],
+        serde_json::json!({ "type": "http", "scheme": "bearer" }),
+    );
+}
+
+type AuthAlias = fastapi_rust::BearerToken;
+
+#[get("/protected/basic")]
+async fn protected_basic(_cx: &Cx, credentials: fastapi_rust::BasicAuth) -> Json<String> {
+    Json(credentials.username)
+}
+
+#[get("/protected/oauth")]
+async fn protected_oauth(_cx: &Cx, token: OAuth2PasswordBearer) -> Json<String> {
+    Json(token.token().to_owned())
+}
+
+#[get("/protected/alias")]
+async fn protected_alias(_cx: &Cx, token: AuthAlias) -> Json<String> {
+    Json(token.token().to_owned())
+}
+
+#[get("/optional/auth")]
+async fn optional_auth(_cx: &Cx, token: Option<AuthAlias>) -> Json<Option<String>> {
+    Json(token.map(|token| token.token().to_owned()))
+}
+
+#[get("/optional/basic")]
+async fn optional_basic(_cx: &Cx, credentials: Option<BasicAuth>) -> Json<Option<String>> {
+    Json(credentials.map(|credentials| credentials.username))
+}
+
+#[get("/protected/mixed")]
+async fn mixed_auth(_cx: &Cx, token: AuthAlias, credentials: Option<BasicAuth>) -> Json<String> {
+    Json(format!(
+        "{}:{}",
+        token.token(),
+        credentials.map_or_else(String::new, |credentials| credentials.username),
+    ))
+}
+
+#[get("/protected/conjunction")]
+async fn conjoined_auth(_cx: &Cx, token: AuthAlias, oauth: OAuth2PasswordBearer) -> Json<String> {
+    Json(format!("{}:{}", token.token(), oauth.token()))
+}
+
+fn auth_app() -> App {
+    App::builder()
+        .openapi(fastapi_rust::OpenApiConfig::new())
+        .route_entry(protected_bearer_route())
+        .route_entry(protected_basic_route())
+        .route_entry(protected_oauth_route())
+        .route_entry(protected_alias_route())
+        .route_entry(optional_auth_route())
+        .route_entry(optional_basic_route())
+        .route_entry(mixed_auth_route())
+        .route_entry(conjoined_auth_route())
+        .route_entry(get_item_route())
+        .build()
+}
+
+#[test]
+fn builtin_authentication_schemes_match_required_runtime_extraction() {
+    let client = TestClient::new(auth_app());
+    for (path, header, value, scheme, challenge) in [
+        (
+            "/protected/basic",
+            "Basic dXNlcjpwYXNz",
+            "user",
+            "BasicAuth",
+            "Basic realm=\"api\"",
+        ),
+        (
+            "/protected/oauth",
+            "Bearer oauth-token",
+            "oauth-token",
+            "OAuth2PasswordBearer",
+            "Bearer",
+        ),
+        (
+            "/protected/alias",
+            "Bearer aliased-token",
+            "aliased-token",
+            "BearerToken",
+            "Bearer",
+        ),
+    ] {
+        let missing = client.get(path).send();
+        assert_eq!(missing.status_code(), 401);
+        assert_eq!(missing.header_str("www-authenticate"), Some(challenge));
+        let valid = client.get(path).header("authorization", header).send();
+        assert_eq!(valid.status_code(), 200);
+        assert_eq!(
+            valid.json::<String>().expect("extracted credentials"),
+            value
+        );
+        let document = client
+            .get("/openapi.json")
+            .send()
+            .json::<serde_json::Value>()
+            .expect("served auth metadata");
+        assert_eq!(
+            document["paths"][path]["get"]["security"],
+            serde_json::json!([{ (scheme): [] }]),
+        );
+    }
+    for header in ["Bearer wrong-scheme", "Basic !!!!", "Basic dXNlcg=="] {
+        let invalid = client
+            .get("/protected/basic")
+            .header("authorization", header)
+            .send();
+        assert_eq!(invalid.status_code(), 401);
+        assert_eq!(
+            invalid.header_str("www-authenticate"),
+            Some("Basic realm=\"api\"")
+        );
+    }
+    for header in ["Basic dXNlcjpwYXNz", "Bearer"] {
+        let invalid = client
+            .get("/protected/oauth")
+            .header("authorization", header)
+            .send();
+        assert_eq!(invalid.status_code(), 401);
+        assert_eq!(invalid.header_str("www-authenticate"), Some("Bearer"));
+    }
+    let document = client
+        .get("/openapi.json")
+        .send()
+        .json::<serde_json::Value>()
+        .expect("served schemes");
+    let schemes = document["components"]["securitySchemes"]
+        .as_object()
+        .expect("scheme map");
+    assert_eq!(schemes.len(), 3);
+    assert_eq!(
+        schemes["BasicAuth"],
+        serde_json::json!({"type": "http", "scheme": "basic"})
+    );
+    assert_eq!(
+        schemes["BearerToken"],
+        serde_json::json!({"type": "http", "scheme": "bearer"})
+    );
+    assert_eq!(
+        schemes["OAuth2PasswordBearer"],
+        serde_json::json!({"type": "oauth2", "flows": {"password": {"tokenUrl": "/token", "scopes": {}}}}),
+    );
+    assert!(
+        document["paths"]["/items/{id}"]["get"]
+            .get("security")
+            .is_none()
+    );
+}
+
+#[test]
+fn optional_authentication_documents_anonymous_access_without_weakening_required_auth() {
+    let client = TestClient::new(auth_app());
+    for (path, scheme, valid_header, expected, malformed) in [
+        (
+            "/optional/auth",
+            "BearerToken",
+            "Bearer optional-token",
+            "optional-token",
+            "Basic invalid",
+        ),
+        (
+            "/optional/basic",
+            "BasicAuth",
+            "Basic dXNlcjpwYXNz",
+            "user",
+            "Basic !!!!",
+        ),
+    ] {
+        for header in [None, Some(malformed)] {
+            let response = match header {
+                Some(header) => client.get(path).header("authorization", header).send(),
+                None => client.get(path).send(),
+            };
+            assert_eq!(response.status_code(), 200);
+            assert_eq!(
+                response
+                    .json::<Option<String>>()
+                    .expect("optional credentials"),
+                None
+            );
+        }
+        let valid = client
+            .get(path)
+            .header("authorization", valid_header)
+            .send();
+        assert_eq!(valid.status_code(), 200);
+        assert_eq!(
+            valid
+                .json::<Option<String>>()
+                .expect("optional valid credentials"),
+            Some(expected.to_owned())
+        );
+        let document = client
+            .get("/openapi.json")
+            .send()
+            .json::<serde_json::Value>()
+            .expect("optional metadata");
+        assert_eq!(
+            document["paths"][path]["get"]["security"],
+            serde_json::json!([{}, {(scheme): []}])
+        );
+    }
+    assert_eq!(client.get("/protected/mixed").send().status_code(), 401);
+    assert_eq!(
+        client
+            .get("/protected/mixed")
+            .header("authorization", "Basic dXNlcjpwYXNz")
+            .send()
+            .status_code(),
+        401,
+    );
+    let valid = client
+        .get("/protected/mixed")
+        .header("authorization", "Bearer required-token")
+        .send();
+    assert_eq!(valid.status_code(), 200);
+    assert_eq!(
+        valid
+            .json::<String>()
+            .expect("required token with absent optional Basic"),
+        "required-token:"
+    );
+    let document = client
+        .get("/openapi.json")
+        .send()
+        .json::<serde_json::Value>()
+        .expect("mixed metadata");
+    assert_eq!(
+        document["paths"]["/protected/mixed"]["get"]["security"],
+        serde_json::json!([{"BearerToken": []}])
+    );
+}
+
+#[test]
+fn explicit_manual_security_definitions_and_oauth_metadata_are_served() {
+    use fastapi_rust::openapi::{ApiKeyLocation, OAuthFlows, OAuthPasswordFlow, SecurityScheme};
+
+    let manual = fastapi_rust::fastapi_core::RouteEntry::from_route(
+        fastapi_rust::fastapi_router::Route::new(Method::Get, "/manual/auth")
+            .security_scheme("ApiKey"),
+        |_ctx, request| {
+            let response = if request
+                .headers()
+                .get("x-api-key")
+                .is_some_and(|key| !key.is_empty())
+            {
+                Response::ok()
+            } else {
+                Response::with_status(StatusCode::UNAUTHORIZED)
+            };
+            Box::pin(std::future::ready(response))
+        },
+    )
+    .security_scheme(
+        "ApiKey",
+        SecurityScheme::ApiKey {
+            name: "x-api-key".to_owned(),
+            location: ApiKeyLocation::Header,
+            description: Some("Application-provided API key".to_owned()),
+        },
+    );
+    let oauth = protected_oauth_route().security_scheme(
+        "OAuth2PasswordBearer",
+        SecurityScheme::OAuth2 {
+            flows: OAuthFlows {
+                password: OAuthPasswordFlow {
+                    token_url: "/sessions/token".to_owned(),
+                    refresh_url: Some("/sessions/refresh".to_owned()),
+                    scopes: std::collections::HashMap::from([(
+                        "read:reports".to_owned(),
+                        "Read reports".to_owned(),
+                    )]),
+                },
+            },
+            description: Some("Explicit application metadata".to_owned()),
+        },
+    );
+    let client = TestClient::new(
+        App::builder()
+            .openapi(fastapi_rust::OpenApiConfig::new())
+            .route_entry(manual)
+            .route_entry(oauth)
+            .build(),
+    );
+    assert_eq!(client.get("/manual/auth").send().status_code(), 401);
+    assert_eq!(
+        client
+            .get("/manual/auth")
+            .header("x-api-key", "")
+            .send()
+            .status_code(),
+        401
+    );
+    assert_eq!(
+        client
+            .get("/manual/auth")
+            .header("x-api-key", "application-key")
+            .send()
+            .status_code(),
+        200
+    );
+    let valid = client
+        .get("/protected/oauth")
+        .header("authorization", "Bearer opaque-token")
+        .send();
+    assert_eq!(valid.status_code(), 200);
+    assert_eq!(
+        valid.json::<String>().expect("unchanged OAuth extraction"),
+        "opaque-token"
+    );
+    let document = client
+        .get("/openapi.json")
+        .send()
+        .json::<serde_json::Value>()
+        .expect("explicit metadata");
+    assert_eq!(
+        document["paths"]["/manual/auth"]["get"]["security"],
+        serde_json::json!([{"ApiKey": []}])
+    );
+    let schemes = &document["components"]["securitySchemes"];
+    assert_eq!(schemes["ApiKey"]["type"], "apiKey");
+    assert_eq!(schemes["ApiKey"]["name"], "x-api-key");
+    assert_eq!(schemes["ApiKey"]["in"], "header");
+    assert_eq!(
+        schemes["OAuth2PasswordBearer"]["flows"]["password"]["tokenUrl"],
+        "/sessions/token"
+    );
+    assert_eq!(
+        schemes["OAuth2PasswordBearer"]["flows"]["password"]["refreshUrl"],
+        "/sessions/refresh"
+    );
+    assert_eq!(
+        schemes["OAuth2PasswordBearer"]["flows"]["password"]["scopes"]["read:reports"],
+        "Read reports"
+    );
+    assert_eq!(
+        document["paths"]["/protected/oauth"]["get"]["security"],
+        serde_json::json!([{"OAuth2PasswordBearer": []}])
+    );
+}
+
+#[test]
+fn required_authentication_extractors_form_a_conjunction() {
+    let client = TestClient::new(auth_app());
+    assert_eq!(
+        client.get("/protected/conjunction").send().status_code(),
+        401
+    );
+    let valid = client
+        .get("/protected/conjunction")
+        .header("authorization", "Bearer shared-token")
+        .send();
+    assert_eq!(valid.status_code(), 200);
+    assert_eq!(
+        valid.json::<String>().expect("both extractors ran"),
+        "shared-token:shared-token"
+    );
+    let document = client
+        .get("/openapi.json")
+        .send()
+        .json::<serde_json::Value>()
+        .expect("conjoined metadata");
+    assert_eq!(
+        document["paths"]["/protected/conjunction"]["get"]["security"],
+        serde_json::json!([{"BearerToken": [], "OAuth2PasswordBearer": []}]),
+    );
+}
+
 struct TraceHeader;
 impl fastapi_rust::extract::HeaderName for TraceHeader {
     const NAME: &'static str = "X-Trace";

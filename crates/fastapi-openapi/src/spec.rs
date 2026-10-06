@@ -137,6 +137,10 @@ pub struct Operation {
     pub request_body: Option<RequestBody>,
     /// Responses.
     pub responses: HashMap<String, Response>,
+    /// Alternative security requirements (OR), with schemes inside each object combined as AND.
+    /// An empty requirement object allows anonymous access.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub security: Vec<SecurityRequirement>,
     /// Deprecated flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub deprecated: bool,
@@ -432,6 +436,164 @@ pub struct Components {
     /// Schema definitions.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub schemas: HashMap<String, Schema>,
+    /// Named security scheme definitions used by operation requirements.
+    #[serde(
+        rename = "securitySchemes",
+        default,
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub security_schemes: HashMap<String, SecurityScheme>,
+}
+
+/// One security requirement object: all named schemes must be satisfied.
+///
+/// Entries in an operation's requirement array are alternatives. An empty
+/// object represents anonymous access. These definitions document security;
+/// they do not validate credentials or enforce authorization.
+pub type SecurityRequirement = HashMap<String, Vec<String>>;
+
+/// A location supported by an OpenAPI API key security scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiKeyLocation {
+    /// HTTP header.
+    Header,
+    /// Query string parameter.
+    Query,
+    /// Cookie value.
+    Cookie,
+}
+
+/// Supported OpenAPI security scheme definitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SecurityScheme {
+    /// HTTP authentication, including Basic and Bearer schemes.
+    #[serde(rename = "http")]
+    Http {
+        /// HTTP authentication scheme name.
+        scheme: String,
+        /// Optional documentation hint for the bearer token format.
+        #[serde(
+            rename = "bearerFormat",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        bearer_format: Option<String>,
+        /// Scheme description.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// API key carried in a header, query parameter or cookie.
+    #[serde(rename = "apiKey")]
+    ApiKey {
+        /// Name of the header, query parameter or cookie.
+        name: String,
+        /// Location carrying the API key.
+        #[serde(rename = "in")]
+        location: ApiKeyLocation,
+        /// Scheme description.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// OAuth2 password-flow documentation.
+    #[serde(rename = "oauth2")]
+    OAuth2 {
+        /// Supported OAuth2 flow definitions.
+        flows: OAuthFlows,
+        /// Scheme description.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+}
+
+impl SecurityScheme {
+    /// Describe HTTP Basic authentication.
+    #[must_use]
+    pub fn basic() -> Self {
+        Self::Http {
+            scheme: "basic".to_string(),
+            bearer_format: None,
+            description: None,
+        }
+    }
+
+    /// Describe HTTP Bearer authentication without assuming a token format.
+    #[must_use]
+    pub fn bearer() -> Self {
+        Self::Http {
+            scheme: "bearer".to_string(),
+            bearer_format: None,
+            description: None,
+        }
+    }
+
+    /// Describe an OAuth2 password flow with no scopes or refresh URL.
+    ///
+    /// This declares metadata only; it does not create a token endpoint.
+    #[must_use]
+    pub fn password(token_url: impl Into<String>) -> Self {
+        Self::OAuth2 {
+            flows: OAuthFlows {
+                password: OAuthPasswordFlow {
+                    token_url: token_url.into(),
+                    refresh_url: None,
+                    scopes: HashMap::new(),
+                },
+            },
+            description: None,
+        }
+    }
+}
+
+/// OAuth2 flows supported by this model: the password flow only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthFlows {
+    /// Password grant flow.
+    pub password: OAuthPasswordFlow,
+}
+
+/// OpenAPI metadata for an OAuth2 password flow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthPasswordFlow {
+    /// Required token endpoint URL.
+    #[serde(rename = "tokenUrl")]
+    pub token_url: String,
+    /// Optional refresh endpoint URL.
+    #[serde(
+        rename = "refreshUrl",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub refresh_url: Option<String>,
+    /// Available scopes and their descriptions, including an explicit empty map.
+    pub scopes: HashMap<String, String>,
+}
+
+/// Registration-time extractor metadata; this is not a serialized OpenAPI object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityMetadata {
+    /// Component name referenced by this extractor.
+    pub name: String,
+    /// Corresponding scheme definition.
+    pub scheme: SecurityScheme,
+    /// Required OAuth2 scopes, or an empty list for unscoped authentication.
+    pub scopes: Vec<String>,
+    /// Whether this extractor requires successful authentication extraction.
+    pub required: bool,
+}
+
+impl SecurityMetadata {
+    /// Create required extractor metadata with no required scopes.
+    #[must_use]
+    pub fn new(name: impl Into<String>, scheme: SecurityScheme) -> Self {
+        Self {
+            name: name.into(),
+            scheme,
+            scopes: Vec::new(),
+            required: true,
+        }
+    }
 }
 
 /// Schema registry for `#/components/schemas`.
@@ -805,6 +967,262 @@ mod serialization_tests {
         assert!(json.contains(r#""description":"Example description""#));
         assert!(json.contains(r#""value""#));
     }
+
+    #[test]
+    fn http_security_schemes_use_openapi_wire_names_and_round_trip() {
+        for (scheme, expected) in [
+            (
+                SecurityScheme::basic(),
+                serde_json::json!({"type": "http", "scheme": "basic"}),
+            ),
+            (
+                SecurityScheme::bearer(),
+                serde_json::json!({"type": "http", "scheme": "bearer"}),
+            ),
+            (
+                SecurityScheme::Http {
+                    scheme: "bearer".to_string(),
+                    bearer_format: Some("JWT".to_string()),
+                    description: Some("Caller-supplied access token".to_string()),
+                },
+                serde_json::json!({
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                    "description": "Caller-supplied access token"
+                }),
+            ),
+        ] {
+            let json = serde_json::to_value(&scheme).expect("HTTP scheme serialization");
+            assert_eq!(json, expected);
+            let decoded: SecurityScheme =
+                serde_json::from_value(json).expect("HTTP scheme deserialization");
+            assert_eq!(decoded, scheme);
+        }
+    }
+
+    #[test]
+    fn api_key_security_schemes_accept_only_header_query_and_cookie_locations() {
+        for (location, wire_location) in [
+            (ApiKeyLocation::Header, "header"),
+            (ApiKeyLocation::Query, "query"),
+            (ApiKeyLocation::Cookie, "cookie"),
+        ] {
+            let scheme = SecurityScheme::ApiKey {
+                name: "api_key".to_string(),
+                location,
+                description: None,
+            };
+            let json = serde_json::to_value(&scheme).expect("API key scheme serialization");
+            assert_eq!(
+                json,
+                serde_json::json!({"type": "apiKey", "name": "api_key", "in": wire_location})
+            );
+            let decoded: SecurityScheme =
+                serde_json::from_value(json).expect("API key scheme deserialization");
+            assert_eq!(decoded, scheme);
+        }
+        assert!(
+            serde_json::from_value::<SecurityScheme>(serde_json::json!({
+                "type": "apiKey", "name": "api_key", "in": "path"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn oauth_password_flow_retains_empty_scopes_and_required_token_url() {
+        let scheme = SecurityScheme::password("/token");
+        let json = serde_json::to_value(&scheme).expect("OAuth2 scheme serialization");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "oauth2",
+                "flows": {"password": {"tokenUrl": "/token", "scopes": {}}}
+            })
+        );
+        let decoded: SecurityScheme =
+            serde_json::from_value(json).expect("OAuth2 scheme deserialization");
+        assert_eq!(decoded, scheme);
+        for invalid in [
+            serde_json::json!({"type": "oauth2", "flows": {"password": {"scopes": {}}}}),
+            serde_json::json!({"type": "oauth2", "flows": {"password": {"tokenUrl": "/token"}}}),
+        ] {
+            assert!(serde_json::from_value::<SecurityScheme>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn oauth_password_flow_round_trips_scopes_refresh_url_and_description() {
+        let scheme = SecurityScheme::OAuth2 {
+            flows: OAuthFlows {
+                password: OAuthPasswordFlow {
+                    token_url: "/auth/token".to_string(),
+                    refresh_url: Some("/auth/refresh".to_string()),
+                    scopes: HashMap::from([("read:items".to_string(), "Read items".to_string())]),
+                },
+            },
+            description: Some("Item access".to_string()),
+        };
+        let json = serde_json::to_value(&scheme).expect("OAuth2 scheme serialization");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "oauth2",
+                "description": "Item access",
+                "flows": {"password": {
+                    "tokenUrl": "/auth/token",
+                    "refreshUrl": "/auth/refresh",
+                    "scopes": {"read:items": "Read items"}
+                }}
+            })
+        );
+        let decoded: SecurityScheme =
+            serde_json::from_value(json).expect("OAuth2 scheme deserialization");
+        assert_eq!(decoded, scheme);
+    }
+
+    #[test]
+    fn operation_security_preserves_conjunctions_alternatives_and_anonymous_access() {
+        let operation = Operation {
+            security: vec![
+                HashMap::from([
+                    ("AccessToken".to_string(), Vec::new()),
+                    ("ApiKey".to_string(), Vec::new()),
+                ]),
+                HashMap::from([("PasswordAuth".to_string(), vec!["read:items".to_string()])]),
+                HashMap::new(),
+            ],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&operation).expect("operation serialization");
+        assert_eq!(
+            json["security"],
+            serde_json::json!([
+                {"AccessToken": [], "ApiKey": []},
+                {"PasswordAuth": ["read:items"]},
+                {}
+            ])
+        );
+        let decoded: Operation = serde_json::from_value(json).expect("operation deserialization");
+        assert_eq!(decoded.security, operation.security);
+        let unprotected = serde_json::to_value(Operation::default()).expect("default operation");
+        assert!(unprotected.get("security").is_none());
+    }
+
+    #[test]
+    fn scheme_only_components_survive_build_and_round_trip() {
+        let document = OpenApiBuilder::new("Security API", "1")
+            .security_scheme("AccessToken", SecurityScheme::bearer())
+            .build();
+        let components = document
+            .components
+            .as_ref()
+            .expect("scheme-only components");
+        assert!(components.schemas.is_empty());
+        assert_eq!(components.security_schemes.len(), 1);
+        let json = serde_json::to_value(&document).expect("document serialization");
+        assert_eq!(
+            json["components"]["securitySchemes"]["AccessToken"],
+            serde_json::json!({"type": "http", "scheme": "bearer"})
+        );
+        assert!(json["components"].get("schemas").is_none());
+        assert!(json["components"].get("security_schemes").is_none());
+        let decoded: OpenApi = serde_json::from_value(json).expect("document deserialization");
+        assert_eq!(
+            decoded
+                .components
+                .expect("decoded components")
+                .security_schemes,
+            components.security_schemes
+        );
+        assert!(
+            OpenApiBuilder::new("Public API", "1")
+                .build()
+                .components
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn duplicate_identical_security_schemes_preserve_existing_schema_components() {
+        let document = OpenApiBuilder::new("Security API", "1")
+            .schema("Item", Schema::integer(Some("int64")))
+            .security_scheme("AccessToken", SecurityScheme::bearer())
+            .security_scheme("AccessToken", SecurityScheme::bearer())
+            .build();
+        let components = document.components.expect("schema and security components");
+        assert_eq!(components.schemas.len(), 1);
+        assert!(components.schemas.contains_key("Item"));
+        assert_eq!(components.security_schemes.len(), 1);
+        assert_eq!(
+            components.security_schemes["AccessToken"],
+            SecurityScheme::bearer()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "conflicting security scheme definition for 'AccessToken'")]
+    fn conflicting_security_scheme_definitions_are_rejected() {
+        let _builder = OpenApiBuilder::new("Security API", "1")
+            .security_scheme("AccessToken", SecurityScheme::bearer())
+            .security_scheme("AccessToken", SecurityScheme::basic());
+    }
+
+    #[test]
+    fn route_security_preserves_manual_alternatives_and_scopes() {
+        let route = fastapi_router::Route::new(fastapi_types::Method::Get, "/protected")
+            .security("PasswordAuth", ["read:items"])
+            .security_scheme("ApiKey");
+        let mut builder = OpenApiBuilder::new("Security API", "1")
+            .security_scheme(
+                "PasswordAuth",
+                SecurityScheme::OAuth2 {
+                    flows: OAuthFlows {
+                        password: OAuthPasswordFlow {
+                            token_url: "/token".to_string(),
+                            refresh_url: None,
+                            scopes: HashMap::from([(
+                                "read:items".to_string(),
+                                "Read items".to_string(),
+                            )]),
+                        },
+                    },
+                    description: None,
+                },
+            )
+            .security_scheme(
+                "ApiKey",
+                SecurityScheme::ApiKey {
+                    name: "X-Api-Key".to_string(),
+                    location: ApiKeyLocation::Header,
+                    description: None,
+                },
+            );
+        let operation = builder.add_route(&route).expect("GET operation");
+        assert_eq!(operation.security.len(), 2);
+        assert_eq!(operation.security[0].len(), 1);
+        assert_eq!(operation.security[0]["PasswordAuth"], ["read:items"]);
+        assert_eq!(operation.security[1].len(), 1);
+        assert!(operation.security[1]["ApiKey"].is_empty());
+        let json = serde_json::to_value(builder.build()).expect("secured document");
+        assert_eq!(
+            json["paths"]["/protected"]["get"]["security"],
+            serde_json::json!([{"PasswordAuth": ["read:items"]}, {"ApiKey": []}])
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "security requirement 'MissingScheme' has no registered security scheme"
+    )]
+    fn build_rejects_unregistered_manual_security_requirement_names() {
+        let route = fastapi_router::Route::new(fastapi_types::Method::Get, "/protected")
+            .security_scheme("MissingScheme");
+        let mut builder = OpenApiBuilder::new("Security API", "1");
+        builder.add_route(&route).expect("GET operation");
+        let _document = builder.build();
+    }
 }
 
 /// OpenAPI document builder.
@@ -870,6 +1288,31 @@ impl OpenApiBuilder {
         self
     }
 
+    /// Register a named security scheme, deduplicating identical definitions.
+    ///
+    /// Names are explicit; arbitrary route requirement names do not infer schemes.
+    ///
+    /// # Panics
+    ///
+    /// Panics during registration if the name already has a different definition.
+    #[must_use]
+    pub fn security_scheme(mut self, name: impl Into<String>, scheme: SecurityScheme) -> Self {
+        match self.components.security_schemes.entry(name.into()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(scheme);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                assert_eq!(
+                    entry.get(),
+                    &scheme,
+                    "conflicting security scheme definition for '{}'",
+                    entry.key()
+                );
+            }
+        }
+        self
+    }
+
     /// Access the component schema registry for in-place registration.
     pub fn registry(&mut self) -> SchemaRegistryMut<'_> {
         SchemaRegistryMut {
@@ -907,6 +1350,13 @@ impl OpenApiBuilder {
             description: route.description.clone(),
             tags: route.tags.clone(),
             deprecated: route.deprecated,
+            security: route
+                .security
+                .iter()
+                .map(|requirement| {
+                    HashMap::from([(requirement.scheme.clone(), requirement.scopes.clone())])
+                })
+                .collect(),
             ..Default::default()
         };
 
@@ -1159,14 +1609,44 @@ impl OpenApiBuilder {
     }
 
     /// Build the OpenAPI document.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an operation references an unregistered security scheme.
     #[must_use]
     pub fn build(self) -> OpenApi {
+        for item in self.paths.values() {
+            for operation in [
+                &item.get,
+                &item.post,
+                &item.put,
+                &item.delete,
+                &item.patch,
+                &item.options,
+                &item.head,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for requirement in &operation.security {
+                    for name in requirement.keys() {
+                        assert!(
+                            self.components.security_schemes.contains_key(name),
+                            "security requirement '{}' has no registered security scheme",
+                            name
+                        );
+                    }
+                }
+            }
+        }
         OpenApi {
             openapi: "3.1.0".to_string(),
             info: self.info,
             servers: self.servers,
             paths: self.paths,
-            components: if self.components.schemas.is_empty() {
+            components: if self.components.schemas.is_empty()
+                && self.components.security_schemes.is_empty()
+            {
                 None
             } else {
                 Some(self.components)

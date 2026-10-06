@@ -1,8 +1,8 @@
 # OpenAPI Documentation
 
 `App` serves an OpenAPI 3.1 document from registered route metadata. Route macros
-connect JSON models and responses, named query/header fields, and typed path
-parameters to this document. Full coverage of every extractor, serde representation
+connect JSON models and responses, named query/header fields, typed path
+parameters, and built-in authentication metadata to this document. Full coverage of every extractor, serde representation
 and security flow remains incomplete; see the parity matrix and Beads.
 
 ## Concept
@@ -56,6 +56,35 @@ directional serde attributes and arbitrary extractor metadata remain limits.
 Manually created `RouteEntry` values can use `.path_schema::<T>(&["id"])` while
 retaining parameter descriptions and examples from their router metadata.
 
+## Authentication Metadata
+
+`BearerToken`, `BasicAuth`, and `OAuth2PasswordBearer` publish matching
+`components.securitySchemes` and operation `security` requirements when used
+in macro handlers. Qualified types and aliases work through
+`FromRequest::security_metadata()`. Default names are the extractor names;
+Bearer tokens have no assumed token format. OAuth2 password metadata uses
+`/token` with an empty scope map. Applications provide their token endpoint.
+
+Multiple required extractors appear together in one requirement object (AND).
+Optional-only extractors add an empty-object alternative for anonymous access.
+An optional extractor cannot weaken a required extractor or an explicitly
+declared route requirement. Existing optional extraction still turns every
+extraction error into `None`, including malformed credentials.
+
+Manual router requirements are alternatives (OR), with their scopes preserved.
+Register their definitions on the runtime route entry using
+`.security_scheme(name, fastapi_rust::openapi::SecurityScheme)`. An explicit
+definition overrides that entry's inferred definition of the same name; all
+entries sharing a name must agree. `OpenApiBuilder::security_scheme` supports
+standalone document construction. Identical definitions deduplicate; conflicting
+definitions and unregistered requirement names fail during document construction.
+
+Security declarations describe authentication; handlers still validate opaque
+tokens, passwords and authorization scopes. Custom token URLs, refresh URLs and
+scope descriptions can be supplied with an explicit `SecurityScheme::OAuth2`
+definition. `OAuth2PasswordBearerConfig` is not automatically inspected. Other
+OAuth flows, middleware policies and dependency security are not inferred.
+
 ## Missing / In Progress
 
 OpenAPI generation coverage is currently incomplete for the full framework surface (all extractors, responses, and security flows). The concrete gap list lives under `bd-uz2s`.
@@ -75,7 +104,7 @@ struct User {
 
 - Route-to-operation mapping from registered handlers (params, request bodies, responses)
 - Request/response schema coverage and examples
-- Security scheme integration and per-route requirements
+- Security metadata beyond the built-in extractors and OAuth2 password flow
 
 ## Current Workarounds
 
