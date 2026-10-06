@@ -5536,8 +5536,8 @@ impl Default for HttpsRedirectConfig {
 ///
 /// This middleware provides two critical security features:
 ///
-/// 1. **HTTP to HTTPS Redirect**: Automatically redirects insecure HTTP requests
-///    to their HTTPS equivalents, ensuring all traffic is encrypted.
+/// 1. **HTTP to HTTPS Redirect**: Redirects insecure requests that reach this
+///    middleware to a configured HTTPS authority.
 ///
 /// 2. **HSTS (Strict Transport Security)**: Adds the `Strict-Transport-Security`
 ///    header to HTTPS responses, instructing browsers to always use HTTPS.
@@ -5547,6 +5547,16 @@ impl Default for HttpsRedirectConfig {
 /// The middleware respects the `X-Forwarded-Proto` header, so it works correctly
 /// behind reverse proxies like nginx or HAProxy. If the proxy sets this header
 /// to "https", the request is treated as secure.
+/// These scheme headers remain trusted without peer authentication; the caller
+/// must ensure that clients cannot spoof them through its proxy configuration.
+/// Forwarded **host** selection is separate: redirects use the effective
+/// authority admitted by the server, or validate ordinary `Host` for requests
+/// supplied directly. Raw forwarded-host headers never select a redirect host.
+///
+/// Redirects preserve the parser's encoded origin-form target. Unsupported
+/// target forms or malformed redirect inputs return 400 without `Location`.
+/// This middleware does not implement absolute-form/CONNECT target handling,
+/// TLS, or a complete reverse-proxy trust policy.
 ///
 /// # Example
 ///
@@ -5745,36 +5755,81 @@ impl HttpsRedirectMiddleware {
     }
 
     /// Build the redirect URL.
-    fn build_redirect_url(&self, req: &Request) -> String {
-        let host = req
-            .headers()
-            .get("Host")
-            .map(|h| String::from_utf8_lossy(h).to_string())
-            .unwrap_or_else(|| "localhost".to_string());
+    fn build_redirect_url(&self, req: &Request) -> Result<String, &'static str> {
+        // Server admission is the only source of forwarded-host trust. Direct
+        // callers use a strictly parsed ordinary Host, never raw proxy headers.
+        let authority = match req.admitted_authority() {
+            Some(authority) => authority.clone(),
+            None => req
+                .headers()
+                .get("Host")
+                .and_then(|host| std::str::from_utf8(host).ok())
+                .and_then(crate::request::RequestAuthority::parse)
+                .ok_or("invalid or missing redirect authority")?,
+        };
+        let target = match req.raw_target() {
+            Some(target) => target.to_string(),
+            None => match req.query() {
+                Some(query) => format!("{}?{query}", req.path()),
+                None => req.path().to_string(),
+            },
+        };
+        if !Self::is_origin_form_target(&target) {
+            return Err("HTTPS redirects require a valid encoded origin-form target");
+        }
+        if self.config.https_port == 0 {
+            return Err("invalid HTTPS redirect port");
+        }
 
-        // Remove port from host if present
-        let host_without_port = host.split(':').next().unwrap_or(&host);
-
-        let path = req.path();
-        let query = req.query();
-
+        let host = authority.host_for_uri();
         if self.config.https_port == 443 {
-            match query {
-                Some(q) => format!("https://{}{}?{}", host_without_port, path, q),
-                None => format!("https://{}{}", host_without_port, path),
-            }
+            Ok(format!("https://{host}{target}"))
         } else {
-            match query {
-                Some(q) => format!(
-                    "https://{}:{}{}?{}",
-                    host_without_port, self.config.https_port, path, q
-                ),
-                None => format!(
-                    "https://{}:{}{}",
-                    host_without_port, self.config.https_port, path
-                ),
+            Ok(format!("https://{host}:{}{target}", self.config.https_port))
+        }
+    }
+
+    fn is_origin_form_target(target: &str) -> bool {
+        if !target.starts_with('/') {
+            return false;
+        }
+        // RFC 3986 pchar plus path/query separators. Validate percent escapes
+        // without decoding them; decoding would change delimiters and routing.
+        let mut bytes = target.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'%' {
+                if !bytes.next().is_some_and(|b| b.is_ascii_hexdigit())
+                    || !bytes.next().is_some_and(|b| b.is_ascii_hexdigit())
+                {
+                    return false;
+                }
+            } else if !byte.is_ascii_alphanumeric()
+                && !matches!(
+                    byte,
+                    b'-' | b'.'
+                        | b'_'
+                        | b'~'
+                        | b'!'
+                        | b'$'
+                        | b'&'
+                        | b'\''
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'+'
+                        | b','
+                        | b';'
+                        | b'='
+                        | b':'
+                        | b'@'
+                        | b'/'
+                        | b'?'
+                )
+            {
+                return false;
             }
         }
+        true
     }
 }
 
@@ -5801,7 +5856,18 @@ impl Middleware for HttpsRedirectMiddleware {
             }
 
             // Build redirect URL
-            let redirect_url = self.build_redirect_url(req);
+            let redirect_url = match self.build_redirect_url(req) {
+                Ok(url) => url,
+                Err(detail) => {
+                    return ControlFlow::Break(
+                        Response::with_status(crate::response::StatusCode::BAD_REQUEST)
+                            .header("Content-Type", b"text/plain".to_vec())
+                            .body(crate::response::ResponseBody::Bytes(
+                                detail.as_bytes().to_vec(),
+                            )),
+                    );
+                }
+            };
 
             // Choose status code
             let status = if self.config.permanent_redirect {
@@ -8387,6 +8453,141 @@ mod https_redirect_tests {
                 );
             }
             ControlFlow::Continue => panic!("HTTP request should be redirected"),
+        }
+    }
+
+    #[test]
+    fn https_redirect_supports_dns_ipv4_ipv6_and_configured_port() {
+        for (host, port, expected) in [
+            ("example.com:8080", 443, "https://example.com/api?x=1&x=2"),
+            ("127.0.0.1:8080", 8443, "https://127.0.0.1:8443/api?x=1&x=2"),
+            (
+                "[2001:db8::1]:8080",
+                443,
+                "https://[2001:db8::1]/api?x=1&x=2",
+            ),
+            ("[::1]:8080", 8443, "https://[::1]:8443/api?x=1&x=2"),
+        ] {
+            let mw = HttpsRedirectMiddleware::new().https_port(port);
+            let mut req = Request::new(Method::Get, "/api");
+            req.set_query(Some("x=1&x=2".to_string()));
+            req.headers_mut().insert("Host", host.as_bytes().to_vec());
+            let ControlFlow::Break(response) = run_before(&mw, &mut req) else {
+                panic!("valid HTTP authority should redirect");
+            };
+            assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+            assert_eq!(
+                find_header(response.headers(), "Location"),
+                Some(expected.as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn https_redirect_preserves_raw_encoded_origin_target() {
+        let mw = HttpsRedirectMiddleware::new();
+        let mut req = Request::new(Method::Get, "/a?part#frag/end");
+        req.set_query(Some(
+            "tag=a&tag=b&next=https%3A%2F%2Fevil.example".to_string(),
+        ));
+        req.set_raw_target("/a%3Fpart%23frag%2Fend?tag=a&tag=b&next=https%3A%2F%2Fevil.example");
+        req.headers_mut().insert("Host", b"good.example".to_vec());
+        let ControlFlow::Break(response) = run_before(&mw, &mut req) else {
+            panic!("encoded origin target should redirect");
+        };
+        assert_eq!(
+            find_header(response.headers(), "Location"),
+            Some(b"https://good.example/a%3Fpart%23frag%2Fend?tag=a&tag=b&next=https%3A%2F%2Fevil.example".as_slice())
+        );
+    }
+
+    #[test]
+    fn standalone_redirect_ignores_unadmitted_forwarded_host() {
+        let mw = HttpsRedirectMiddleware::new();
+        let mut req = Request::new(Method::Get, "/%40evil.example/");
+        req.headers_mut().insert("Host", b"good.example".to_vec());
+        req.headers_mut()
+            .insert("X-Forwarded-Host", b"evil.example".to_vec());
+        req.headers_mut()
+            .insert("Forwarded", b"host=evil.example;proto=http".to_vec());
+        let ControlFlow::Break(response) = run_before(&mw, &mut req) else {
+            panic!("ordinary Host should redirect");
+        };
+        assert_eq!(
+            find_header(response.headers(), "Location"),
+            Some(b"https://good.example/%40evil.example/".as_slice())
+        );
+    }
+
+    #[test]
+    fn https_redirect_rejects_malformed_authorities_without_location() {
+        let mw = HttpsRedirectMiddleware::new();
+        for host in [
+            "user@evil.example",
+            "good.example@evil.example",
+            "good.example/path",
+            "good.example\\evil",
+            "good.example?x",
+            "good.example#x",
+            "bad host",
+            "good.example:",
+            "good.example:bad",
+            "good.example:0",
+            "good.example:65536",
+            "[::1",
+            "[::1]:bad",
+            "[::1]:0",
+            "[::1]:65536",
+            "::1",
+        ] {
+            let mut req = Request::new(Method::Get, "/");
+            req.headers_mut().insert("Host", host.as_bytes().to_vec());
+            let ControlFlow::Break(response) = run_before(&mw, &mut req) else {
+                panic!("malformed authority must be rejected: {host}");
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{host}");
+            assert_eq!(find_header(response.headers(), "Location"), None, "{host}");
+        }
+        for host in [None, Some(vec![0xff])] {
+            let mut req = Request::new(Method::Get, "/");
+            if let Some(host) = host {
+                req.headers_mut().insert("Host", host);
+            }
+            let ControlFlow::Break(response) = run_before(&mw, &mut req) else {
+                panic!("missing or invalid UTF-8 authority must be rejected");
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(find_header(response.headers(), "Location"), None);
+        }
+    }
+
+    #[test]
+    fn https_redirect_rejects_non_origin_and_malformed_targets_without_location() {
+        let mw = HttpsRedirectMiddleware::new();
+        for target in [
+            "@evil.example/",
+            "http://evil.example/",
+            "evil.example:443",
+            "*",
+            "%2F@evil.example/",
+            "/path#fragment",
+            "/path\\evil",
+            "/bad%",
+            "/bad%GG",
+            "/has space",
+            "/path\r\nLocation: https://evil.example/",
+        ] {
+            let mut req = Request::new(Method::Get, target);
+            req.headers_mut().insert("Host", b"good.example".to_vec());
+            let ControlFlow::Break(response) = run_before(&mw, &mut req) else {
+                panic!("unsafe target must be rejected: {target:?}");
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{target:?}");
+            assert_eq!(
+                find_header(response.headers(), "Location"),
+                None,
+                "{target:?}"
+            );
         }
     }
 

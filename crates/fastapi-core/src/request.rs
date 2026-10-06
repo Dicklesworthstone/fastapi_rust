@@ -4,6 +4,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::sync::Mutex;
 
@@ -83,6 +84,100 @@ impl ConnectionInfo {
     /// HTTPS connection (TLS).
     #[allow(dead_code)]
     pub const HTTPS: Self = Self { is_tls: true };
+}
+
+/// A syntactically validated DNS, IPv4, or bracketed IPv6 request authority.
+///
+/// Parsing does not authorize a host or establish proxy trust. The server applies
+/// its host policy before storing an admitted authority on [`Request`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestAuthority {
+    host: String,
+    port: Option<u16>,
+    ipv6: bool,
+}
+
+impl RequestAuthority {
+    /// Parse an authority without userinfo, a path, or an invalid supplied port.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim_matches([' ', '\t']);
+        if value.is_empty() || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return None;
+        }
+
+        if let Some(bracketed) = value.strip_prefix('[') {
+            let (host, rest) = bracketed.split_once(']')?;
+            let address = host.parse::<Ipv6Addr>().ok()?;
+            let port = if rest.is_empty() {
+                None
+            } else {
+                Some(Self::parse_port(rest.strip_prefix(':')?)?)
+            };
+            return Some(Self {
+                host: address.to_string(),
+                port,
+                ipv6: true,
+            });
+        }
+
+        let (host, port) = match value.split_once(':') {
+            Some((host, port)) => (host, Some(Self::parse_port(port)?)),
+            None => (value, None),
+        };
+        if host.parse::<Ipv4Addr>().is_err() && !Self::is_valid_hostname(host) {
+            return None;
+        }
+        Some(Self {
+            host: host.to_ascii_lowercase(),
+            port,
+            ipv6: false,
+        })
+    }
+
+    fn parse_port(port: &str) -> Option<u16> {
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let port = port.parse::<u16>().ok()?;
+        (port != 0).then_some(port)
+    }
+
+    fn is_valid_hostname(host: &str) -> bool {
+        !host.is_empty()
+            && host.len() <= 253
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+    }
+
+    /// Return the normalized host without an HTTP port or IPv6 brackets.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Return the explicitly supplied HTTP port, if present.
+    #[must_use]
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+
+    /// Format the host for a URI authority, retaining brackets around IPv6.
+    #[must_use]
+    pub fn host_for_uri(&self) -> String {
+        if self.ipv6 {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        }
+    }
 }
 
 /// HTTP headers collection.
@@ -319,6 +414,8 @@ pub struct Request {
     version: HttpVersion,
     path: String,
     query: Option<String>,
+    raw_target: Option<String>,
+    admitted_authority: Option<RequestAuthority>,
     headers: Headers,
     body: Body,
     // Extensions for middleware/extractors
@@ -335,6 +432,8 @@ impl Request {
             version: HttpVersion::Http11,
             path: path.into(),
             query: None,
+            raw_target: None,
+            admitted_authority: None,
             headers: Headers::new(),
             body: Body::Empty,
             extensions: HashMap::new(),
@@ -376,6 +475,34 @@ impl Request {
     #[must_use]
     pub fn query(&self) -> Option<&str> {
         self.query.as_deref()
+    }
+
+    /// Return the original encoded request target supplied by the HTTP parser.
+    ///
+    /// This is separate from the decoded routing path and unmodified by query
+    /// extraction. Its presence does not imply that it is an origin-form URI.
+    #[must_use]
+    pub fn raw_target(&self) -> Option<&str> {
+        self.raw_target.as_deref()
+    }
+
+    /// Preserve an original encoded request target without changing routing.
+    pub fn set_raw_target(&mut self, target: impl Into<String>) {
+        self.raw_target = Some(target.into());
+    }
+
+    /// Return the effective authority admitted by the server's host policy.
+    #[must_use]
+    pub fn admitted_authority(&self) -> Option<&RequestAuthority> {
+        self.admitted_authority.as_ref()
+    }
+
+    /// Store an effective authority after applying the server's host/proxy policy.
+    ///
+    /// Applications supplying requests directly must also enforce that policy;
+    /// syntactic parsing alone does not authorize a forwarded host.
+    pub fn set_admitted_authority(&mut self, authority: RequestAuthority) {
+        self.admitted_authority = Some(authority);
     }
 
     /// Get the headers.
@@ -448,5 +575,82 @@ impl Request {
         }
         self.get_extension::<BackgroundTasks>()
             .expect("BackgroundTasks extension should exist")
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    #[test]
+    fn authorities_preserve_valid_host_kind_and_explicit_port() {
+        for (input, host, port, uri_host) in [
+            ("Example.COM", "example.com", None, "example.com"),
+            (
+                "api.example.com:8080",
+                "api.example.com",
+                Some(8080),
+                "api.example.com",
+            ),
+            ("127.0.0.1:80", "127.0.0.1", Some(80), "127.0.0.1"),
+            (
+                "[2001:db8::1]:8080",
+                "2001:db8::1",
+                Some(8080),
+                "[2001:db8::1]",
+            ),
+            ("[::1]", "::1", None, "[::1]"),
+        ] {
+            let authority = RequestAuthority::parse(input).expect("valid authority");
+            assert_eq!(authority.host(), host, "{input}");
+            assert_eq!(authority.port(), port, "{input}");
+            assert_eq!(authority.host_for_uri(), uri_host, "{input}");
+        }
+    }
+
+    #[test]
+    fn authority_rejects_userinfo_malformed_hosts_and_supplied_ports() {
+        for input in [
+            "",
+            "user@example.com",
+            "good.example@evil.example",
+            "example.com/path",
+            "example.com\\evil",
+            "example.com?x=1",
+            "example.com#fragment",
+            "bad host",
+            "example.com\r\n",
+            "example.com:",
+            "example.com:bad",
+            "example.com:0",
+            "example.com:65536",
+            "example.com:80:90",
+            "[::1",
+            "[::1]suffix",
+            "[::1]:",
+            "[::1]:bad",
+            "[::1]:0",
+            "[::1]:65536",
+            "::1",
+            "-bad.example",
+        ] {
+            assert!(
+                RequestAuthority::parse(input).is_none(),
+                "accepted {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn original_target_does_not_replace_decoded_routing_path_or_query() {
+        let mut request = Request::new(Method::Get, "/a?part#fragment/end");
+        request.set_query(Some("tag=a&tag=b".to_string()));
+        request.set_raw_target("/a%3Fpart%23fragment%2Fend?tag=a&tag=b");
+        assert_eq!(request.path(), "/a?part#fragment/end");
+        assert_eq!(request.query(), Some("tag=a&tag=b"));
+        assert_eq!(
+            request.raw_target(),
+            Some("/a%3Fpart%23fragment%2Fend?tag=a&tag=b")
+        );
     }
 }

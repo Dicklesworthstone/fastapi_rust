@@ -738,7 +738,7 @@ impl Parser {
         }
 
         let request_line = &header_bytes[..first_line_end];
-        let (method, path, query, http_version) = parse_request_line(request_line)?;
+        let mut request = parse_request_line(request_line)?;
 
         let header_start = first_line_end + 2;
         let header_block_len = header_end + 4 - header_start;
@@ -749,10 +749,6 @@ impl Parser {
         // Parse headers
         let headers =
             HeadersParser::parse_with_limits(&buffer[header_start..header_end + 4], &self.limits)?;
-
-        // Build request with HTTP version
-        let mut request = Request::with_version(method, path, http_version);
-        request.set_query(query);
 
         // Set headers (using optimized insert to avoid double allocation)
         for header in headers.iter() {
@@ -795,10 +791,7 @@ pub enum ParseStatus {
 enum ParseState {
     RequestLine,
     Headers {
-        method: Method,
-        path: String,
-        query: Option<String>,
-        http_version: HttpVersion,
+        request: Request,
         header_start: usize,
     },
     Body {
@@ -894,12 +887,9 @@ impl StatefulParser {
                     &self.buffer,
                     self.limits.max_request_line_len,
                 ) {
-                    Ok((method, path, query, http_version, header_start)) => {
+                    Ok((request, header_start)) => {
                         self.state = ParseState::Headers {
-                            method,
-                            path,
-                            query,
-                            http_version,
+                            request,
                             header_start,
                         };
                     }
@@ -914,10 +904,7 @@ impl StatefulParser {
                     Err(err) => return Err(err),
                 },
                 ParseState::Headers {
-                    method,
-                    path,
-                    query,
-                    http_version,
+                    mut request,
                     header_start,
                 } => {
                     let header_end = match find_header_end_from(&self.buffer, header_start) {
@@ -927,19 +914,13 @@ impl StatefulParser {
                                 > self.limits.max_headers_size
                             {
                                 self.state = ParseState::Headers {
-                                    method,
-                                    path,
-                                    query,
-                                    http_version,
+                                    request,
                                     header_start,
                                 };
                                 return Err(ParseError::HeadersTooLarge);
                             }
                             self.state = ParseState::Headers {
-                                method,
-                                path,
-                                query,
-                                http_version,
+                                request,
                                 header_start,
                             };
                             return Ok(ParseStatus::Incomplete);
@@ -953,9 +934,6 @@ impl StatefulParser {
                     }
                     let header_slice = &self.buffer[header_start..body_start];
                     let headers = HeadersParser::parse_with_limits(header_slice, &self.limits)?;
-
-                    let mut request = Request::with_version(method, path, http_version);
-                    request.set_query(query);
 
                     // Use optimized insert to avoid double allocation
                     for header in headers.iter() {
@@ -1038,7 +1016,7 @@ fn find_header_end_from(buffer: &[u8], start: usize) -> Option<usize> {
 fn parse_request_line_with_len_limit(
     buffer: &[u8],
     max_len: usize,
-) -> Result<(Method, String, Option<String>, HttpVersion, usize), ParseError> {
+) -> Result<(Request, usize), ParseError> {
     let line_end = buffer
         .windows(2)
         .position(|w| w == b"\r\n")
@@ -1046,8 +1024,8 @@ fn parse_request_line_with_len_limit(
     if line_end > max_len {
         return Err(ParseError::RequestLineTooLong);
     }
-    let (method, path, query, http_version) = parse_request_line(&buffer[..line_end])?;
-    Ok((method, path, query, http_version, line_end + 2))
+    let request = parse_request_line(&buffer[..line_end])?;
+    Ok((request, line_end + 2))
 }
 
 fn map_body_error(error: BodyError) -> ParseError {
@@ -1059,9 +1037,7 @@ fn map_body_error(error: BodyError) -> ParseError {
     }
 }
 
-fn parse_request_line(
-    line: &[u8],
-) -> Result<(Method, String, Option<String>, HttpVersion), ParseError> {
+fn parse_request_line(line: &[u8]) -> Result<Request, ParseError> {
     if has_invalid_request_line_bytes(line) {
         return Err(ParseError::InvalidRequestLine);
     }
@@ -1099,7 +1075,10 @@ fn parse_request_line(
         Cow::Owned(owned) => owned,
     };
 
-    Ok((method, path, query, http_version))
+    let mut request = Request::with_version(method, path, http_version);
+    request.set_query(query);
+    request.set_raw_target(uri);
+    Ok(request)
 }
 
 /// Percent-decode a path segment.
@@ -1192,9 +1171,57 @@ mod tests {
     #[test]
     fn parse_request_line_decodes_path() {
         let line = b"GET /hello%20world HTTP/1.1";
-        let (_method, path, _query, _version) =
-            parse_request_line(line).expect("parse request line");
-        assert_eq!(path, "/hello world");
+        let request = parse_request_line(line).expect("parse request line");
+        assert_eq!(request.path(), "/hello world");
+        assert_eq!(request.raw_target(), Some("/hello%20world"));
+    }
+
+    #[test]
+    fn owned_parser_preserves_encoded_target_and_query_duplicates() {
+        let request = Parser::new()
+            .parse(b"GET /a%3Fpart%23frag%2Fend?tag=a&tag=b&next=x%26y HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .expect("encoded request parses");
+        assert_eq!(request.path(), "/a?part#frag/end");
+        assert_eq!(request.query(), Some("tag=a&tag=b&next=x%26y"));
+        assert_eq!(
+            request.raw_target(),
+            Some("/a%3Fpart%23frag%2Fend?tag=a&tag=b&next=x%26y")
+        );
+    }
+
+    #[test]
+    fn incremental_parser_preserves_target_across_partial_headers_and_body() {
+        let mut parser = StatefulParser::new();
+        assert!(matches!(
+            parser
+                .feed(b"POST /caf%C3%A9%3Fpart?x=1&x=2 HTTP/1.1\r\nHost: exam")
+                .unwrap(),
+            ParseStatus::Incomplete
+        ));
+        assert!(matches!(
+            parser
+                .feed(b"ple.com\r\nContent-Length: 3\r\n\r\nab")
+                .unwrap(),
+            ParseStatus::Incomplete
+        ));
+        let ParseStatus::Complete { request, .. } = parser.feed(b"c").unwrap() else {
+            panic!("complete body must complete the request");
+        };
+        assert_eq!(request.path(), "/café?part");
+        assert_eq!(request.query(), Some("x=1&x=2"));
+        assert_eq!(request.raw_target(), Some("/caf%C3%A9%3Fpart?x=1&x=2"));
+        assert!(matches!(request.body(), Body::Bytes(body) if body == b"abc"));
+    }
+
+    #[test]
+    fn raw_target_preserves_unsupported_forms_without_changing_parser_acceptance() {
+        for target in ["@evil.example/", "http://example.com/", "*"] {
+            let bytes = format!("GET {target} HTTP/1.1\r\nHost: example.com\r\n\r\n");
+            let request = Parser::new()
+                .parse(bytes.as_bytes())
+                .expect("existing target acceptance");
+            assert_eq!(request.raw_target(), Some(target));
+        }
     }
 
     #[test]

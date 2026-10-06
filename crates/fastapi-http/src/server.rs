@@ -60,10 +60,10 @@ use asupersync::stream::Stream;
 use asupersync::time::{timeout, timeout_at};
 use asupersync::{Budget, Cx, Time};
 use fastapi_core::app::App;
-use fastapi_core::{Method, Request, RequestContext, Response, StatusCode};
+use fastapi_core::{Method, Request, RequestAuthority, RequestContext, Response, StatusCode};
 use std::future::Future;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -477,28 +477,31 @@ impl HostValidationError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HostHeader {
-    host: String,
-    port: Option<u16>,
-}
-
 fn validate_host_header(
     request: &Request,
     config: &ServerConfig,
-) -> Result<HostHeader, HostValidationError> {
+) -> Result<RequestAuthority, HostValidationError> {
     let raw = extract_effective_host(request, config)?;
-    let parsed = parse_host_header(&raw)
+    let parsed = RequestAuthority::parse(&raw)
         .ok_or_else(|| HostValidationError::invalid(format!("invalid host value: {raw}")))?;
 
     if !is_allowed_host(&parsed, &config.allowed_hosts) {
         return Err(HostValidationError::not_allowed(format!(
             "host not allowed: {}",
-            parsed.host
+            parsed.host()
         )));
     }
 
     Ok(parsed)
+}
+
+fn admit_host_header(
+    request: &mut Request,
+    config: &ServerConfig,
+) -> Result<(), HostValidationError> {
+    let authority = validate_host_header(request, config)?;
+    request.set_admitted_authority(authority);
+    Ok(())
 }
 
 fn extract_effective_host(
@@ -525,7 +528,7 @@ fn header_value(request: &Request, name: &str) -> Result<Option<String>, HostVal
         .get(name)
         .map(|bytes| {
             std::str::from_utf8(bytes)
-                .map(|s| s.trim().to_string())
+                .map(|s| s.trim_matches([' ', '\t']).to_string())
                 .map_err(|_| {
                     HostValidationError::invalid(format!("invalid UTF-8 in {name} header"))
                 })
@@ -537,92 +540,7 @@ fn extract_first_list_value(value: &str) -> Option<&str> {
     value.split(',').map(str::trim).find(|v| !v.is_empty())
 }
 
-fn parse_host_header(value: &str) -> Option<HostHeader> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return None;
-    }
-
-    if value.starts_with('[') {
-        let end = value.find(']')?;
-        let host = &value[1..end];
-        if host.is_empty() {
-            return None;
-        }
-        if host.parse::<Ipv6Addr>().is_err() {
-            return None;
-        }
-        let rest = &value[end + 1..];
-        let port = if rest.is_empty() {
-            None
-        } else {
-            let port_str = rest.strip_prefix(':')?;
-            parse_port(port_str)
-        };
-        return Some(HostHeader {
-            host: host.to_ascii_lowercase(),
-            port,
-        });
-    }
-
-    let mut parts = value.split(':');
-    let host = parts.next().unwrap_or("");
-    let port_part = parts.next();
-    if parts.next().is_some() {
-        // Multiple colons without brackets (likely IPv6) are invalid
-        return None;
-    }
-    if host.is_empty() {
-        return None;
-    }
-
-    let port = match port_part {
-        Some(p) => parse_port(p),
-        None => None,
-    };
-
-    if host.parse::<Ipv4Addr>().is_ok() || is_valid_hostname(host) {
-        Some(HostHeader {
-            host: host.to_ascii_lowercase(),
-            port,
-        })
-    } else {
-        None
-    }
-}
-
-fn parse_port(port: &str) -> Option<u16> {
-    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    let value = port.parse::<u16>().ok()?;
-    if value == 0 { None } else { Some(value) }
-}
-
-fn is_valid_hostname(host: &str) -> bool {
-    // Note: str::len() returns byte length (RFC 1035 specifies 253 octets)
-    if host.len() > 253 {
-        return false;
-    }
-    for label in host.split('.') {
-        if label.is_empty() || label.len() > 63 {
-            return false;
-        }
-        let bytes = label.as_bytes();
-        if bytes.first() == Some(&b'-') || bytes.last() == Some(&b'-') {
-            return false;
-        }
-        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return false;
-        }
-    }
-    true
-}
-
-fn is_allowed_host(host: &HostHeader, allowed_hosts: &[String]) -> bool {
+fn is_allowed_host(host: &RequestAuthority, allowed_hosts: &[String]) -> bool {
     if allowed_hosts.is_empty() {
         return true;
     }
@@ -632,7 +550,7 @@ fn is_allowed_host(host: &HostHeader, allowed_hosts: &[String]) -> bool {
         .any(|pattern| host_matches_pattern(host, pattern))
 }
 
-fn host_matches_pattern(host: &HostHeader, pattern: &str) -> bool {
+fn host_matches_pattern(host: &RequestAuthority, pattern: &str) -> bool {
     // Note: patterns are pre-lowercased at config time, so no allocation needed here
     let pattern = pattern.trim();
     if pattern.is_empty() {
@@ -643,20 +561,20 @@ fn host_matches_pattern(host: &HostHeader, pattern: &str) -> bool {
     }
     if let Some(suffix) = pattern.strip_prefix("*.") {
         // suffix is already lowercase (pre-processed at config time)
-        if host.host == suffix {
+        if host.host() == suffix {
             return false;
         }
-        return host.host.len() > suffix.len() + 1
-            && host.host.ends_with(suffix)
-            && host.host.as_bytes()[host.host.len() - suffix.len() - 1] == b'.';
+        return host.host().len() > suffix.len() + 1
+            && host.host().ends_with(suffix)
+            && host.host().as_bytes()[host.host().len() - suffix.len() - 1] == b'.';
     }
 
-    if let Some(parsed) = parse_host_header(pattern) {
-        if parsed.host != host.host {
+    if let Some(parsed) = RequestAuthority::parse(pattern) {
+        if parsed.host() != host.host() {
             return false;
         }
-        if let Some(port) = parsed.port {
-            return host.port == Some(port);
+        if let Some(port) = parsed.port() {
+            return host.port() == Some(port);
         }
         return true;
     }
@@ -817,7 +735,7 @@ where
         let ctx = RequestContext::new(request_cx, request_id).with_deadline(deadline);
 
         // Validate Host header
-        if let Err(err) = validate_host_header(&request, config) {
+        if let Err(err) = admit_host_header(&mut request, config) {
             ctx.trace(&format!("Rejecting request: {}", err.detail));
             let response = err.response().header("connection", b"close".to_vec());
             let response_write = response_writer.write(response);
@@ -1187,7 +1105,7 @@ where
                 let request_cx = request_cx_from_parent(cx, request_budget);
                 let ctx = RequestContext::new(request_cx, request_id);
 
-                if let Err(err) = validate_host_header(&request, config) {
+                if let Err(err) = admit_host_header(&mut request, config) {
                     let response = err.response();
                     process_connection_http2_write_response(
                         &mut framed,
@@ -2670,7 +2588,7 @@ impl TcpServer {
             .with_deadline(deadline);
 
             // Validate Host header
-            if let Err(err) = validate_host_header(&request, &self.config) {
+            if let Err(err) = admit_host_header(&mut request, &self.config) {
                 ctx.trace(&format!(
                     "Rejecting request from {peer_addr}: {}",
                     err.detail
@@ -3163,7 +3081,7 @@ impl TcpServer {
                         app.config().max_body_size,
                     );
 
-                    if let Err(err) = validate_host_header(&request, &self.config) {
+                    if let Err(err) = admit_host_header(&mut request, &self.config) {
                         ctx.trace(&format!("Rejecting HTTP/2 request: {}", err.detail));
                         let response = err.response();
                         self.write_h2_response(
@@ -3720,7 +3638,7 @@ impl TcpServer {
                         default_body_limit,
                     );
 
-                    if let Err(err) = validate_host_header(&request, &self.config) {
+                    if let Err(err) = admit_host_header(&mut request, &self.config) {
                         let response = err.response();
                         self.write_h2_response(
                             &mut framed,
@@ -3860,7 +3778,7 @@ impl TcpServer {
             let ctx = RequestContext::new(request_cx, request_id);
 
             // Validate Host header
-            if let Err(err) = validate_host_header(&request, &self.config) {
+            if let Err(err) = admit_host_header(&mut request, &self.config) {
                 let response = err.response().header("connection", b"close".to_vec());
                 let response_write = response_writer.write(response);
                 write_response(&mut stream, response_write).await?;
@@ -4698,11 +4616,12 @@ fn request_from_h2_headers(headers: http2::HeaderList) -> Result<Request, http2:
     let raw_path = path.ok_or(http2::Http2Error::Protocol("missing :path"))?;
     let (path_only, query) = match raw_path.split_once('?') {
         Some((p, q)) => (p.to_string(), Some(q.to_string())),
-        None => (raw_path, None),
+        None => (raw_path.clone(), None),
     };
 
     let mut req = Request::with_version(method, path_only, fastapi_core::HttpVersion::Http2);
     req.set_query(query);
+    req.set_raw_target(raw_path);
 
     if let Some(auth) = authority {
         req.headers_mut().insert("host", auth);
@@ -5495,6 +5414,194 @@ mod tests {
             .insert("Host".to_string(), b"bad host".to_vec());
         let err = validate_host_header(&request, &config).unwrap_err();
         assert_eq!(err.kind, HostValidationErrorKind::Invalid);
+    }
+
+    #[test]
+    fn host_validation_rejects_invalid_supplied_ports() {
+        let config = ServerConfig::default();
+        for host in [
+            "example.com:",
+            "example.com:bad",
+            "example.com:0",
+            "example.com:65536",
+            "[::1]:bad",
+            "[::1]:65536",
+        ] {
+            let mut request = Request::new(Method::Get, "/");
+            request
+                .headers_mut()
+                .insert("Host", host.as_bytes().to_vec());
+            let err = validate_host_header(&request, &config)
+                .expect_err("invalid port must not become an absent port");
+            assert_eq!(err.kind, HostValidationErrorKind::Invalid, "{host}");
+            assert_eq!(err.response().status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn h2_request_preserves_encoded_target_for_redirects() {
+        let request = request_from_h2_headers(vec![
+            (b":method".to_vec(), b"GET".to_vec()),
+            (b":path".to_vec(), b"/a%3Fpart?tag=a&tag=b".to_vec()),
+            (b":authority".to_vec(), b"[::1]:8080".to_vec()),
+        ])
+        .expect("valid HTTP/2 headers");
+        assert_eq!(request.path(), "/a%3Fpart");
+        assert_eq!(request.query(), Some("tag=a&tag=b"));
+        assert_eq!(request.raw_target(), Some("/a%3Fpart?tag=a&tag=b"));
+    }
+
+    // One real TCP connection exercises parser -> host admission -> App
+    // middleware -> ResponseWriter, and the server thread is joined afterwards.
+    fn redirect_over_tcp(config: ServerConfig, https_port: u16, request: &[u8]) -> String {
+        use std::io::{Read as _, Write as _};
+
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let reactor = asupersync::runtime::reactor::create_reactor().expect("test reactor");
+            let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
+                .build()
+                .expect("test runtime");
+            runtime.block_on(async move {
+                let cx = Cx::current().expect("runtime caller context");
+                let listener = TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("test listener");
+                addr_tx
+                    .send(listener.local_addr().expect("listener address"))
+                    .expect("send address");
+                let (stream, peer) = listener.accept().await.expect("test connection");
+                let app = App::builder()
+                    .middleware(
+                        fastapi_core::middleware::HttpsRedirectMiddleware::new()
+                            .https_port(https_port),
+                    )
+                    .get("/", |_ctx: &RequestContext, _req: &mut Request| async {
+                        Response::ok()
+                    })
+                    .get(
+                        "/{rest:path}",
+                        |_ctx: &RequestContext, _req: &mut Request| async { Response::ok() },
+                    )
+                    .build();
+                TcpServer::new(config)
+                    .handle_connection_app(&cx, stream, peer, &app)
+                    .await
+            })
+        });
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server address");
+        let mut stream = std::net::TcpStream::connect(addr).expect("client connects");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("client read deadline");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("client write deadline");
+        stream.write_all(request).expect("client writes request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("client reads response");
+        server_thread
+            .join()
+            .expect("server thread joins")
+            .expect("connection completes");
+        response
+    }
+
+    fn response_location(response: &str) -> Option<&str> {
+        response.split("\r\n").find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("location").then(|| value.trim())
+        })
+    }
+
+    #[test]
+    fn https_redirect_tcp_preserves_encoded_target_and_valid_authorities() {
+        for (host, port, location) in [
+            (
+                "example.com:8080",
+                443,
+                "https://example.com/a%3Fpart%23frag%2Fend?tag=a&tag=b&next=x%26y",
+            ),
+            (
+                "127.0.0.1:8080",
+                8443,
+                "https://127.0.0.1:8443/a%3Fpart%23frag%2Fend?tag=a&tag=b&next=x%26y",
+            ),
+            (
+                "[2001:db8::1]:8080",
+                443,
+                "https://[2001:db8::1]/a%3Fpart%23frag%2Fend?tag=a&tag=b&next=x%26y",
+            ),
+            (
+                "[::1]:8080",
+                8443,
+                "https://[::1]:8443/a%3Fpart%23frag%2Fend?tag=a&tag=b&next=x%26y",
+            ),
+        ] {
+            let request = format!(
+                "GET /a%3Fpart%23frag%2Fend?tag=a&tag=b&next=x%26y HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+            );
+            let response = redirect_over_tcp(ServerConfig::default(), port, request.as_bytes());
+            assert!(response.starts_with("HTTP/1.1 301"), "{response}");
+            assert_eq!(response_location(&response), Some(location), "{host}");
+        }
+    }
+
+    #[test]
+    fn https_redirect_tcp_uses_only_admitted_forwarded_authority() {
+        let config = ServerConfig::default()
+            .with_allowed_hosts(["good.example"])
+            .with_trust_x_forwarded_host(true);
+        let response = redirect_over_tcp(config, 443, b"GET /path?x=1 HTTP/1.1\r\nHost: evil.example\r\nX-Forwarded-Host: good.example\r\nConnection: close\r\n\r\n");
+        assert!(response.starts_with("HTTP/1.1 301"), "{response}");
+        assert_eq!(
+            response_location(&response),
+            Some("https://good.example/path?x=1")
+        );
+
+        let config = ServerConfig::default().with_allowed_hosts(["good.example"]);
+        let response = redirect_over_tcp(config, 443, b"GET /%40evil.example/ HTTP/1.1\r\nHost: good.example\r\nX-Forwarded-Host: evil.example\r\nForwarded: host=evil.example;proto=http\r\nConnection: close\r\n\r\n");
+        assert!(response.starts_with("HTTP/1.1 301"), "{response}");
+        assert_eq!(
+            response_location(&response),
+            Some("https://good.example/%40evil.example/")
+        );
+    }
+
+    #[test]
+    fn https_redirect_tcp_rejects_bad_authorities_and_non_origin_targets() {
+        for host in [
+            "good.example@evil.example",
+            "good.example:bad",
+            "good.example:0",
+            "good.example:65536",
+            "[::1]:bad",
+            "[::1",
+        ] {
+            let request =
+                format!("GET /path HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+            let response = redirect_over_tcp(ServerConfig::default(), 443, request.as_bytes());
+            assert!(response.starts_with("HTTP/1.1 400"), "{host}: {response}");
+            assert_eq!(response_location(&response), None, "{host}");
+        }
+        for target in [
+            "@evil.example/",
+            "http://evil.example/",
+            "%2F@evil.example/",
+            "/path#fragment",
+            "/bad%GG",
+        ] {
+            let request =
+                format!("GET {target} HTTP/1.1\r\nHost: good.example\r\nConnection: close\r\n\r\n");
+            let response = redirect_over_tcp(ServerConfig::default(), 443, request.as_bytes());
+            assert!(response.starts_with("HTTP/1.1 400"), "{target}: {response}");
+            assert_eq!(response_location(&response), None, "{target}");
+        }
     }
 
     // ========================================================================

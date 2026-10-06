@@ -104,7 +104,7 @@ pub use multipart::{
 };
 pub use request::{
     BackgroundTasks, BackgroundTasksInner, Body, Headers, HttpVersion, Method, Request,
-    RequestBodyStream, RequestBodyStreamError,
+    RequestAuthority, RequestBodyStream, RequestBodyStreamError,
 };
 pub use response::{
     Binary, BodyStream, FileResponse, Html, IntoResponse, Link, LinkHeader, LinkRel, NoContent,
