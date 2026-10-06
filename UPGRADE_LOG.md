@@ -146,9 +146,26 @@ All 18 direct dependencies and seven Actions release selectors were rechecked
 and remained current. The complete upgrade record now covers 48 researched
 package/family entries: 46 sequential-table rows plus the initial flate2 and
 direct syn entries. The current lockfile differs from the prior certified
-graph in these two releases; all seven workspace gates are being rerun and
-current-graph hosted CI remains pending. Prior-graph results do not certify
-these two updates. The current-graph resolver dry run proposes only the held
+graph in these two releases. All seven workspace gates subsequently passed
+on the final dependency graph, with the same commands, profiles, and warning
+limits listed above: the full suite ran 2601 passing tests, zero failures,
+and 188 existing ignores. The source and lockfile at `fc61caa` and `7c53067`
+are identical; the latter changes upgrade-log wording only. The rustdoc
+compiler returned 0, but its original caller returned 102 after artifact
+retrieval exhausted local disk space. Native RCH recovery of the same wrapper
+`rchw-a8104335-a66e-49fe-9bc9-8f8965b21215` / build
+`30050444235506615` returned 0 and delivered all eight documentation indexes.
+The original failure and staging remain retained; no compiler replay or
+deletion was used to manufacture a passing result.
+
+Current-graph hosted CI remains pending. At `7c53067`, all seven initial
+jobs (audit, three OS test jobs, formatting, Clippy, docs) passed. The x86_64
+macOS release binary compiled successfully, then artifact creation failed
+with `ENOTFOUND`; this is not a successful release job or an all-green CI run.
+[Current-graph CI](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37357680149).
+The subsequently implemented typed OpenAPI and HTTPS redirect capabilities
+(`fr-z7jj`, `fr-e7f9`) require fresh source validation; these dependency-graph
+results do not certify that new code. The current-graph resolver dry run proposes only the held
 seven-package wasm family plus Tokio; all 48 tested targets remain in the
 312-package lockfile, with none of the seven forbidden runtime crates.
 The October 5 audit again passed with zero known vulnerabilities, no advisory
