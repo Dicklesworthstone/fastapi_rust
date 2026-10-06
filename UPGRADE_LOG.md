@@ -183,7 +183,28 @@ canonical document keys; route constructors and all existing semantic
 assertions remain, with additional raw-key rejection and mandatory path
 parameter checks. Earlier compiler, Clippy, deadline, cancellation, and
 disk-write failures remain retained; they are not passing attempts.
-Fresh hosted CI on the final source remains required for `bd-3ffo`.
+Fresh hosted CI was still required at that checkpoint. The completed run below
+fulfills `bd-3ffo`'s original requirement without waiving any job.
+
+### October 6 completed hosted validation
+
+[CI at `cfc29fc`](https://github.com/Dicklesworthstone/fastapi_rust/actions/runs/37455186231)
+completed successfully on October 6 at 13:27 UTC: all 13 jobs passed, including
+all five release targets and their artifact uploads. Each of Linux, macOS and
+Windows passed 2,632 all-feature tests with zero failures, 188 existing ignores
+and zero filtered tests; each also ran a separate default doctest suite with
+53 passes. Formatting, strict Clippy and warnings-denied documentation passed.
+The audit checked the same 312-package graph and reported no known
+vulnerabilities, retaining the existing unmaintained bincode and yaml-rust
+warnings. Independent review checked the actual raw logs, not just job labels.
+
+The 48 researched update entries remain in the accepted graph. Cargo.toml,
+Cargo.lock, CI and toolchain are unchanged between that hosted revision and
+the subsequent authentication integration at `da27a27`. That later feature
+passed its own seven strict remote RCH workspace gates, including actual Rust
+1.95 and 2,649 tests; the older hosted run is evidence for its cited revision,
+not a hosted result for the later authentication source. Earlier failed,
+cancelled and disk-recovery attempts remain recorded above and in Beads.
 
 The current-graph resolver dry run proposes only the held
 seven-package wasm family plus Tokio; all 48 tested targets remain in the
