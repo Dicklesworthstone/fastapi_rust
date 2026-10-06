@@ -436,8 +436,7 @@ fn optional_authentication_documents_anonymous_access_without_weakening_required
     );
 }
 
-#[test]
-fn explicit_manual_security_definitions_and_oauth_metadata_are_served() {
+fn explicit_security_app() -> App {
     use fastapi_rust::openapi::{ApiKeyLocation, OAuthFlows, OAuthPasswordFlow, SecurityScheme};
 
     let manual = fastapi_rust::fastapi_core::RouteEntry::from_route(
@@ -480,13 +479,16 @@ fn explicit_manual_security_definitions_and_oauth_metadata_are_served() {
             description: Some("Explicit application metadata".to_owned()),
         },
     );
-    let client = TestClient::new(
-        App::builder()
-            .openapi(fastapi_rust::OpenApiConfig::new())
-            .route_entry(manual)
-            .route_entry(oauth)
-            .build(),
-    );
+    App::builder()
+        .openapi(fastapi_rust::OpenApiConfig::new())
+        .route_entry(manual)
+        .route_entry(oauth)
+        .build()
+}
+
+#[test]
+fn explicit_manual_security_definitions_are_served() {
+    let client = TestClient::new(explicit_security_app());
     assert_eq!(client.get("/manual/auth").send().status_code(), 401);
     assert_eq!(
         client
@@ -504,15 +506,6 @@ fn explicit_manual_security_definitions_and_oauth_metadata_are_served() {
             .status_code(),
         200
     );
-    let valid = client
-        .get("/protected/oauth")
-        .header("authorization", "Bearer opaque-token")
-        .send();
-    assert_eq!(valid.status_code(), 200);
-    assert_eq!(
-        valid.json::<String>().expect("unchanged OAuth extraction"),
-        "opaque-token"
-    );
     let document = client
         .get("/openapi.json")
         .send()
@@ -526,6 +519,26 @@ fn explicit_manual_security_definitions_and_oauth_metadata_are_served() {
     assert_eq!(schemes["ApiKey"]["type"], "apiKey");
     assert_eq!(schemes["ApiKey"]["name"], "x-api-key");
     assert_eq!(schemes["ApiKey"]["in"], "header");
+}
+
+#[test]
+fn explicit_oauth_metadata_preserves_runtime_extraction() {
+    let client = TestClient::new(explicit_security_app());
+    let valid = client
+        .get("/protected/oauth")
+        .header("authorization", "Bearer opaque-token")
+        .send();
+    assert_eq!(valid.status_code(), 200);
+    assert_eq!(
+        valid.json::<String>().expect("unchanged OAuth extraction"),
+        "opaque-token"
+    );
+    let document = client
+        .get("/openapi.json")
+        .send()
+        .json::<serde_json::Value>()
+        .expect("explicit OAuth metadata");
+    let schemes = &document["components"]["securitySchemes"];
     assert_eq!(
         schemes["OAuth2PasswordBearer"]["flows"]["password"]["tokenUrl"],
         "/sessions/token"
