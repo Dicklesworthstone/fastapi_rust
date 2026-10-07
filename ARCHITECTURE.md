@@ -412,6 +412,13 @@ Response ◄── MW1.after ◄─── MW2.after ◄─── MW3.after ◄�
 
 First registered runs first on the way in, last on the way out.
 
+The application stack wraps every HTTP dispatch outcome, including 404, 405,
+and automatic OPTIONS responses. This lets CORS handle preflight requests
+without an explicit OPTIONS route and lets response middleware decorate routing
+errors. Route lookup and matched path-parameter population happen before the
+stack, so before hooks can inspect those parameters. Parser and transport errors
+that occur before `App::handle` and WebSocket upgrades use separate server paths.
+
 ### Control Flow
 
 ```rust

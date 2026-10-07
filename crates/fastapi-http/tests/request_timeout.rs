@@ -20,6 +20,90 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 #[test]
+fn middleware_routing_headers_and_preflight_reach_tcp_app_and_handler_consumers() {
+    for handler_mode in [false, true] {
+        let calls = Arc::new(AtomicU64::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let app = App::builder()
+            .get("/known", move |_, _| {
+                handler_calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(
+                    Response::ok().body(ResponseBody::Bytes(b"known route".to_vec())),
+                )
+            })
+            .middleware(fastapi_core::RequestIdMiddleware::new())
+            .middleware(fastapi_core::SecurityHeaders::new())
+            .middleware(fastapi_core::Cors::new().allow_origin("https://client.example"))
+            .build();
+        let (server, addr, server_thread) = spawn_cleanup_server(app, handler_mode);
+        for (method, path, status, allow, preflight) in [
+            ("GET", "/known", 200, None, false),
+            ("GET", "/missing", 404, None, false),
+            ("DELETE", "/known", 405, Some("GET, HEAD"), false),
+            ("OPTIONS", "/known", 204, Some("GET, HEAD, OPTIONS"), false),
+            ("OPTIONS", "/known", 204, None, true),
+            ("OPTIONS", "/known", 403, None, true),
+        ] {
+            let origin = if status == 403 {
+                "https://other.example"
+            } else {
+                "https://client.example"
+            };
+            let preflight_header = if preflight {
+                "Access-Control-Request-Method: GET\r\n"
+            } else {
+                ""
+            };
+            let request = format!(
+                "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nOrigin: {origin}\r\n{preflight_header}\r\n"
+            );
+            let bytes = exchange_response(addr, &request);
+            let response = std::str::from_utf8(&bytes).expect("UTF-8 response");
+            let (head, body) = response
+                .split_once("\r\n\r\n")
+                .expect("complete HTTP headers");
+            assert!(
+                head.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{response}"
+            );
+            let headers: Vec<_> = head
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.split_once(':'))
+                .collect();
+            let header = |name: &str| {
+                headers
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.trim())
+            };
+            assert_eq!(header("allow"), allow);
+            assert_eq!(header("x-content-type-options"), Some("nosniff"));
+            assert!(header("x-request-id").is_some_and(|value| !value.is_empty()));
+            assert_eq!(
+                header("access-control-allow-origin"),
+                (status != 403).then_some(origin)
+            );
+            if preflight && status == 204 {
+                assert!(
+                    header("access-control-allow-methods")
+                        .expect("preflight methods")
+                        .split(", ")
+                        .any(|method| method == "GET")
+                );
+            }
+            if status == 200 {
+                assert_eq!(body, "known route");
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.shutdown();
+        drop(TcpStream::connect(addr));
+        server_thread.join().expect("middleware server join");
+    }
+}
+
+#[test]
 fn handler_deadline_releases_registered_dependency() {
     let released = Arc::new(AtomicBool::new(false));
     let cleanup_released = Arc::clone(&released);
@@ -278,11 +362,15 @@ fn spawn_app_server(
 }
 
 fn get_response(addr: SocketAddr, path: &str) -> Vec<u8> {
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    exchange_response(addr, &request)
+}
+
+fn exchange_response(addr: SocketAddr, request: &str) -> Vec<u8> {
     let mut stream = TcpStream::connect(addr).expect("connect must succeed");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("set_read_timeout must succeed");
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .expect("request write must succeed");

@@ -353,7 +353,8 @@ impl MiddlewareStack {
                     ran_before_count += 1;
                 }
                 ControlFlow::Break(response) => {
-                    // Short-circuit: run after hooks for middleware that already ran
+                    // This before hook completed too; include its own after hook.
+                    ran_before_count += 1;
                     return self
                         .run_after_hooks(ctx, req, response, ran_before_count)
                         .await;
@@ -9786,7 +9787,7 @@ mod tests {
                 "mw1.before",
                 "mw2.before",
                 // mw3.before NOT called because mw2 broke
-                // mw2.after NOT called because it was the one that broke (ran_before_count = 1)
+                "mw2.after",
                 "mw1.after",
             ]
         );
@@ -9809,8 +9810,7 @@ mod tests {
         assert_eq!(response.status().as_u16(), 403);
 
         let calls = log.lock().unwrap().clone();
-        assert_eq!(calls, vec!["mw1.before"]);
-        // No after hooks because ran_before_count = 0
+        assert_eq!(calls, vec!["mw1.before", "mw1.after"]);
     }
 
     #[test]
@@ -9837,7 +9837,7 @@ mod tests {
                 "mw1.before",
                 "mw2.before",
                 "mw3.before",
-                // mw3 broke, so only mw1 and mw2 after hooks run
+                "mw3.after",
                 "mw2.after",
                 "mw1.after",
             ]
@@ -11862,11 +11862,10 @@ mod tests {
     fn middleware_stack_short_circuit_runs_prior_after_hooks() {
         // When middleware 2 short-circuits:
         // - mw1:before runs (returns Continue, count=1)
-        // - mw2:before short-circuits (returns Break, count stays at 1)
+        // - mw2:before short-circuits (returns Break, count=2)
         // - mw3:before does NOT run
         // - handler does NOT run
-        // - Only middleware that successfully completed before (mw1) have after run
-        // - mw1:after runs
+        // - Both completed before hooks have after run: mw2, then mw1
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let mut stack = MiddlewareStack::new();
@@ -11884,19 +11883,17 @@ mod tests {
         assert_eq!(response.status().as_u16(), 403);
 
         let execution_log = log.lock().unwrap().clone();
-        // Note: mw2's after hook does NOT run because it didn't return Continue
-        // Only middleware that successfully completed before (returned Continue) have after run
         assert_eq!(
             execution_log,
-            vec!["mw1:before", "mw2:before:break", "mw1:after",]
+            vec!["mw1:before", "mw2:before:break", "mw2:after", "mw1:after",]
         );
     }
 
     #[test]
     fn middleware_stack_first_middleware_short_circuits() {
         // When the first middleware short-circuits:
-        // - mw1:before short-circuits (returns Break, count=0)
-        // - No after hooks run (count=0)
+        // - mw1:before short-circuits (returns Break, count=1)
+        // - Only mw1:after runs
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let mut stack = MiddlewareStack::new();
@@ -11911,8 +11908,7 @@ mod tests {
         assert_eq!(response.status().as_u16(), 403);
 
         let execution_log = log.lock().unwrap().clone();
-        // No after hooks run because no middleware returned Continue
-        assert_eq!(execution_log, vec!["mw1:before:break",]);
+        assert_eq!(execution_log, vec!["mw1:before:break", "mw1:after",]);
     }
 
     #[test]
@@ -11983,9 +11979,9 @@ mod tests {
         // When the last middleware short-circuits:
         // - mw1:before runs (Continue, count=1)
         // - mw2:before runs (Continue, count=2)
-        // - mw3:before short-circuits (Break, count stays at 2)
+        // - mw3:before short-circuits (Break, count=3)
         // - handler does NOT run
-        // - After hooks run for mw1 and mw2 only (they returned Continue)
+        // - After hooks run for all completed before hooks: mw3, mw2, mw1
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let mut stack = MiddlewareStack::new();
@@ -12001,13 +11997,13 @@ mod tests {
         assert_eq!(response.status().as_u16(), 403);
 
         let execution_log = log.lock().unwrap().clone();
-        // mw3's after hook does NOT run because it didn't return Continue
         assert_eq!(
             execution_log,
             vec![
                 "mw1:before",
                 "mw2:before",
                 "mw3:before:break",
+                "mw3:after",
                 "mw2:after",
                 "mw1:after",
             ]

@@ -286,12 +286,13 @@ Execution for a request:
 6. LoggingMiddleware.after()
 7. RequestIdMiddleware.after()
 
-If `AuthMiddleware.before()` returns `Stop(response)`:
+If `AuthMiddleware.before()` returns `ControlFlow::Break(response)`:
 1. RequestIdMiddleware.before()
 2. LoggingMiddleware.before()
-3. AuthMiddleware.before() → Returns Stop
-4. LoggingMiddleware.after() (on short-circuit response)
-5. RequestIdMiddleware.after()
+3. AuthMiddleware.before() → Returns Break
+4. AuthMiddleware.after() (on short-circuit response)
+5. LoggingMiddleware.after()
+6. RequestIdMiddleware.after()
 
 ## Pitfalls to Avoid
 

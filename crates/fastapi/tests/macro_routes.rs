@@ -15,9 +15,9 @@
 // not await, `Result<_, HttpError>`), so the pedantic lints about them are noise here.
 #![allow(clippy::unused_async, clippy::result_large_err)]
 
-use fastapi_rust::ResponseBody;
 use fastapi_rust::prelude::*;
 use fastapi_rust::testing::TestClient;
+use fastapi_rust::{PathParams, ResponseBody};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -475,6 +475,278 @@ fn app() -> App {
         .middleware(RequestIdMiddleware::new())
         .middleware(Cors::new().allow_any_origin())
         .build()
+}
+
+#[test]
+fn middleware_routing_cors_preflight_reaches_policy_before_dispatch() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let client = TestClient::new(
+        App::builder()
+            .post("/submit", move |_, _| {
+                handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(Response::ok().body(ResponseBody::Bytes(b"submitted".to_vec())))
+            })
+            .middleware(RequestIdMiddleware::new())
+            .middleware(
+                Cors::new()
+                    .allow_origin("https://client.example")
+                    .allow_credentials(true)
+                    .allow_methods([Method::Post])
+                    .allow_headers(["content-type"]),
+            )
+            .build(),
+    );
+    let allowed = client
+        .options("/submit")
+        .header("origin", "https://client.example")
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "content-type")
+        .send();
+    assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        allowed.header_str("access-control-allow-origin"),
+        Some("https://client.example")
+    );
+    assert_eq!(
+        allowed.header_str("access-control-allow-credentials"),
+        Some("true")
+    );
+    assert_eq!(
+        allowed.header_str("access-control-allow-methods"),
+        Some("POST")
+    );
+    assert_eq!(
+        allowed.header_str("access-control-allow-headers"),
+        Some("content-type")
+    );
+    assert!(allowed.header_str("x-request-id").is_some());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let rejected = client
+        .options("/submit")
+        .header("origin", "https://other.example")
+        .header("access-control-request-method", "POST")
+        .send();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert!(rejected.header("access-control-allow-origin").is_none());
+    assert!(rejected.header_str("x-request-id").is_some());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let submitted = client
+        .post("/submit")
+        .header("origin", "https://client.example")
+        .send();
+    assert_eq!(submitted.status(), StatusCode::OK);
+    assert_eq!(submitted.text(), "submitted");
+    assert_eq!(
+        submitted.header_str("access-control-allow-origin"),
+        Some("https://client.example")
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+struct RoutingOrderMiddleware {
+    events: CleanupEvents,
+    before: &'static str,
+    after: &'static str,
+}
+
+impl fastapi_rust::core::Middleware for RoutingOrderMiddleware {
+    fn before<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> fastapi_rust::core::BoxFuture<'a, fastapi_rust::core::ControlFlow> {
+        Box::pin(async move {
+            if req.method() == Method::Get && req.path() == "/items/42" {
+                assert_eq!(
+                    req.get_extension::<PathParams>()
+                        .expect("matched parameters")
+                        .get("id"),
+                    Some("42")
+                );
+            }
+            self.events.record(self.before);
+            fastapi_rust::core::ControlFlow::Continue
+        })
+    }
+
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        _req: &'a Request,
+        response: Response,
+    ) -> fastapi_rust::core::BoxFuture<'a, Response> {
+        Box::pin(async move {
+            self.events.record(self.after);
+            response
+        })
+    }
+}
+
+#[test]
+fn middleware_routing_preserves_status_allow_parameters_and_onion_order() {
+    for (method, path, status, allow) in [
+        (Method::Get, "/items/42", StatusCode::OK, None),
+        (Method::Get, "/missing", StatusCode::NOT_FOUND, None),
+        (
+            Method::Delete,
+            "/items/42",
+            StatusCode::METHOD_NOT_ALLOWED,
+            Some("GET, HEAD"),
+        ),
+        (
+            Method::Options,
+            "/items/42",
+            StatusCode::NO_CONTENT,
+            Some("GET, HEAD, OPTIONS"),
+        ),
+    ] {
+        let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+        let client = TestClient::new(
+            App::builder()
+                .route_entry(get_item_route())
+                .middleware(RoutingOrderMiddleware {
+                    events: events.clone(),
+                    before: "outer before",
+                    after: "outer after",
+                })
+                .middleware(RoutingOrderMiddleware {
+                    events: events.clone(),
+                    before: "inner before",
+                    after: "inner after",
+                })
+                .middleware(RequestIdMiddleware::new())
+                .middleware(fastapi_rust::core::SecurityHeaders::new())
+                .middleware(Cors::new().allow_origin("https://client.example"))
+                .build(),
+        );
+        let response = client
+            .request(method, path)
+            .header("origin", "https://client.example")
+            .send();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.header_str("allow"), allow);
+        assert!(response.header_str("x-request-id").is_some());
+        assert_eq!(
+            response.header_str("x-content-type-options"),
+            Some("nosniff")
+        );
+        assert_eq!(
+            response.header_str("access-control-allow-origin"),
+            Some("https://client.example")
+        );
+        assert_eq!(
+            events.snapshot(),
+            ["outer before", "inner before", "inner after", "outer after"]
+        );
+        if status == StatusCode::OK {
+            assert_eq!(response.json::<Item>().expect("item response").id, 42);
+        }
+    }
+}
+
+#[test]
+fn middleware_routing_missing_route_short_circuit_still_finalizes_dependencies() {
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let client = TestClient::new(
+        App::builder()
+            .state(events.clone())
+            .middleware(CleanupMiddleware(events.clone()))
+            .middleware(AcquireAndStopMiddleware)
+            .route_entry(cleanup_route_route())
+            .build(),
+    );
+    let response = client.get("/missing").send();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.text(), "stopped by middleware");
+    assert_eq!(
+        response.header_str("x-resource-lifecycle"),
+        Some("completed middleware")
+    );
+    assert_eq!(
+        events.snapshot(),
+        [
+            "setup inner",
+            "middleware stop",
+            "middleware after",
+            "cleanup inner"
+        ]
+    );
+}
+
+struct ObservedShortCircuit(CleanupEvents);
+
+impl fastapi_rust::core::Middleware for ObservedShortCircuit {
+    fn before<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        req: &'a mut Request,
+    ) -> fastapi_rust::core::BoxFuture<'a, fastapi_rust::core::ControlFlow> {
+        Box::pin(async move {
+            let inner = DependsCleanup::<InnerResource>::from_request(ctx, req)
+                .await
+                .expect("short-circuit resource");
+            inner.0.0.record("stop before");
+            fastapi_rust::core::ControlFlow::Break(
+                Response::with_status(StatusCode::FORBIDDEN)
+                    .body(ResponseBody::Bytes(b"stopped".to_vec())),
+            )
+        })
+    }
+
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        _req: &'a Request,
+        response: Response,
+    ) -> fastapi_rust::core::BoxFuture<'a, Response> {
+        Box::pin(async move {
+            assert!(!self.0.snapshot().contains(&"cleanup inner"));
+            self.0.record("own after");
+            response.header("x-own-after", b"ran once".to_vec())
+        })
+    }
+}
+
+#[test]
+fn middleware_routing_short_circuit_runs_own_after_before_prior_after_and_cleanup() {
+    for path in ["/cleanup", "/missing"] {
+        let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+        let client = TestClient::new(
+            App::builder()
+                .state(events.clone())
+                .route_entry(cleanup_route_route())
+                .middleware(RoutingOrderMiddleware {
+                    events: events.clone(),
+                    before: "outer before",
+                    after: "outer after",
+                })
+                .middleware(ObservedShortCircuit(events.clone()))
+                .middleware(RoutingOrderMiddleware {
+                    events: events.clone(),
+                    before: "later before",
+                    after: "later after",
+                })
+                .build(),
+        );
+        let response = client.get(path).send();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.text(), "stopped");
+        assert_eq!(response.header_str("x-own-after"), Some("ran once"));
+        assert_eq!(
+            events.snapshot(),
+            [
+                "outer before",
+                "setup inner",
+                "stop before",
+                "own after",
+                "outer after",
+                "cleanup inner"
+            ]
+        );
+    }
 }
 
 type ItemAlias = Item;

@@ -1934,7 +1934,9 @@ impl App {
     /// Handles an incoming request.
     ///
     /// This matches the request against registered routes, runs middleware,
-    /// and returns the response.
+    /// and returns the response. Middleware wraps routing responses too,
+    /// including 404, 405, and automatic OPTIONS. Matched path parameters
+    /// are available to middleware before hooks.
     ///
     /// The caller owns response consumption and request finalization. After consuming
     /// the response, execute any background tasks, then await
@@ -1946,17 +1948,12 @@ impl App {
             &self.state,
         )));
         // Use the trie-based router for efficient matching with path parameter extraction
-        match self.router.lookup(req.path(), req.method()) {
+        let handler = match self.router.lookup(req.path(), req.method()) {
             RouteLookup::Match(route_match) => {
                 // Find the handler by matching the route path
                 let entry = self.routes.iter().find(|e| {
                     e.method == route_match.route.method && e.path == route_match.route.path
                 });
-
-                let Some(entry) = entry else {
-                    // This should never happen if router and routes are in sync
-                    return Response::with_status(StatusCode::INTERNAL_SERVER_ERROR);
-                };
 
                 // Store extracted path parameters in the request
                 if !route_match.params.is_empty() {
@@ -1970,9 +1967,14 @@ impl App {
                     req.insert_extension(path_params);
                 }
 
-                // Create a handler that wraps the route
-                let handler = RouteHandler { entry };
-                self.middleware.execute(&handler, ctx, req).await
+                match entry {
+                    Some(entry) => RouteHandler::Matched(entry),
+                    // This should never happen if router and routes are in sync.
+                    None => RouteHandler::RoutingResponse {
+                        status: StatusCode::INTERNAL_SERVER_ERROR,
+                        allow: None,
+                    },
+                }
             }
             RouteLookup::MethodNotAllowed { allowed } => {
                 // Auto-handle `OPTIONS` by returning 204 with an `Allow` header.
@@ -1983,15 +1985,23 @@ impl App {
                         methods.push(Method::Options);
                     }
                     let allow = fastapi_router::AllowedMethods::new(methods);
-                    Response::with_status(StatusCode::NO_CONTENT)
-                        .header("allow", allow.header_value().as_bytes().to_vec())
+                    RouteHandler::RoutingResponse {
+                        status: StatusCode::NO_CONTENT,
+                        allow: Some(allow.header_value()),
+                    }
                 } else {
-                    Response::with_status(StatusCode::METHOD_NOT_ALLOWED)
-                        .header("allow", allowed.header_value().as_bytes().to_vec())
+                    RouteHandler::RoutingResponse {
+                        status: StatusCode::METHOD_NOT_ALLOWED,
+                        allow: Some(allowed.header_value()),
+                    }
                 }
             }
-            RouteLookup::NotFound => Response::with_status(StatusCode::NOT_FOUND),
-        }
+            RouteLookup::NotFound => RouteHandler::RoutingResponse {
+                status: StatusCode::NOT_FOUND,
+                allow: None,
+            },
+        };
+        self.middleware.execute(&handler, ctx, req).await
     }
 
     /// Handles an incoming websocket upgrade request after the handshake has been accepted.
@@ -2174,9 +2184,13 @@ impl Handler for App {
     }
 }
 
-/// Handler wrapper for a route entry.
-struct RouteHandler<'a> {
-    entry: &'a RouteEntry,
+/// Terminal dispatch so middleware can wrap both routes and routing responses.
+enum RouteHandler<'a> {
+    Matched(&'a RouteEntry),
+    RoutingResponse {
+        status: StatusCode,
+        allow: Option<String>,
+    },
 }
 
 impl<'a> Handler for RouteHandler<'a> {
@@ -2185,8 +2199,19 @@ impl<'a> Handler for RouteHandler<'a> {
         ctx: &'b RequestContext,
         req: &'b mut Request,
     ) -> BoxFuture<'b, Response> {
-        let handler = self.entry.handler.clone();
-        Box::pin(async move { handler(ctx, req).await })
+        match self {
+            Self::Matched(entry) => {
+                let handler = entry.handler.clone();
+                Box::pin(async move { handler(ctx, req).await })
+            }
+            Self::RoutingResponse { status, allow } => {
+                let mut response = Response::with_status(*status);
+                if let Some(allow) = allow {
+                    response = response.header("allow", allow.as_bytes().to_vec());
+                }
+                Box::pin(std::future::ready(response))
+            }
+        }
     }
 }
 
