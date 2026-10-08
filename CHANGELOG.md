@@ -6,7 +6,7 @@ This project is a Rust web framework inspired by Python's [FastAPI](https://fast
 
 Commit links point to `https://github.com/Dicklesworthstone/fastapi_rust/commit/<hash>`.
 
-Scope window: first commit (2026-01-17) through v0.4.4 (2026-08-24).
+Scope window: first commit (2026-01-17) through v0.5.0 (2026-10-08).
 
 Sources: git history and tags on `main`, GitHub Releases, and the crates.io
 version list for `fastapi-rust`. Dates are the local commit/tag dates; crates.io
@@ -16,6 +16,7 @@ shows the same publishes in UTC (which can be one day later).
 
 | Version | Date | Git tag | GitHub Release | crates.io | Notes |
 |---------|------|---------|----------------|-----------|-------|
+| 0.5.0 | 2026-10-08 | [v0.5.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.5.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.5.0) | [yes](https://crates.io/crates/fastapi-rust/0.5.0) | asupersync 0.5 (breaking); typed OpenAPI schemas and security metadata; router backtracking; middleware short-circuit/fallback wrapping; dependency cleanup finalization |
 | 0.4.4 | 2026-08-24 | [v0.4.4](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.4) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.4) | [yes](https://crates.io/crates/fastapi-rust/0.4.4) | futures-executor out of the normal dep graph (GH#31); builder metadata precedence |
 | 0.4.3 | 2026-08-20 | [v0.4.3](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.3) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.3) | [yes](https://crates.io/crates/fastapi-rust/0.4.3) | macro route path works for facade consumers; Json responses; builder title/version |
 | 0.4.2 | 2026-08-20 | [v0.4.2](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.2) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.2) | [yes](https://crates.io/crates/fastapi-rust/0.4.2) | real install.sh; stable-safe dependency snippets |
@@ -31,6 +32,54 @@ shows the same publishes in UTC (which can be one day later).
 
 ## [Unreleased]
 
+## [v0.5.0] -- 2026-10-08
+
+A breaking release: the runtime moves from asupersync 0.4 to 0.5, OpenAPI documents are
+now built from typed route schemas, and several middleware and request-handling
+behaviours changed. Library crates: install from crates.io (`fastapi-rust = "0.5.0"`);
+prebuilt `.rlib` archives are no longer attached to the GitHub Release.
+
+### Migrating from 0.4.x
+
+- **asupersync 0.4 -> 0.5** ([fb15fa5](https://github.com/Dicklesworthstone/fastapi_rust/commit/fb15fa5)).
+  Depend on `asupersync = { version = "0.5", default-features = false }` alongside
+  `fastapi-rust = "0.5.0"`. Runtime types re-exported or accepted by fastapi (`Cx`,
+  `Budget`, runtime builders) are the 0.5 types; follow asupersync's own 0.5 migration
+  notes for code that uses the runtime directly.
+- **Route macros require `JsonSchema` on documented types**
+  ([1f24fb8](https://github.com/Dicklesworthstone/fastapi_rust/commit/1f24fb8),
+  [b6486c8](https://github.com/Dicklesworthstone/fastapi_rust/commit/b6486c8)). Handler
+  `Json<T>` bodies, `Json<T>` / `Result<Json<T>, E>` returns, `Query<T>`, each `Path<T>`
+  element and `NamedHeader<T, N>` values must implement `JsonSchema`, whether or not
+  OpenAPI serving is enabled. Add `#[derive(JsonSchema)]` (from `fastapi_rust`) next to
+  `Deserialize`/`Serialize`. Foreign types without an impl (for example
+  `Path<uuid::Uuid>`) need a local newtype that implements `JsonSchema`.
+  A handler may declare at most one `Path` extractor.
+- **Security requirements must name a registered scheme**
+  ([69eb3ba](https://github.com/Dicklesworthstone/fastapi_rust/commit/69eb3ba)). With
+  OpenAPI enabled, `AppBuilder::build()` panics when a route's
+  `.security_scheme("name")` requirement has no definition. Register one on the route
+  entry with `.security_scheme(name, fastapi_rust::openapi::SecurityScheme)` (or
+  `OpenApiBuilder::security_scheme` for standalone documents); conflicting
+  definitions of one name also panic. Built-in `BearerToken`, `BasicAuth` and
+  `OAuth2PasswordBearer` extractors register their schemes automatically.
+- **`fastapi-openapi` public types**: `Operation` gained `security` and `Components`
+  gained `security_schemes` (struct literals must add them); `Schema` gained an
+  `AnyOf` variant (exhaustive matches need a new arm); `OpenApiBuilder::add_route`
+  returns `Option<&mut Operation>`; `Option<T>` and `nullable()` emit different schemas
+  for non-primitive `T`; schema JSON uses `additionalProperties`, `minItems` and
+  `maxItems`.
+- **Middleware semantics** ([2d52dbe](https://github.com/Dicklesworthstone/fastapi_rust/commit/2d52dbe)):
+  a middleware that short-circuits in `before()` now also receives its own `after()`,
+  and the middleware stack now wraps 404, 405 and automatic `OPTIONS` responses.
+- **Request handling** ([1b8d88e](https://github.com/Dicklesworthstone/fastapi_rust/commit/1b8d88e),
+  [e9c8dc4](https://github.com/Dicklesworthstone/fastapi_rust/commit/e9c8dc4)): a `Host`
+  header with an empty or invalid port (`example.com:`, `example.com:bad`) is rejected
+  with 400 instead of dropping the port; the HTTPS redirect answers 400 for a missing
+  `Host` (it used to redirect to `localhost`) and for absolute-form targets.
+  `TestClient`/`TestServer` now read the whole response stream before returning, so a
+  test against an infinite stream (SSE) must not wait on `send()` for headers alone.
+
 ### Fixed
 
 - **Router: sibling route candidates are now backtracked instead of silently unroutable.**
@@ -45,6 +94,37 @@ shows the same publishes in UTC (which can be one day later).
   `static_prefix_dead_end_falls_back_to_param_sibling`,
   `intermediate_node_without_routes_is_not_a_match`,
   `backtracking_restores_params_of_abandoned_candidates`.
+
+- **App state and dependency lifetimes** ([e9c8dc4](https://github.com/Dicklesworthstone/fastapi_rust/commit/e9c8dc4)):
+  configured application state reaches handlers, and dependency cleanup callbacks now
+  run at request completion on every server path (v0.4.4 never ran them in the server).
+- **OpenAPI documents** ([1f24fb8](https://github.com/Dicklesworthstone/fastapi_rust/commit/1f24fb8),
+  [bd9d3d2](https://github.com/Dicklesworthstone/fastapi_rust/commit/bd9d3d2),
+  [b6486c8](https://github.com/Dicklesworthstone/fastapi_rust/commit/b6486c8),
+  [69eb3ba](https://github.com/Dicklesworthstone/fastapi_rust/commit/69eb3ba)): the
+  served document carries typed request/response/path/query/header schemas, canonical
+  path metadata and strict schema checks, and authentication extractors publish their
+  security schemes and requirements.
+- **HTTPS redirect** ([1b8d88e](https://github.com/Dicklesworthstone/fastapi_rust/commit/1b8d88e)):
+  preserves the server-admitted authority and percent-encoded targets.
+- **Clock** ([7bb40c6](https://github.com/Dicklesworthstone/fastapi_rust/commit/7bb40c6),
+  [46e33c2](https://github.com/Dicklesworthstone/fastapi_rust/commit/46e33c2)):
+  `current_time()` is anchored to asupersync's process epoch, fixing an accept loop that
+  could stop accepting.
+- **Macros** ([e942b6e](https://github.com/Dicklesworthstone/fastapi_rust/commit/e942b6e)):
+  optional extractors expand without warnings.
+
+### Known issues
+
+- Dependency cleanup callbacks run inline without a timeout; a cleanup that never
+  returns stalls its connection and server drain.
+- The idle-shutdown test for `serve_concurrent` is ignored, so shutdown of an idle
+  server is not covered by an automated test.
+
+### Dependencies
+
+- Lockfile refresh within existing requirements (14 packages); every direct dependency
+  is on its latest major. See `UPGRADE_LOG.md`.
 
 ## [v0.4.4] -- 2026-08-24
 

@@ -24,7 +24,7 @@
 ```toml
 # Cargo.toml
 [dependencies]
-fastapi-rust = { git = "https://github.com/Dicklesworthstone/fastapi_rust", branch = "main" }
+fastapi-rust = "0.5.0"
 asupersync = { version = "0.5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,9 +32,10 @@ serde_json = "1"
 
 (The crates.io package is `fastapi-rust`; the Rust crate name is `fastapi_rust`.)
 
-These examples target current `main`, which uses asupersync 0.5. The published
-`fastapi-rust` 0.4.4 release instead uses the asupersync 0.4 line (currently
-0.4.11); use that runtime line when choosing the registry release.
+The published `fastapi-rust` 0.5.0 uses asupersync 0.5, the same runtime line as
+`main`. For unreleased changes use
+`fastapi-rust = { git = "https://github.com/Dicklesworthstone/fastapi_rust", branch = "main" }`.
+The older 0.4.x releases use the asupersync 0.4 line.
 
 <p><em>Requires Rust 1.95+ (2024 edition). Co-developed with <a href="https://github.com/Dicklesworthstone/asupersync">asupersync</a>.</em></p>
 </div>
@@ -237,7 +238,7 @@ goal; the dependency inventory is recorded in `Cargo.lock` and `UPGRADE_LOG.md`.
 
 ### When to Consider Alternatives
 
-- You need production-proven stability today (fastapi_rust is v0.4.4)
+- You need production-proven stability today (fastapi_rust is v0.5.0)
 - You require production-hardened WebSocket support (implementation exists; broader parity remains under `bd-uz2s`)
 - You have existing Tokio-based infrastructure
 - You need the massive ecosystem of Tower middleware
@@ -250,15 +251,16 @@ goal; the dependency inventory is recorded in `Cargo.lock` and `UPGRADE_LOG.md`.
 
 ```toml
 [dependencies]
-fastapi-rust = { git = "https://github.com/Dicklesworthstone/fastapi_rust", branch = "main" }
+fastapi-rust = "0.5.0"
 asupersync = { version = "0.5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ```
 
 **Note**: The crates.io package is `fastapi-rust`, and the crate name is `fastapi_rust`.
-This dependency set follows current `main`. For published `fastapi-rust = "0.4.4"`,
-use `asupersync = { version = "0.4.11", default-features = false }` instead.
+To follow current `main` instead, use
+`fastapi-rust = { git = "https://github.com/Dicklesworthstone/fastapi_rust", branch = "main" }`.
+Upgrading from 0.4.x: see the 0.5.0 migration notes in `CHANGELOG.md`.
 
 ### From Source
 
@@ -779,7 +781,7 @@ Tokio's spawn model makes cancel-correctness difficult - tasks can outlive their
 
 ### Can I use this in production?
 
-Not production-ready yet. This is v0.4.4 in active development; the TCP server exists (built on `asupersync::net`),
+Not production-ready yet. This is v0.5.0 in active development; the TCP server exists (built on `asupersync::net`),
 but parity and production hardening are tracked under `bd-uz2s`.
 
 ### How fast is it?

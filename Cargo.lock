@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-core"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "asupersync",
  "fastapi-macros",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-http"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "asupersync",
  "criterion",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-macros"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-openapi"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "fastapi-router",
  "fastapi-types",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-output"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "crossterm",
  "insta",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-router"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "fastapi-types",
  "serde_json",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-rust"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "fastapi-core",
  "fastapi-http",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-types"
-version = "0.4.4"
+version = "0.5.0"
 
 [[package]]
 name = "fastrand"

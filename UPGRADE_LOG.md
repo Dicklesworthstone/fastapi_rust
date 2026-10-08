@@ -1,5 +1,13 @@
 # Dependency Upgrade Log
 
+## 2026-10-08 refresh (v0.5.0 release)
+
+`cargo update` within existing requirements: 14 lockfile packages advanced. A sweep of
+every direct registry dependency against crates.io found all of them on their latest
+major (asupersync 0.5.0, rich_rust 0.2.3, syn 3, criterion 0.8, insta 1.49, proptest 1,
+serial_test 4.0.1, ...), so no manifest change was needed. Gated by the v0.5.0 release
+lanes (workspace fmt, clippy `-D warnings`, workspace tests on RCH).
+
 ## 2026-10-04–05 refresh (bd-3ffo)
 
 The user explicitly requested `library-updater`. This section records registry
