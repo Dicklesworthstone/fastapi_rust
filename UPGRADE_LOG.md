@@ -1,5 +1,29 @@
 # Dependency Upgrade Log
 
+## 2026-10-11 wasm family hold restored (issue #32)
+
+The v0.5.0 refresh below (ed2328a2) also advanced the held wasm family:
+wasm-bindgen 0.2.129, wasm-bindgen-futures 0.4.79 and js-sys/web-sys 0.3.106.
+That reversed the hold recorded under "Sequential transitive validation", and
+through wasm-bindgen-futures 0.4.79 (an Emscripten-cfg dependency) it put
+tokio 1.53.2 back into Cargo.lock. The refresh entry did not say so.
+
+Restored with the same coordinated resolver step:
+
+    cargo update -p wasm-bindgen-futures -p web-sys --precise 0.4.78
+
+Cargo downgraded exactly the seven held packages (wasm-bindgen and its
+-futures, -macro, -macro-support and -shared crates, js-sys, web-sys) and
+removed tokio. No other lock entry changed, and the restored entries are
+byte-identical, checksums included, to the pre-refresh lock (9469072).
+`cargo tree --target all -i tokio` finds no tokio. The new test
+`crates/fastapi/tests/lock_policy.rs` fails if Cargo.lock contains tokio or
+any tokio-* package.
+
+This protects this repository's lock only. The published 0.5.0 manifests are
+unchanged, so a fresh crates.io consumer can still resolve
+wasm-bindgen-futures 0.4.79 and its Emscripten-only tokio edge.
+
 ## 2026-10-08 refresh (v0.5.0 release)
 
 `cargo update` within existing requirements: 14 lockfile packages advanced. A sweep of
