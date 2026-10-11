@@ -279,7 +279,7 @@ check_disk_space() {
 
 check_network() {
   [ "$OFFLINE" -eq 1 ] && return 0
-  if ! curl -fsSL "${PROXY_ARGS[@]}" --connect-timeout 3 -o /dev/null "https://index.crates.io/config.json" 2>/dev/null; then
+  if ! curl -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} --connect-timeout 3 -o /dev/null "https://index.crates.io/config.json" 2>/dev/null; then
     warn "Cannot reach crates.io; switching to offline mode (version lookup skipped)"
     OFFLINE=1
   fi
@@ -330,7 +330,7 @@ check_toolchain() {
   [ "$OFFLINE" -eq 1 ] && die "Offline and no toolchain available; install Rust from https://rustup.rs first."
   if [ "$EASY" -eq 1 ] || ask_yn "Install Rust via rustup (https://rustup.rs) now? [y/N]" "n"; then
     local rustup_init="$TEMP_DIR/rustup-init.sh"
-    curl -fsSL "${PROXY_ARGS[@]}" --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$rustup_init" \
+    curl -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$rustup_init" \
       || die "Failed to download rustup-init"
     run_with_spinner "Installing Rust (stable) via rustup" sh "$rustup_init" -y --profile minimal --default-toolchain stable --no-modify-path
     export PATH="$HOME/.cargo/bin:$PATH"
@@ -354,7 +354,7 @@ resolve_version() {
   if [ "$OFFLINE" -eq 0 ]; then
     # Sparse index: one JSON line per version; take the newest non-yanked one.
     local index_url="https://index.crates.io/fa/st/${CRATE}" line v
-    if line=$(curl -fsSL "${PROXY_ARGS[@]}" --connect-timeout 5 "$index_url" 2>/dev/null | grep '"yanked":false' | tail -n1); then
+    if line=$(curl -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} --connect-timeout 5 "$index_url" 2>/dev/null | grep '"yanked":false' | tail -n1); then
       v=$(printf '%s' "$line" | sed -nE 's/.*"vers":"([^"]+)".*/\1/p')
       if [ -n "$v" ]; then
         VERSION="$v"; VERSION_SOURCE="crates.io index"
@@ -362,7 +362,7 @@ resolve_version() {
       fi
     fi
     # Fallback: latest GitHub release tag.
-    if v=$(curl -fsSL "${PROXY_ARGS[@]}" --connect-timeout 5 "https://api.github.com/repos/${OWNER}/${REPO}/releases/latest" 2>/dev/null \
+    if v=$(curl -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} --connect-timeout 5 "https://api.github.com/repos/${OWNER}/${REPO}/releases/latest" 2>/dev/null \
           | sed -nE 's/.*"tag_name": *"v?([^"]+)".*/\1/p' | head -n1) && [ -n "$v" ]; then
       VERSION="$v"; VERSION_SOURCE="GitHub releases"
       return 0
@@ -493,7 +493,7 @@ EOF
     info "Building ${NEW_NAME} (the first build compiles the whole dependency graph; cargo shows progress)"
     local -a quiet_flag=()
     [ "$QUIET" -eq 1 ] && quiet_flag=(-q)
-    if cargo build --manifest-path "$PROJECT_PATH/Cargo.toml" "${quiet_flag[@]}"; then
+    if cargo build --manifest-path "$PROJECT_PATH/Cargo.toml" ${quiet_flag[@]+"${quiet_flag[@]}"}; then
       ok "cargo build succeeded"
     else
       SCAFFOLD_STATUS="failed"
@@ -593,7 +593,7 @@ install_skill() {
   local tarball="" skill_src=""
   if [ "$OFFLINE" -eq 0 ]; then
     tarball="$TEMP_DIR/fastapi-rust-skill.tar.gz"
-    if curl -fsSL "${PROXY_ARGS[@]}" --connect-timeout 5 \
+    if curl -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} --connect-timeout 5 \
         "https://github.com/${OWNER}/${REPO}/releases/download/v${VERSION}/fastapi-rust-skill.tar.gz" -o "$tarball" 2>/dev/null \
        && tar -tzf "$tarball" >/dev/null 2>&1; then
       mkdir -p "$TEMP_DIR/skill" && tar -xzf "$tarball" -C "$TEMP_DIR/skill"
@@ -604,7 +604,7 @@ install_skill() {
   fi
 
   local entry agent base dest
-  for entry in "${DETECTED_AGENTS[@]}"; do
+  for entry in ${DETECTED_AGENTS[@]+"${DETECTED_AGENTS[@]}"}; do
     agent="${entry%%:*}"; base="${entry#*:}"; dest="$base/fastapi-rust"
     if [ -f "$dest/SKILL.md" ] && [ "$FORCE" -eq 0 ] && grep -q "fastapi-rust\` ${VERSION} " "$dest/SKILL.md" 2>/dev/null; then
       SKILL_STATUS+=("$agent:already"); continue
@@ -645,7 +645,7 @@ show_summary() {
     lines+=("Skill:      no AI agents detected")
   else
     local s
-    for s in "${SKILL_STATUS[@]}"; do
+    for s in ${SKILL_STATUS[@]+"${SKILL_STATUS[@]}"}; do
       case "${s#*:}" in
         installed) lines+=("Skill:      ${s%%:*} — installed") ;;
         already)   lines+=("Skill:      ${s%%:*} — already current") ;;
@@ -669,11 +669,11 @@ show_summary() {
     local esc stripped=()
     esc=$(printf '\033')
     local l
-    for l in "${lines[@]}"; do stripped+=("$(printf '%b' "$l" | LC_ALL=C sed "s/${esc}\\[[0-9;]*m//g")"); done
-    gum style --border double --border-foreground 42 --padding "0 2" --margin "1 0" "${stripped[@]}"
+    for l in ${lines[@]+"${lines[@]}"}; do stripped+=("$(printf '%b' "$l" | LC_ALL=C sed "s/${esc}\\[[0-9;]*m//g")"); done
+    gum style --border double --border-foreground 42 --padding "0 2" --margin "1 0" ${stripped[@]+"${stripped[@]}"}
   else
     echo
-    draw_box "0;32" "${lines[@]}"
+    draw_box "0;32" ${lines[@]+"${lines[@]}"}
     echo
   fi
 }
