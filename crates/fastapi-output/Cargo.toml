@@ -15,7 +15,7 @@ categories = ["command-line-interface", "development-tools"]
 [dependencies]
 # Core terminal detection (always needed)
 crossterm = "0.29"
-parking_lot = "0.12"
+parking_lot = "0.13"
 regex = "1"
 unicode-width = "0.2"
 
