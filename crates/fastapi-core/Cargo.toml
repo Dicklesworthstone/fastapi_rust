@@ -10,7 +10,7 @@ rust-version.workspace = true
 asupersync = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-parking_lot = "0.12"
+parking_lot = "0.13"
 fastapi-types = { workspace = true }
 fastapi-router = { workspace = true }
 fastapi-openapi = { workspace = true }
