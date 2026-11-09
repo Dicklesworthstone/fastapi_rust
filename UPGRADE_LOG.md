@@ -1,5 +1,20 @@
 # Dependency Upgrade Log
 
+## 2026-11-09 asupersync 0.5.0 -> 0.6.2
+
+frankenterm moved to asupersync 0.6.2 and hands its `Cx` to fastapi through
+its `web` feature. A `Cx` of one asupersync version is not a `Cx` of another,
+so that bridge stopped compiling. No code here changes: asupersync 0.6.0
+removed or renamed no public item, and none of the six breaks its changelog
+lists (new fields and enum variants, generic child regions, lost auto traits)
+touches fastapi.
+
+    cargo update -p asupersync
+
+moved asupersync to 0.6.2 and franken-decision, franken-evidence and
+franken-kernel to 0.6.0. No other lock entry changed, so tokio stays out.
+As with 0.5, a consumer moves to asupersync 0.6 together with this.
+
 ## 2026-10-11 wasm family hold restored (issue #32)
 
 The v0.5.0 refresh below (ed2328a2) also advanced the held wasm family:
