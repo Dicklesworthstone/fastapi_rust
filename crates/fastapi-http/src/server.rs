@@ -176,6 +176,7 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// | `read_buffer_size` | 8192 bytes |
 /// | `tcp_nodelay` | `true` |
 /// | `keep_alive_timeout` | 75s |
+/// | `request_read_timeout` | 0 (disabled) |
 /// | `max_requests_per_connection` | 100 |
 /// | `drain_timeout` | 30s |
 ///
@@ -210,6 +211,14 @@ pub struct ServerConfig {
     /// Keep-alive timeout (time to wait for next request on a connection).
     /// Set to 0 to disable keep-alive timeout.
     pub keep_alive_timeout: Duration,
+    /// The longest an HTTP/1.1 request may take to arrive, from its first
+    /// byte to its last. The keep-alive timeout bounds each read, so without
+    /// this a client sending a byte just inside it can hold a connection for
+    /// as long as its request is allowed to be large. A request still
+    /// incomplete at the deadline gets 408 and the connection closes. Idle
+    /// time between requests does not count. Set to 0 to disable (the
+    /// default).
+    pub request_read_timeout: Duration,
     /// Maximum requests per connection (0 = unlimited).
     pub max_requests_per_connection: usize,
     /// Drain timeout (time to wait for in-flight requests on shutdown).
@@ -237,6 +246,7 @@ impl ServerConfig {
             trust_x_forwarded_host: false,
             tcp_nodelay: true,
             keep_alive_timeout: Duration::from_secs(DEFAULT_KEEP_ALIVE_TIMEOUT_SECS),
+            request_read_timeout: Duration::ZERO,
             max_requests_per_connection: DEFAULT_MAX_REQUESTS_PER_CONNECTION,
             drain_timeout: Duration::from_secs(DEFAULT_DRAIN_TIMEOUT_SECS),
             pre_body_validators: PreBodyValidators::new(),
@@ -348,6 +358,14 @@ impl ServerConfig {
     #[must_use]
     pub fn with_keep_alive_timeout_secs(mut self, secs: u64) -> Self {
         self.keep_alive_timeout = Duration::from_secs(secs);
+        self
+    }
+
+    /// Sets the longest a request may take to arrive; see
+    /// [`ServerConfig::request_read_timeout`]. Zero disables it.
+    #[must_use]
+    pub fn with_request_read_timeout(mut self, timeout: Duration) -> Self {
+        self.request_read_timeout = timeout;
         self
     }
 
@@ -616,6 +634,101 @@ async fn linger_after_refusal(stream: &mut TcpStream, buffer: &mut [u8], config:
     }
 }
 
+/// Answers a request that did not arrive within
+/// [`ServerConfig::request_read_timeout`] with 408 and `connection: close`,
+/// lingers like any refusal, and returns the timeout as the connection's
+/// error.
+async fn refuse_slow_request(
+    stream: &mut TcpStream,
+    response_writer: &mut ResponseWriter,
+    read_buffer: &mut [u8],
+    config: &ServerConfig,
+) -> ServerError {
+    let response = Response::with_status(StatusCode::REQUEST_TIMEOUT)
+        .header("connection", b"close".to_vec())
+        .body(fastapi_core::ResponseBody::Bytes(
+            b"Request Timeout".to_vec(),
+        ));
+    if write_response(stream, response_writer.write(response))
+        .await
+        .is_ok()
+    {
+        linger_after_refusal(stream, read_buffer, config).await;
+    }
+    ServerError::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "request read deadline exceeded",
+    ))
+}
+
+/// Reads more of an HTTP/1.1 request into `read_buffer` and returns how many
+/// bytes arrived (0 when the peer closed). Each read waits at most the
+/// keep-alive timeout and, once the request has begun, no longer than what
+/// remains of [`ServerConfig::request_read_timeout`].
+///
+/// `request_started` holds when the request's first byte arrived: callers set
+/// it when the parser already holds bytes, this sets it when a read brings
+/// the first ones, and callers clear it when a request completes. Waiting out
+/// the keep-alive timeout is [`ServerError::KeepAliveTimeout`]; passing the
+/// request deadline answers 408 first (see [`refuse_slow_request`]).
+async fn read_request_bytes(
+    stream: &mut TcpStream,
+    response_writer: &mut ResponseWriter,
+    read_buffer: &mut [u8],
+    config: &ServerConfig,
+    request_started: &mut Option<u64>,
+) -> Result<usize, ServerError> {
+    let remaining = match *request_started {
+        Some(started) if !config.request_read_timeout.is_zero() => {
+            let elapsed = Duration::from_nanos(current_time().as_nanos().saturating_sub(started));
+            match config.request_read_timeout.checked_sub(elapsed) {
+                Some(remaining) if !remaining.is_zero() => Some(remaining),
+                _ => {
+                    return Err(
+                        refuse_slow_request(stream, response_writer, read_buffer, config).await,
+                    );
+                }
+            }
+        }
+        _ => None,
+    };
+    let keep_alive = (!config.keep_alive_timeout.is_zero()).then_some(config.keep_alive_timeout);
+    // The request deadline is what ends this wait when it is no later than
+    // the keep-alive timeout.
+    let deadline_bound =
+        remaining.is_some_and(|remaining| keep_alive.is_none_or(|k| remaining <= k));
+    let read = match keep_alive.into_iter().chain(remaining).min() {
+        None => read_into_buffer(stream, read_buffer).await,
+        Some(wait) => read_with_timeout(stream, read_buffer, wait).await,
+    };
+    match read {
+        Ok(read) => {
+            if read > 0 && request_started.is_none() {
+                *request_started = Some(current_time().as_nanos());
+            }
+            Ok(read)
+        }
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+            if deadline_bound {
+                Err(refuse_slow_request(stream, response_writer, read_buffer, config).await)
+            } else {
+                Err(ServerError::KeepAliveTimeout)
+            }
+        }
+        Err(e) => Err(ServerError::Io(e)),
+    }
+}
+
+/// Whether a connection ended because a read timed out, either the
+/// keep-alive timeout or the request read deadline.
+fn is_read_timeout(error: &ServerError) -> bool {
+    match error {
+        ServerError::KeepAliveTimeout => true,
+        ServerError::Io(error) => error.kind() == io::ErrorKind::TimedOut,
+        _ => false,
+    }
+}
+
 fn extract_effective_host(
     request: &Request,
     config: &ServerConfig,
@@ -794,6 +907,7 @@ where
     let mut requests_on_connection: usize = 0;
     let max_requests = config.max_requests_per_connection;
     let mut head_admitted = false;
+    let mut request_started = None;
 
     loop {
         // Check for cancellation
@@ -833,24 +947,27 @@ where
                     }
                     head_admitted = true;
                 }
-                let keep_alive_timeout = config.keep_alive_timeout;
-
-                let bytes_read = if keep_alive_timeout.is_zero() {
-                    read_into_buffer(&mut stream, &mut read_buffer).await?
-                } else {
-                    match read_with_timeout(&mut stream, &mut read_buffer, keep_alive_timeout).await
-                    {
-                        Ok(0) => return Ok(()),
-                        Ok(n) => n,
-                        Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                            cx.trace(&format!(
-                                "Keep-alive timeout ({:?}) - closing idle connection",
-                                keep_alive_timeout
-                            ));
-                            return Err(ServerError::KeepAliveTimeout);
-                        }
-                        Err(e) => return Err(ServerError::Io(e)),
+                if parser.buffered_len() > 0 && request_started.is_none() {
+                    request_started = Some(current_time().as_nanos());
+                }
+                let bytes_read = match read_request_bytes(
+                    &mut stream,
+                    &mut response_writer,
+                    &mut read_buffer,
+                    config,
+                    &mut request_started,
+                )
+                .await
+                {
+                    Ok(read) => read,
+                    Err(ServerError::KeepAliveTimeout) => {
+                        cx.trace(&format!(
+                            "Keep-alive timeout ({:?}) - closing idle connection",
+                            config.keep_alive_timeout
+                        ));
+                        return Err(ServerError::KeepAliveTimeout);
                     }
+                    Err(error) => return Err(error),
                 };
 
                 if bytes_read == 0 {
@@ -874,6 +991,7 @@ where
             }
         };
         let head_was_admitted = std::mem::take(&mut head_admitted);
+        request_started = None;
 
         requests_on_connection += 1;
 
@@ -2701,6 +2819,7 @@ impl TcpServer {
         let mut requests_on_connection: usize = 0;
         let max_requests = self.config.max_requests_per_connection;
         let mut head_admitted = false;
+        let mut request_started = None;
 
         loop {
             if cx.is_cancel_requested() {
@@ -2737,22 +2856,26 @@ impl TcpServer {
                         }
                         head_admitted = true;
                     }
-                    let keep_alive_timeout = self.config.keep_alive_timeout;
-                    let bytes_read = if keep_alive_timeout.is_zero() {
-                        read_into_buffer(&mut stream, &mut read_buffer).await?
-                    } else {
-                        match read_with_timeout(&mut stream, &mut read_buffer, keep_alive_timeout)
-                            .await
-                        {
-                            Ok(0) => return Ok(()),
-                            Ok(n) => n,
-                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    if parser.buffered_len() > 0 && request_started.is_none() {
+                        request_started = Some(current_time().as_nanos());
+                    }
+                    let bytes_read = match read_request_bytes(
+                        &mut stream,
+                        &mut response_writer,
+                        &mut read_buffer,
+                        &self.config,
+                        &mut request_started,
+                    )
+                    .await
+                    {
+                        Ok(read) => read,
+                        Err(error) => {
+                            if is_read_timeout(&error) {
                                 self.metrics_counters
                                     .total_timed_out
                                     .fetch_add(1, Ordering::Relaxed);
-                                return Err(ServerError::KeepAliveTimeout);
                             }
-                            Err(e) => return Err(ServerError::Io(e)),
+                            return Err(error);
                         }
                     };
 
@@ -2779,6 +2902,7 @@ impl TcpServer {
                 }
             };
             let head_was_admitted = std::mem::take(&mut head_admitted);
+            request_started = None;
 
             requests_on_connection += 1;
 
@@ -3940,6 +4064,7 @@ impl TcpServer {
         let mut requests_on_connection: usize = 0;
         let max_requests = self.config.max_requests_per_connection;
         let mut head_admitted = false;
+        let mut request_started = None;
 
         loop {
             // Check for cancellation
@@ -3979,22 +4104,26 @@ impl TcpServer {
                         }
                         head_admitted = true;
                     }
-                    let keep_alive_timeout = self.config.keep_alive_timeout;
-                    let bytes_read = if keep_alive_timeout.is_zero() {
-                        read_into_buffer(&mut stream, &mut read_buffer).await?
-                    } else {
-                        match read_with_timeout(&mut stream, &mut read_buffer, keep_alive_timeout)
-                            .await
-                        {
-                            Ok(0) => return Ok(()),
-                            Ok(n) => n,
-                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    if parser.buffered_len() > 0 && request_started.is_none() {
+                        request_started = Some(current_time().as_nanos());
+                    }
+                    let bytes_read = match read_request_bytes(
+                        &mut stream,
+                        &mut response_writer,
+                        &mut read_buffer,
+                        &self.config,
+                        &mut request_started,
+                    )
+                    .await
+                    {
+                        Ok(read) => read,
+                        Err(error) => {
+                            if is_read_timeout(&error) {
                                 self.metrics_counters
                                     .total_timed_out
                                     .fetch_add(1, Ordering::Relaxed);
-                                return Err(ServerError::KeepAliveTimeout);
                             }
-                            Err(e) => return Err(ServerError::Io(e)),
+                            return Err(error);
                         }
                     };
 
@@ -4021,6 +4150,7 @@ impl TcpServer {
                 }
             };
             let head_was_admitted = std::mem::take(&mut head_admitted);
+            request_started = None;
 
             requests_on_connection += 1;
 
@@ -6188,6 +6318,27 @@ mod tests {
     fn config_keep_alive_timeout_can_be_set_secs() {
         let config = ServerConfig::new("127.0.0.1:8080").with_keep_alive_timeout_secs(90);
         assert_eq!(config.keep_alive_timeout, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn config_request_read_timeout_is_off_by_default_and_can_be_set() {
+        assert!(ServerConfig::default().request_read_timeout.is_zero());
+        let config =
+            ServerConfig::new("127.0.0.1:8080").with_request_read_timeout(Duration::from_secs(10));
+        assert_eq!(config.request_read_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn read_timeouts_are_recognized_and_other_errors_are_not() {
+        assert!(is_read_timeout(&ServerError::KeepAliveTimeout));
+        assert!(is_read_timeout(&ServerError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "request read deadline exceeded",
+        ))));
+        assert!(!is_read_timeout(&ServerError::Io(io::Error::other(
+            "reset"
+        ))));
+        assert!(!is_read_timeout(&ServerError::Shutdown));
     }
 
     #[test]

@@ -226,8 +226,7 @@ impl ExpectHandler {
     pub fn expectation_failed(detail: impl Into<String>) -> Response {
         let detail = detail.into();
         let body = format!("417 Expectation Failed: {detail}");
-        // StatusCode::EXPECTATION_FAILED is 417
-        Response::with_status(StatusCode::from_u16(417))
+        Response::with_status(StatusCode::EXPECTATION_FAILED)
             .header("content-type", b"text/plain; charset=utf-8".to_vec())
             .header("connection", b"close".to_vec())
             .body(ResponseBody::Bytes(body.into_bytes()))

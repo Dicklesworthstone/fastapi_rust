@@ -7,6 +7,10 @@
 //! head and then waits, as an `Expect: 100-continue` client does. The keep-
 //! alive timeout is 10 s and every client read gives up after 5 s, so a
 //! server that waits for body bytes before deciding cannot pass.
+//!
+//! The last tests cover `ServerConfig::request_read_timeout`: a request that
+//! trickles in, each byte inside the keep-alive timeout, still has to finish
+//! arriving by the deadline.
 
 use asupersync::Cx;
 use asupersync::runtime::{RuntimeBuilder, reactor::create_reactor};
@@ -257,18 +261,18 @@ fn other_head_refusals_do_not_wait_for_the_body() {
             (
                 "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\
                  Expect: 102-processing\r\n\r\n",
-                "417",
+                "417 Expectation Failed",
             ),
             (
                 "POST /upload HTTP/1.1\r\nHost: elsewhere.example\r\nContent-Length: 5\r\n\r\n",
-                "400",
+                "400 Bad Request",
             ),
         ] {
             let mut stream = connect(running.addr);
             stream.write_all(head.as_bytes()).expect("head");
             let response = read_to_end(&mut stream);
             assert!(
-                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                response.starts_with(&format!("HTTP/1.1 {status}\r\n")),
                 "{mode:?}: {head:?} needs {status} from its head: {response:?}"
             );
         }
@@ -303,6 +307,91 @@ fn a_body_past_the_parser_limit_gets_413() {
             "{mode:?}: a request past the parser limit needs a 413: {response:?}"
         );
         assert_eq!(running.calls(), 0, "{mode:?}");
+        running.stop();
+    }
+}
+
+/// The request read deadline in the next tests.
+const READ_DEADLINE: Duration = Duration::from_secs(1);
+
+fn config_with_read_deadline() -> ServerConfig {
+    ServerConfig::new("127.0.0.1:0")
+        .with_keep_alive_timeout(Duration::from_secs(3))
+        .with_request_read_timeout(READ_DEADLINE)
+}
+
+/// A body sent a byte every 200 ms, well inside the 3 s keep-alive timeout,
+/// would take 20 s. The request gets 408 at the 1 s read deadline and no
+/// handler runs. Without the deadline the server keeps reading and the
+/// client's 5 s read timeout ends the test with no response.
+#[test]
+fn a_trickled_request_gets_408_at_the_read_deadline() {
+    for mode in MODES {
+        let running = spawn(mode, config_with_read_deadline());
+        let mut stream = connect(running.addr);
+        stream
+            .write_all(b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n")
+            .expect("head");
+        let started = Instant::now();
+        let mut trickle = stream.try_clone().expect("clone");
+        let writer = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if trickle.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let response = read_to_end(&mut stream);
+        let elapsed = started.elapsed();
+        drop(stream.shutdown(std::net::Shutdown::Both));
+        writer.join().expect("writer join");
+        assert!(
+            response.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+            "{mode:?}: a trickled request needs a 408: {response:?}"
+        );
+        assert!(
+            response.to_ascii_lowercase().contains("connection: close"),
+            "{mode:?}: {response:?}"
+        );
+        assert!(
+            elapsed + Duration::from_millis(50) >= READ_DEADLINE,
+            "{mode:?}: the 408 came before the deadline, after {elapsed:?}"
+        );
+        assert_eq!(
+            running.calls(),
+            0,
+            "{mode:?}: no handler for a refused request"
+        );
+        running.stop();
+    }
+}
+
+/// The deadline counts from a request's first byte, not from the last
+/// request: a keep-alive connection idle for longer than the deadline still
+/// serves its next request.
+#[test]
+fn idle_time_between_requests_does_not_count_against_the_deadline() {
+    for mode in MODES {
+        let running = spawn(mode, config_with_read_deadline());
+        let mut stream = connect(running.addr);
+        let request = b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello";
+        stream.write_all(request).expect("first request");
+        let first = read_until(&mut stream, |received| received.ends_with(b"handled"));
+        assert!(
+            first.starts_with(b"HTTP/1.1 200 "),
+            "{mode:?}: {:?}",
+            String::from_utf8_lossy(&first)
+        );
+        std::thread::sleep(READ_DEADLINE + Duration::from_millis(500));
+        stream.write_all(request).expect("second request");
+        let second = read_until(&mut stream, |received| received.ends_with(b"handled"));
+        assert!(
+            second.starts_with(b"HTTP/1.1 200 "),
+            "{mode:?}: an idle connection must still serve: {:?}",
+            String::from_utf8_lossy(&second)
+        );
+        assert_eq!(running.calls(), 2, "{mode:?}");
         running.stop();
     }
 }

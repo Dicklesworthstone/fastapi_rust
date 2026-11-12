@@ -59,6 +59,8 @@ impl StatusCode {
     pub const METHOD_NOT_ALLOWED: Self = Self(405);
     /// 406 Not Acceptable
     pub const NOT_ACCEPTABLE: Self = Self(406);
+    /// 408 Request Timeout
+    pub const REQUEST_TIMEOUT: Self = Self(408);
     /// 412 Precondition Failed
     pub const PRECONDITION_FAILED: Self = Self(412);
     /// 413 Payload Too Large
@@ -67,6 +69,8 @@ impl StatusCode {
     pub const UNSUPPORTED_MEDIA_TYPE: Self = Self(415);
     /// 416 Range Not Satisfiable
     pub const RANGE_NOT_SATISFIABLE: Self = Self(416);
+    /// 417 Expectation Failed
+    pub const EXPECTATION_FAILED: Self = Self(417);
     /// 422 Unprocessable Entity
     pub const UNPROCESSABLE_ENTITY: Self = Self(422);
     /// 429 Too Many Requests
@@ -123,10 +127,12 @@ impl StatusCode {
             404 => "Not Found",
             405 => "Method Not Allowed",
             406 => "Not Acceptable",
+            408 => "Request Timeout",
             412 => "Precondition Failed",
             413 => "Payload Too Large",
             415 => "Unsupported Media Type",
             416 => "Range Not Satisfiable",
+            417 => "Expectation Failed",
             422 => "Unprocessable Entity",
             429 => "Too Many Requests",
             499 => "Client Closed Request",
@@ -2550,6 +2556,21 @@ mod tests {
         assert_eq!(
             StatusCode::RANGE_NOT_SATISFIABLE.canonical_reason(),
             "Range Not Satisfiable"
+        );
+    }
+
+    /// The server sends both, so neither may go out as "Unknown".
+    #[test]
+    fn request_timeout_and_expectation_failed_have_reasons() {
+        assert_eq!(StatusCode::REQUEST_TIMEOUT.as_u16(), 408);
+        assert_eq!(
+            StatusCode::REQUEST_TIMEOUT.canonical_reason(),
+            "Request Timeout"
+        );
+        assert_eq!(StatusCode::EXPECTATION_FAILED.as_u16(), 417);
+        assert_eq!(
+            StatusCode::EXPECTATION_FAILED.canonical_reason(),
+            "Expectation Failed"
         );
     }
 
