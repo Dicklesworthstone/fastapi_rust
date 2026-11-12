@@ -177,6 +177,7 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// | `tcp_nodelay` | `true` |
 /// | `keep_alive_timeout` | 75s |
 /// | `request_read_timeout` | 0 (disabled) |
+/// | `http2_prior_knowledge` | `true` |
 /// | `max_requests_per_connection` | 100 |
 /// | `drain_timeout` | 30s |
 ///
@@ -219,6 +220,14 @@ pub struct ServerConfig {
     /// time between requests does not count. Set to 0 to disable (the
     /// default).
     pub request_read_timeout: Duration,
+    /// Whether a connection that opens with the HTTP/2 prior-knowledge
+    /// preface (h2c) is served as HTTP/2 (the default). The HTTP/2 path
+    /// reads frames with no keep-alive timeout or `request_read_timeout`,
+    /// and runs Host and pre-body validation only after the whole body. A
+    /// server whose clients never use h2c can turn it off: the preface is
+    /// then parsed as HTTP/1.1, and its `PRI` method gets 501 Not
+    /// Implemented and a close.
+    pub http2_prior_knowledge: bool,
     /// Maximum requests per connection (0 = unlimited).
     pub max_requests_per_connection: usize,
     /// Drain timeout (time to wait for in-flight requests on shutdown).
@@ -247,6 +256,7 @@ impl ServerConfig {
             tcp_nodelay: true,
             keep_alive_timeout: Duration::from_secs(DEFAULT_KEEP_ALIVE_TIMEOUT_SECS),
             request_read_timeout: Duration::ZERO,
+            http2_prior_knowledge: true,
             max_requests_per_connection: DEFAULT_MAX_REQUESTS_PER_CONNECTION,
             drain_timeout: Duration::from_secs(DEFAULT_DRAIN_TIMEOUT_SECS),
             pre_body_validators: PreBodyValidators::new(),
@@ -366,6 +376,14 @@ impl ServerConfig {
     #[must_use]
     pub fn with_request_read_timeout(mut self, timeout: Duration) -> Self {
         self.request_read_timeout = timeout;
+        self
+    }
+
+    /// Serves or refuses HTTP/2 prior-knowledge (h2c) connections; see
+    /// [`ServerConfig::http2_prior_knowledge`].
+    #[must_use]
+    pub fn with_http2_prior_knowledge(mut self, enabled: bool) -> Self {
+        self.http2_prior_knowledge = enabled;
         self
     }
 
@@ -917,7 +935,7 @@ where
     Fut: Future<Output = Response>,
 {
     let (proto, mut buffered) = sniff_protocol(&mut stream, config.keep_alive_timeout).await?;
-    if proto == SniffedProtocol::Http2PriorKnowledge {
+    if proto == SniffedProtocol::Http2PriorKnowledge && config.http2_prior_knowledge {
         return process_connection_http2(cx, request_counter, stream, config, handler).await;
     }
 
@@ -2827,7 +2845,7 @@ impl TcpServer {
             self.record_bytes_in(buffered.len() as u64);
         }
 
-        if proto == SniffedProtocol::Http2PriorKnowledge {
+        if proto == SniffedProtocol::Http2PriorKnowledge && self.config.http2_prior_knowledge {
             return self
                 .handle_connection_app_http2(cx, stream, peer_addr, app)
                 .await;
@@ -4072,7 +4090,7 @@ impl TcpServer {
         if !buffered.is_empty() {
             self.record_bytes_in(buffered.len() as u64);
         }
-        if proto == SniffedProtocol::Http2PriorKnowledge {
+        if proto == SniffedProtocol::Http2PriorKnowledge && self.config.http2_prior_knowledge {
             return self
                 .handle_connection_handler_http2(cx, stream, handler)
                 .await;
@@ -6347,6 +6365,13 @@ mod tests {
         let config =
             ServerConfig::new("127.0.0.1:8080").with_request_read_timeout(Duration::from_secs(10));
         assert_eq!(config.request_read_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn config_http2_prior_knowledge_is_on_by_default_and_can_be_turned_off() {
+        assert!(ServerConfig::default().http2_prior_knowledge);
+        let config = ServerConfig::new("127.0.0.1:8080").with_http2_prior_knowledge(false);
+        assert!(!config.http2_prior_knowledge);
     }
 
     #[test]

@@ -500,3 +500,43 @@ fn a_request_read_while_sniffing_is_answered() {
         running.stop();
     }
 }
+
+/// The HTTP/2 prior-knowledge preface (h2c), then an empty SETTINGS frame.
+const H2C_PREFACE_AND_SETTINGS: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
+
+/// h2c is served by default: the server answers the client's SETTINGS with
+/// its own. Turned off, the preface is parsed as an HTTP/1.1 request whose
+/// method, PRI, is not implemented, so it gets 501 and a close, and the
+/// HTTP/2 path (no read timeouts, validation only after the body) is never
+/// reached.
+#[test]
+fn h2c_prior_knowledge_can_be_turned_off() {
+    for mode in MODES {
+        let running = spawn(mode, config());
+        let mut stream = connect(running.addr);
+        stream.write_all(H2C_PREFACE_AND_SETTINGS).expect("preface");
+        let settings = read_until(&mut stream, |received| received.len() >= 9);
+        // The client closes first: the HTTP/2 path has no read timeout.
+        drop(stream);
+        running.stop();
+        assert!(
+            settings.len() >= 9 && settings[3] == 0x4,
+            "{mode:?}: h2c is on by default, so the server sends SETTINGS: {settings:?}"
+        );
+
+        let running = spawn(mode, config().with_http2_prior_knowledge(false));
+        let mut stream = connect(running.addr);
+        stream.write_all(H2C_PREFACE_AND_SETTINGS).expect("preface");
+        let response = read_to_end(&mut stream);
+        assert!(
+            response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
+            "{mode:?}: with h2c off the preface is refused as HTTP/1.1: {response:?}"
+        );
+        assert!(
+            response.to_ascii_lowercase().contains("connection: close"),
+            "{mode:?}: {response:?}"
+        );
+        assert_eq!(running.calls(), 0, "{mode:?}: no handler for the preface");
+        running.stop();
+    }
+}
