@@ -852,6 +852,22 @@ impl StatefulParser {
         self.buffer.len()
     }
 
+    /// The request whose line and headers have been parsed while its body is
+    /// still arriving, or `None` before the headers end and after a request
+    /// completes.
+    ///
+    /// The server admits this head (Host, pre-body validators, `Expect`)
+    /// before it reads any body bytes, so a client that waits for
+    /// `100 Continue` gets it, and an oversized declared length is refused
+    /// without receiving the body. The returned request has no body yet.
+    #[must_use]
+    pub fn pending_head(&self) -> Option<&Request> {
+        match &self.state {
+            ParseState::Body { request, .. } => Some(request),
+            ParseState::RequestLine | ParseState::Headers { .. } => None,
+        }
+    }
+
     /// Take the currently buffered (unconsumed) bytes.
     ///
     /// This is primarily used for protocol upgrades (e.g., WebSocket) where the HTTP parser

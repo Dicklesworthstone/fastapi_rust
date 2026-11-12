@@ -504,6 +504,118 @@ fn admit_host_header(
     Ok(())
 }
 
+/// The longest a refused connection drains what its client is still sending.
+const REFUSAL_LINGER: Duration = Duration::from_secs(2);
+/// The most a refused connection drains. An honest client may have queued a
+/// whole oversized upload before it reads the refusal.
+const REFUSAL_LINGER_BYTES: usize = 16 * 1024 * 1024;
+
+/// What admitting a request head before its body decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadAdmission {
+    /// The head passed; any `100 Continue` it asked for has been sent.
+    Admitted,
+    /// A final response was written and the connection must close.
+    Refused,
+}
+
+/// Admits a request whose line and headers have arrived but whose body has
+/// not, as [`ServerConfig::pre_body_validators`] documents: Host validation,
+/// the validators, then `Expect`. A refusal is a final response with
+/// `connection: close`, sent before any body byte is read: a client waiting
+/// for `100 Continue` never sends its body, and no handler runs.
+///
+/// The completed request is checked again (body-aware validators need its
+/// body); only the `Expect` step is not repeated.
+async fn admit_request_head(
+    stream: &mut TcpStream,
+    response_writer: &mut ResponseWriter,
+    read_buffer: &mut [u8],
+    head: &Request,
+    config: &ServerConfig,
+) -> Result<HeadAdmission, ServerError> {
+    let refusal = if let Err(err) = validate_host_header(head, config) {
+        Some(err.response())
+    } else if let Err(response) = config.pre_body_validators.validate_all(head) {
+        Some(response)
+    } else {
+        match ExpectHandler::check_expect(head) {
+            ExpectResult::NoExpectation => None,
+            ExpectResult::ExpectsContinue => {
+                write_raw_response(stream, CONTINUE_RESPONSE).await?;
+                None
+            }
+            ExpectResult::UnknownExpectation(value) => Some(ExpectHandler::expectation_failed(
+                format!("Unsupported Expect value: {value}"),
+            )),
+        }
+    };
+    let Some(response) = refusal else {
+        return Ok(HeadAdmission::Admitted);
+    };
+    let response = response.header("connection", b"close".to_vec());
+    write_response(stream, response_writer.write(response)).await?;
+    linger_after_refusal(stream, read_buffer, config).await;
+    Ok(HeadAdmission::Refused)
+}
+
+/// Answers a request the parser refused as too large with 413 before the
+/// connection closes, and returns the parse error. Other parse errors close
+/// without a response, as before. The write is best effort: the connection
+/// closes either way.
+async fn refuse_unparseable(
+    stream: &mut TcpStream,
+    response_writer: &mut ResponseWriter,
+    read_buffer: &mut [u8],
+    config: &ServerConfig,
+    error: ParseError,
+) -> ServerError {
+    if matches!(error, ParseError::TooLarge) {
+        let response = Response::with_status(StatusCode::PAYLOAD_TOO_LARGE)
+            .header("connection", b"close".to_vec())
+            .body(fastapi_core::ResponseBody::Bytes(
+                b"Payload Too Large".to_vec(),
+            ));
+        if write_response(stream, response_writer.write(response))
+            .await
+            .is_ok()
+        {
+            linger_after_refusal(stream, read_buffer, config).await;
+        }
+    }
+    ServerError::Parse(error)
+}
+
+/// After a refusal written before the request was fully read, stops writing
+/// and discards what the client is still sending, for at most
+/// [`REFUSAL_LINGER`] (or the keep-alive timeout, if shorter) and
+/// [`REFUSAL_LINGER_BYTES`]. Closing with unread bytes makes the kernel reset
+/// the connection, which can destroy the refusal before the client reads it.
+async fn linger_after_refusal(stream: &mut TcpStream, buffer: &mut [u8], config: &ServerConfig) {
+    if stream.shutdown(std::net::Shutdown::Write).is_err() {
+        return;
+    }
+    let linger = if config.keep_alive_timeout.is_zero() {
+        REFUSAL_LINGER
+    } else {
+        REFUSAL_LINGER.min(config.keep_alive_timeout)
+    };
+    let deadline = current_time()
+        .as_nanos()
+        .saturating_add(u64::try_from(linger.as_nanos()).unwrap_or(u64::MAX));
+    let mut discarded = 0_usize;
+    while discarded < REFUSAL_LINGER_BYTES {
+        let now = current_time().as_nanos();
+        if now >= deadline {
+            return;
+        }
+        match read_with_timeout(stream, buffer, Duration::from_nanos(deadline - now)).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => discarded = discarded.saturating_add(read),
+        }
+    }
+}
+
 fn extract_effective_host(
     request: &Request,
     config: &ServerConfig,
@@ -681,6 +793,7 @@ where
     let mut response_writer = ResponseWriter::new();
     let mut requests_on_connection: usize = 0;
     let max_requests = config.max_requests_per_connection;
+    let mut head_admitted = false;
 
     loop {
         // Check for cancellation
@@ -689,11 +802,37 @@ where
         }
 
         // Try to parse a complete request from buffered data first
-        let parse_result = parser.feed(&[])?;
+        let parse_result = match parser.feed(&[]) {
+            Ok(status) => status,
+            Err(error) => {
+                return Err(refuse_unparseable(
+                    &mut stream,
+                    &mut response_writer,
+                    &mut read_buffer,
+                    config,
+                    error,
+                )
+                .await);
+            }
+        };
 
         let mut request = match parse_result {
             ParseStatus::Complete { request, .. } => request,
             ParseStatus::Incomplete => {
+                if !head_admitted && let Some(head) = parser.pending_head() {
+                    let admission = admit_request_head(
+                        &mut stream,
+                        &mut response_writer,
+                        &mut read_buffer,
+                        head,
+                        config,
+                    )
+                    .await?;
+                    if admission == HeadAdmission::Refused {
+                        return Ok(());
+                    }
+                    head_admitted = true;
+                }
                 let keep_alive_timeout = config.keep_alive_timeout;
 
                 let bytes_read = if keep_alive_timeout.is_zero() {
@@ -718,12 +857,23 @@ where
                     return Ok(());
                 }
 
-                match parser.feed(&read_buffer[..bytes_read])? {
-                    ParseStatus::Complete { request, .. } => request,
-                    ParseStatus::Incomplete => continue,
+                match parser.feed(&read_buffer[..bytes_read]) {
+                    Ok(ParseStatus::Complete { request, .. }) => request,
+                    Ok(ParseStatus::Incomplete) => continue,
+                    Err(error) => {
+                        return Err(refuse_unparseable(
+                            &mut stream,
+                            &mut response_writer,
+                            &mut read_buffer,
+                            config,
+                            error,
+                        )
+                        .await);
+                    }
                 }
             }
         };
+        let head_was_admitted = std::mem::take(&mut head_admitted);
 
         requests_on_connection += 1;
 
@@ -754,7 +904,13 @@ where
         // Handle Expect: 100-continue
         // RFC 7231 Section 5.1.1: If the server receives a request with Expect: 100-continue,
         // it should either send 100 Continue (to proceed) or a final status code (to reject).
-        match ExpectHandler::check_expect(&request) {
+        // A head admitted before its body already answered its expectation.
+        let expectation = if head_was_admitted {
+            ExpectResult::NoExpectation
+        } else {
+            ExpectHandler::check_expect(&request)
+        };
+        match expectation {
             ExpectResult::NoExpectation => {
                 // No Expect header - proceed normally
             }
@@ -2544,16 +2700,43 @@ impl TcpServer {
         let mut response_writer = ResponseWriter::new();
         let mut requests_on_connection: usize = 0;
         let max_requests = self.config.max_requests_per_connection;
+        let mut head_admitted = false;
 
         loop {
             if cx.is_cancel_requested() {
                 return Ok(());
             }
 
-            let parse_result = parser.feed(&[])?;
+            let parse_result = match parser.feed(&[]) {
+                Ok(status) => status,
+                Err(error) => {
+                    return Err(refuse_unparseable(
+                        &mut stream,
+                        &mut response_writer,
+                        &mut read_buffer,
+                        &self.config,
+                        error,
+                    )
+                    .await);
+                }
+            };
             let mut request = match parse_result {
                 ParseStatus::Complete { request, .. } => request,
                 ParseStatus::Incomplete => {
+                    if !head_admitted && let Some(head) = parser.pending_head() {
+                        let admission = admit_request_head(
+                            &mut stream,
+                            &mut response_writer,
+                            &mut read_buffer,
+                            head,
+                            &self.config,
+                        )
+                        .await?;
+                        if admission == HeadAdmission::Refused {
+                            return Ok(());
+                        }
+                        head_admitted = true;
+                    }
                     let keep_alive_timeout = self.config.keep_alive_timeout;
                     let bytes_read = if keep_alive_timeout.is_zero() {
                         read_into_buffer(&mut stream, &mut read_buffer).await?
@@ -2579,12 +2762,23 @@ impl TcpServer {
 
                     self.record_bytes_in(bytes_read as u64);
 
-                    match parser.feed(&read_buffer[..bytes_read])? {
-                        ParseStatus::Complete { request, .. } => request,
-                        ParseStatus::Incomplete => continue,
+                    match parser.feed(&read_buffer[..bytes_read]) {
+                        Ok(ParseStatus::Complete { request, .. }) => request,
+                        Ok(ParseStatus::Incomplete) => continue,
+                        Err(error) => {
+                            return Err(refuse_unparseable(
+                                &mut stream,
+                                &mut response_writer,
+                                &mut read_buffer,
+                                &self.config,
+                                error,
+                            )
+                            .await);
+                        }
                     }
                 }
             };
+            let head_was_admitted = std::mem::take(&mut head_admitted);
 
             requests_on_connection += 1;
 
@@ -2707,8 +2901,14 @@ impl TcpServer {
                 return Ok(());
             }
 
-            // Handle Expect: 100-continue
-            match ExpectHandler::check_expect(&request) {
+            // Handle Expect: 100-continue, unless the head was admitted
+            // before its body and already answered it.
+            let expectation = if head_was_admitted {
+                ExpectResult::NoExpectation
+            } else {
+                ExpectHandler::check_expect(&request)
+            };
+            match expectation {
                 ExpectResult::NoExpectation => {}
                 ExpectResult::ExpectsContinue => {
                     ctx.trace("Sending 100 Continue for Expect: 100-continue");
@@ -3739,6 +3939,7 @@ impl TcpServer {
         let mut response_writer = ResponseWriter::new();
         let mut requests_on_connection: usize = 0;
         let max_requests = self.config.max_requests_per_connection;
+        let mut head_admitted = false;
 
         loop {
             // Check for cancellation
@@ -3747,11 +3948,37 @@ impl TcpServer {
             }
 
             // Parse request from connection
-            let parse_result = parser.feed(&[])?;
+            let parse_result = match parser.feed(&[]) {
+                Ok(status) => status,
+                Err(error) => {
+                    return Err(refuse_unparseable(
+                        &mut stream,
+                        &mut response_writer,
+                        &mut read_buffer,
+                        &self.config,
+                        error,
+                    )
+                    .await);
+                }
+            };
 
             let mut request = match parse_result {
                 ParseStatus::Complete { request, .. } => request,
                 ParseStatus::Incomplete => {
+                    if !head_admitted && let Some(head) = parser.pending_head() {
+                        let admission = admit_request_head(
+                            &mut stream,
+                            &mut response_writer,
+                            &mut read_buffer,
+                            head,
+                            &self.config,
+                        )
+                        .await?;
+                        if admission == HeadAdmission::Refused {
+                            return Ok(());
+                        }
+                        head_admitted = true;
+                    }
                     let keep_alive_timeout = self.config.keep_alive_timeout;
                     let bytes_read = if keep_alive_timeout.is_zero() {
                         read_into_buffer(&mut stream, &mut read_buffer).await?
@@ -3777,12 +4004,23 @@ impl TcpServer {
 
                     self.record_bytes_in(bytes_read as u64);
 
-                    match parser.feed(&read_buffer[..bytes_read])? {
-                        ParseStatus::Complete { request, .. } => request,
-                        ParseStatus::Incomplete => continue,
+                    match parser.feed(&read_buffer[..bytes_read]) {
+                        Ok(ParseStatus::Complete { request, .. }) => request,
+                        Ok(ParseStatus::Incomplete) => continue,
+                        Err(error) => {
+                            return Err(refuse_unparseable(
+                                &mut stream,
+                                &mut response_writer,
+                                &mut read_buffer,
+                                &self.config,
+                                error,
+                            )
+                            .await);
+                        }
                     }
                 }
             };
+            let head_was_admitted = std::mem::take(&mut head_admitted);
 
             requests_on_connection += 1;
 
@@ -3809,8 +4047,14 @@ impl TcpServer {
                 return Ok(());
             }
 
-            // Handle Expect: 100-continue
-            match ExpectHandler::check_expect(&request) {
+            // Handle Expect: 100-continue, unless the head was admitted
+            // before its body and already answered it.
+            let expectation = if head_was_admitted {
+                ExpectResult::NoExpectation
+            } else {
+                ExpectHandler::check_expect(&request)
+            };
+            match expectation {
                 ExpectResult::NoExpectation => {}
                 ExpectResult::ExpectsContinue => {
                     write_raw_response(&mut stream, CONTINUE_RESPONSE).await?;
