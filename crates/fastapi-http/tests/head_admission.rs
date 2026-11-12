@@ -3,10 +3,12 @@
 //! `ServerConfig::pre_body_validators` runs "after parsing headers but before
 //! any body is read", and gates `Expect: 100-continue`. These tests drive the
 //! three HTTP/1.1 connection loops (App, Handler and the closure-based
-//! `process_connection`) over real TCP with a client that sends only the
-//! head and then waits, as an `Expect: 100-continue` client does. The keep-
-//! alive timeout is 10 s and every client read gives up after 5 s, so a
-//! server that waits for body bytes before deciding cannot pass.
+//! `process_connection`), the App loop both from `serve_on_app` and from the
+//! per-connection tasks of `serve_on_app_concurrent`, over real TCP with a
+//! client that sends only the head and then waits, as an
+//! `Expect: 100-continue` client does. The keep-alive timeout is 10 s and
+//! every client read gives up after 5 s, so a server that waits for body
+//! bytes before deciding cannot pass.
 //!
 //! Later tests cover `ServerConfig::request_read_timeout` (a request that
 //! trickles in, each byte inside the keep-alive timeout, still has to finish
@@ -31,11 +33,13 @@ const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     App,
+    /// The App loop, one spawned task per connection.
+    AppConcurrent,
     Handler,
     Closure,
 }
 
-const MODES: [Mode; 3] = [Mode::App, Mode::Handler, Mode::Closure];
+const MODES: [Mode; 4] = [Mode::App, Mode::AppConcurrent, Mode::Handler, Mode::Closure];
 
 struct Running {
     server: Arc<TcpServer>,
@@ -112,6 +116,11 @@ fn spawn(mode: Mode, config: ServerConfig) -> Running {
                 Mode::App => {
                     thread_server
                         .serve_on_app(&cx, listener, Arc::new(app))
+                        .await
+                }
+                Mode::AppConcurrent => {
+                    thread_server
+                        .serve_on_app_concurrent(&cx, listener, Arc::new(app))
                         .await
                 }
                 Mode::Handler => {
