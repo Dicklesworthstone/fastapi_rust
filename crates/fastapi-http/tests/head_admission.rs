@@ -8,9 +8,9 @@
 //! alive timeout is 10 s and every client read gives up after 5 s, so a
 //! server that waits for body bytes before deciding cannot pass.
 //!
-//! The last tests cover `ServerConfig::request_read_timeout`: a request that
+//! Later tests cover `ServerConfig::request_read_timeout` (a request that
 //! trickles in, each byte inside the keep-alive timeout, still has to finish
-//! arriving by the deadline.
+//! arriving by the deadline) and the final status every parser refusal gets.
 
 use asupersync::Cx;
 use asupersync::runtime::{RuntimeBuilder, reactor::create_reactor};
@@ -392,6 +392,111 @@ fn idle_time_between_requests_does_not_count_against_the_deadline() {
             String::from_utf8_lossy(&second)
         );
         assert_eq!(running.calls(), 2, "{mode:?}");
+        running.stop();
+    }
+}
+
+/// Every request the parser refuses gets its final status and
+/// `connection: close`, never a bare close, and no handler runs.
+#[test]
+fn malformed_requests_get_a_final_status() {
+    let limits = ParseLimits {
+        max_request_line_len: 256,
+        max_header_count: 8,
+        max_header_line_len: 256,
+        ..ParseLimits::default()
+    };
+    let long_target = "a".repeat(300);
+    let long_value = "v".repeat(300);
+    let many_headers = "X-Extra: v\r\n".repeat(10);
+    let cases = [
+        (
+            format!("GET /{long_target} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            "414 URI Too Long",
+        ),
+        (
+            format!("POST /upload HTTP/1.1\r\nHost: localhost\r\n{many_headers}\r\n"),
+            "431 Request Header Fields Too Large",
+        ),
+        (
+            format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nX-Long: {long_value}\r\n\r\n"),
+            "431 Request Header Fields Too Large",
+        ),
+        (
+            "BREW /upload HTTP/1.1\r\nHost: localhost\r\n\r\n".to_string(),
+            "501 Not Implemented",
+        ),
+        (
+            "POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n"
+                .to_string(),
+            "501 Not Implemented",
+        ),
+        (
+            "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\
+             Transfer-Encoding: chunked\r\n\r\nhello"
+                .to_string(),
+            "400 Bad Request",
+        ),
+        (
+            "POST /upload HTTP/1.1\r\nHost: localhost\r\nBad Header: x\r\n\r\n".to_string(),
+            "400 Bad Request",
+        ),
+        (
+            "POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
+             zz\r\nhello\r\n0\r\n\r\n"
+                .to_string(),
+            "400 Bad Request",
+        ),
+    ];
+    for mode in MODES {
+        let running = spawn(
+            mode,
+            ServerConfig::new("127.0.0.1:0")
+                .with_keep_alive_timeout(Duration::from_secs(10))
+                .with_parse_limits(limits.clone()),
+        );
+        for (request, status) in &cases {
+            let mut stream = connect(running.addr);
+            stream.write_all(request.as_bytes()).expect("request");
+            let response = read_to_end(&mut stream);
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}\r\n")),
+                "{mode:?}: {request:?} needs {status}: {response:?}"
+            );
+            assert!(
+                response.to_ascii_lowercase().contains("connection: close"),
+                "{mode:?}: {request:?}: {response:?}"
+            );
+        }
+        assert_eq!(
+            running.calls(),
+            0,
+            "{mode:?}: no handler for a refused request"
+        );
+        running.stop();
+    }
+}
+
+/// A request short enough to arrive whole while the server checks for the
+/// HTTP/2 preface (24 bytes) is answered, not dropped. This one has no Host,
+/// so the answer is 400.
+#[test]
+fn a_request_read_while_sniffing_is_answered() {
+    for mode in MODES {
+        let running = spawn(mode, config());
+        let mut stream = connect(running.addr);
+        stream
+            .write_all(b"GET / HTTP/1.0\r\n\r\n")
+            .expect("request");
+        let response = read_to_end(&mut stream);
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "{mode:?}: a request with no Host needs 400, not silence: {response:?}"
+        );
+        assert!(
+            response.contains("Host header required"),
+            "{mode:?}: {response:?}"
+        );
         running.stop();
     }
 }

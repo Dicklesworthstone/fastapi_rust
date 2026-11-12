@@ -725,11 +725,11 @@ impl Parser {
         // Find end of headers
         let header_end = find_header_end(buffer).ok_or(ParseError::Incomplete)?;
 
-        let header_bytes = &buffer[..header_end];
         let body_bytes = &buffer[header_end + 4..]; // Skip \r\n\r\n
 
-        // Parse request line
-        let first_line_end = header_bytes
+        // Parse request line. With no headers its CRLF is the first half of
+        // the CRLF CRLF found above, so the search includes it.
+        let first_line_end = buffer[..header_end + 2]
             .windows(2)
             .position(|w| w == b"\r\n")
             .ok_or(ParseError::InvalidRequestLine)?;
@@ -737,7 +737,7 @@ impl Parser {
             return Err(ParseError::RequestLineTooLong);
         }
 
-        let request_line = &header_bytes[..first_line_end];
+        let request_line = &buffer[..first_line_end];
         let mut request = parse_request_line(request_line)?;
 
         let header_start = first_line_end + 2;
@@ -923,27 +923,30 @@ impl StatefulParser {
                     mut request,
                     header_start,
                 } => {
-                    let header_end = match find_header_end_from(&self.buffer, header_start) {
-                        Some(pos) => pos,
-                        None => {
-                            if self.buffer.len().saturating_sub(header_start)
-                                > self.limits.max_headers_size
-                            {
-                                self.state = ParseState::Headers {
-                                    request,
-                                    header_start,
-                                };
-                                return Err(ParseError::HeadersTooLarge);
-                            }
+                    // A request with no headers ends with the CRLF right after
+                    // the request line. A search for CRLF CRLF that starts
+                    // here, past the request line's own CRLF, never finds it.
+                    let body_start = if self.buffer[header_start..].starts_with(b"\r\n") {
+                        header_start + 2
+                    } else if let Some(pos) = find_header_end_from(&self.buffer, header_start) {
+                        pos + 4
+                    } else {
+                        if self.buffer.len().saturating_sub(header_start)
+                            > self.limits.max_headers_size
+                        {
                             self.state = ParseState::Headers {
                                 request,
                                 header_start,
                             };
-                            return Ok(ParseStatus::Incomplete);
+                            return Err(ParseError::HeadersTooLarge);
                         }
+                        self.state = ParseState::Headers {
+                            request,
+                            header_start,
+                        };
+                        return Ok(ParseStatus::Incomplete);
                     };
 
-                    let body_start = header_end + 4;
                     let header_block_len = body_start - header_start;
                     if header_block_len > self.limits.max_headers_size {
                         return Err(ParseError::HeadersTooLarge);
@@ -1842,6 +1845,72 @@ mod tests {
         assert_eq!(parser.buffered_len(), 0);
     }
 
+    #[test]
+    fn stateful_parser_request_with_no_headers() {
+        let full = b"GET /bare HTTP/1.0\r\n\r\n";
+
+        let mut parser = StatefulParser::new();
+        let (request, consumed) = match parser.feed(full).unwrap() {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("a request with no headers never completed"),
+        };
+        assert_eq!(consumed, full.len());
+        assert_eq!(request.method(), Method::Get);
+        assert_eq!(request.path(), "/bare");
+        assert!(request.headers().is_empty());
+        assert_eq!(parser.buffered_len(), 0);
+
+        // A byte at a time, so the parser also sees the headers state with
+        // only the first CR of the blank line buffered.
+        let mut parser = StatefulParser::new();
+        for (index, byte) in full.iter().enumerate() {
+            let status = parser.feed(std::slice::from_ref(byte)).unwrap();
+            if index + 1 < full.len() {
+                assert!(
+                    matches!(status, ParseStatus::Incomplete),
+                    "complete after {} of {} bytes",
+                    index + 1,
+                    full.len()
+                );
+            } else {
+                match status {
+                    ParseStatus::Complete { request, consumed } => {
+                        assert_eq!(consumed, full.len());
+                        assert_eq!(request.path(), "/bare");
+                    }
+                    ParseStatus::Incomplete => panic!("incomplete after the last byte"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stateful_parser_pipelines_a_request_with_no_headers() {
+        let req1 = b"GET /a HTTP/1.0\r\n\r\n";
+        let req2 = b"GET /b HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut combined = Vec::new();
+        combined.extend_from_slice(req1);
+        combined.extend_from_slice(req2);
+
+        let mut parser = StatefulParser::new();
+        let (request, consumed) = match parser.feed(&combined).unwrap() {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("expected the first request"),
+        };
+        assert_eq!(consumed, req1.len());
+        assert_eq!(request.path(), "/a");
+        assert!(request.headers().is_empty());
+
+        let (request, consumed) = match parser.feed(&[]).unwrap() {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("expected the second request"),
+        };
+        assert_eq!(consumed, req2.len());
+        assert_eq!(request.path(), "/b");
+        assert_eq!(request.headers().get("host"), Some(&b"example.com"[..]));
+        assert_eq!(parser.buffered_len(), 0);
+    }
+
     // ========================================================================
     // HTTP Request Smuggling Tests (Security)
     // ========================================================================
@@ -2183,6 +2252,16 @@ mod tests {
         assert_eq!(request.method(), Method::Get);
         assert_eq!(request.path(), "/api/users");
         assert!(request.query().is_none());
+    }
+
+    #[test]
+    fn parser_request_with_no_headers() {
+        let parser = Parser::new();
+        let request = parser.parse(b"GET /bare HTTP/1.0\r\n\r\n").unwrap();
+
+        assert_eq!(request.method(), Method::Get);
+        assert_eq!(request.path(), "/bare");
+        assert!(request.headers().is_empty());
     }
 
     #[test]

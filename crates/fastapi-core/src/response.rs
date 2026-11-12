@@ -65,6 +65,8 @@ impl StatusCode {
     pub const PRECONDITION_FAILED: Self = Self(412);
     /// 413 Payload Too Large
     pub const PAYLOAD_TOO_LARGE: Self = Self(413);
+    /// 414 URI Too Long
+    pub const URI_TOO_LONG: Self = Self(414);
     /// 415 Unsupported Media Type
     pub const UNSUPPORTED_MEDIA_TYPE: Self = Self(415);
     /// 416 Range Not Satisfiable
@@ -75,12 +77,16 @@ impl StatusCode {
     pub const UNPROCESSABLE_ENTITY: Self = Self(422);
     /// 429 Too Many Requests
     pub const TOO_MANY_REQUESTS: Self = Self(429);
+    /// 431 Request Header Fields Too Large
+    pub const REQUEST_HEADER_FIELDS_TOO_LARGE: Self = Self(431);
     /// 499 Client Closed Request
     pub const CLIENT_CLOSED_REQUEST: Self = Self(499);
 
     // Server Error
     /// 500 Internal Server Error
     pub const INTERNAL_SERVER_ERROR: Self = Self(500);
+    /// 501 Not Implemented
+    pub const NOT_IMPLEMENTED: Self = Self(501);
     /// 503 Service Unavailable
     pub const SERVICE_UNAVAILABLE: Self = Self(503);
     /// 504 Gateway Timeout
@@ -130,13 +136,16 @@ impl StatusCode {
             408 => "Request Timeout",
             412 => "Precondition Failed",
             413 => "Payload Too Large",
+            414 => "URI Too Long",
             415 => "Unsupported Media Type",
             416 => "Range Not Satisfiable",
             417 => "Expectation Failed",
             422 => "Unprocessable Entity",
             429 => "Too Many Requests",
+            431 => "Request Header Fields Too Large",
             499 => "Client Closed Request",
             500 => "Internal Server Error",
+            501 => "Not Implemented",
             503 => "Service Unavailable",
             504 => "Gateway Timeout",
             _ => "Unknown",
@@ -2572,6 +2581,23 @@ mod tests {
             StatusCode::EXPECTATION_FAILED.canonical_reason(),
             "Expectation Failed"
         );
+    }
+
+    /// The server answers parse refusals with these.
+    #[test]
+    fn parse_refusal_statuses_have_reasons() {
+        for (status, code, reason) in [
+            (StatusCode::URI_TOO_LONG, 414, "URI Too Long"),
+            (
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                431,
+                "Request Header Fields Too Large",
+            ),
+            (StatusCode::NOT_IMPLEMENTED, 501, "Not Implemented"),
+        ] {
+            assert_eq!(status.as_u16(), code);
+            assert_eq!(status.canonical_reason(), reason);
+        }
     }
 
     #[test]

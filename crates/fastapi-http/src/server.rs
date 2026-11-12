@@ -577,10 +577,33 @@ async fn admit_request_head(
     Ok(HeadAdmission::Refused)
 }
 
-/// Answers a request the parser refused as too large with 413 before the
-/// connection closes, and returns the parse error. Other parse errors close
-/// without a response, as before. The write is best effort: the connection
-/// closes either way.
+/// The final response status for a request the parser refused, or `None`
+/// for [`ParseError::Incomplete`], which only means more bytes are needed.
+fn parse_refusal_status(error: &ParseError) -> Option<StatusCode> {
+    match error {
+        ParseError::TooLarge => Some(StatusCode::PAYLOAD_TOO_LARGE),
+        ParseError::RequestLineTooLong => Some(StatusCode::URI_TOO_LONG),
+        ParseError::HeaderLineTooLong
+        | ParseError::TooManyHeaders
+        | ParseError::HeadersTooLarge => Some(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE),
+        // A method or transfer coding the server does not implement
+        // (RFC 9110 section 9.1, RFC 9112 section 6.1).
+        ParseError::InvalidMethod | ParseError::InvalidTransferEncoding => {
+            Some(StatusCode::NOT_IMPLEMENTED)
+        }
+        ParseError::InvalidRequestLine
+        | ParseError::InvalidHeader
+        | ParseError::InvalidHeaderName
+        | ParseError::InvalidHeaderBytes
+        | ParseError::AmbiguousBodyLength => Some(StatusCode::BAD_REQUEST),
+        ParseError::Incomplete => None,
+    }
+}
+
+/// Answers a request the parser refused with its final status (see
+/// [`parse_refusal_status`]) and `connection: close`, lingers like any
+/// refusal, and returns the parse error. The write is best effort: the
+/// connection closes either way, since its framing can no longer be trusted.
 async fn refuse_unparseable(
     stream: &mut TcpStream,
     response_writer: &mut ResponseWriter,
@@ -588,11 +611,11 @@ async fn refuse_unparseable(
     config: &ServerConfig,
     error: ParseError,
 ) -> ServerError {
-    if matches!(error, ParseError::TooLarge) {
-        let response = Response::with_status(StatusCode::PAYLOAD_TOO_LARGE)
+    if let Some(status) = parse_refusal_status(&error) {
+        let response = Response::with_status(status)
             .header("connection", b"close".to_vec())
             .body(fastapi_core::ResponseBody::Bytes(
-                b"Payload Too Large".to_vec(),
+                status.canonical_reason().as_bytes().to_vec(),
             ));
         if write_response(stream, response_writer.write(response))
             .await
@@ -893,15 +916,12 @@ where
     H: Fn(RequestContext, &mut Request) -> Fut,
     Fut: Future<Output = Response>,
 {
-    let (proto, buffered) = sniff_protocol(&mut stream, config.keep_alive_timeout).await?;
+    let (proto, mut buffered) = sniff_protocol(&mut stream, config.keep_alive_timeout).await?;
     if proto == SniffedProtocol::Http2PriorKnowledge {
         return process_connection_http2(cx, request_counter, stream, config, handler).await;
     }
 
     let mut parser = StatefulParser::new().with_limits(config.parse_limits.clone());
-    if !buffered.is_empty() {
-        parser.feed(&buffered)?;
-    }
     let mut read_buffer = vec![0u8; config.read_buffer_size];
     let mut response_writer = ResponseWriter::new();
     let mut requests_on_connection: usize = 0;
@@ -915,8 +935,10 @@ where
             return Ok(());
         }
 
-        // Try to parse a complete request from buffered data first
-        let parse_result = match parser.feed(&[]) {
+        // Try to parse a complete request from buffered data first. The
+        // first pass feeds what protocol sniffing read: it can hold a whole
+        // short request, which must be served, not dropped.
+        let parse_result = match parser.feed(&std::mem::take(&mut buffered)) {
             Ok(status) => status,
             Err(error) => {
                 return Err(refuse_unparseable(
@@ -2799,7 +2821,8 @@ impl TcpServer {
         peer_addr: SocketAddr,
         app: &App,
     ) -> Result<(), ServerError> {
-        let (proto, buffered) = sniff_protocol(&mut stream, self.config.keep_alive_timeout).await?;
+        let (proto, mut buffered) =
+            sniff_protocol(&mut stream, self.config.keep_alive_timeout).await?;
         if !buffered.is_empty() {
             self.record_bytes_in(buffered.len() as u64);
         }
@@ -2811,9 +2834,6 @@ impl TcpServer {
         }
 
         let mut parser = StatefulParser::new().with_limits(self.config.parse_limits.clone());
-        if !buffered.is_empty() {
-            parser.feed(&buffered)?;
-        }
         let mut read_buffer = vec![0u8; self.config.read_buffer_size];
         let mut response_writer = ResponseWriter::new();
         let mut requests_on_connection: usize = 0;
@@ -2826,7 +2846,9 @@ impl TcpServer {
                 return Ok(());
             }
 
-            let parse_result = match parser.feed(&[]) {
+            // The first pass feeds what protocol sniffing read (see
+            // process_connection).
+            let parse_result = match parser.feed(&std::mem::take(&mut buffered)) {
                 Ok(status) => status,
                 Err(error) => {
                     return Err(refuse_unparseable(
@@ -4045,7 +4067,8 @@ impl TcpServer {
         _peer_addr: SocketAddr,
         handler: &dyn fastapi_core::Handler,
     ) -> Result<(), ServerError> {
-        let (proto, buffered) = sniff_protocol(&mut stream, self.config.keep_alive_timeout).await?;
+        let (proto, mut buffered) =
+            sniff_protocol(&mut stream, self.config.keep_alive_timeout).await?;
         if !buffered.is_empty() {
             self.record_bytes_in(buffered.len() as u64);
         }
@@ -4056,9 +4079,6 @@ impl TcpServer {
         }
 
         let mut parser = StatefulParser::new().with_limits(self.config.parse_limits.clone());
-        if !buffered.is_empty() {
-            parser.feed(&buffered)?;
-        }
         let mut read_buffer = vec![0u8; self.config.read_buffer_size];
         let mut response_writer = ResponseWriter::new();
         let mut requests_on_connection: usize = 0;
@@ -4072,8 +4092,9 @@ impl TcpServer {
                 return Ok(());
             }
 
-            // Parse request from connection
-            let parse_result = match parser.feed(&[]) {
+            // Parse request from connection. The first pass feeds what
+            // protocol sniffing read (see process_connection).
+            let parse_result = match parser.feed(&std::mem::take(&mut buffered)) {
                 Ok(status) => status,
                 Err(error) => {
                     return Err(refuse_unparseable(
