@@ -748,11 +748,12 @@ fn request_read_wait(config: &ServerConfig, request_started: Option<u64>) -> Req
 /// [`request_read_wait`]).
 ///
 /// `request_started` holds when the request's first byte arrived: callers set
-/// it when the parser holds bytes and clear it when the parser holds none
-/// (a request completed, or only empty lines arrived), and this sets it when
-/// a read brings the first ones. Waiting out the keep-alive timeout is
-/// [`ServerError::KeepAliveTimeout`]; passing the request deadline answers
-/// 408 first (see [`refuse_slow_request`]).
+/// it when the parser already holds bytes, this sets it when a read brings
+/// the first ones, and callers clear it when a request completes. Empty lines
+/// the parser discards before a request line count as its first bytes, so a
+/// client cannot hold a connection open by sending only those. Waiting out
+/// the keep-alive timeout is [`ServerError::KeepAliveTimeout`]; passing the
+/// request deadline answers 408 first (see [`refuse_slow_request`]).
 async fn read_request_bytes(
     stream: &mut TcpStream,
     response_writer: &mut ResponseWriter,
@@ -1018,11 +1019,7 @@ where
                     }
                     head_admitted = true;
                 }
-                // The deadline runs while the parser holds part of a
-                // request; empty lines it discarded are not one.
-                if parser.buffered_len() == 0 {
-                    request_started = None;
-                } else if request_started.is_none() {
+                if parser.buffered_len() > 0 && request_started.is_none() {
                     request_started = Some(current_time().as_nanos());
                 }
                 let bytes_read = match read_request_bytes(
@@ -2931,11 +2928,7 @@ impl TcpServer {
                         }
                         head_admitted = true;
                     }
-                    // The deadline runs while the parser holds part of a
-                    // request; empty lines it discarded are not one.
-                    if parser.buffered_len() == 0 {
-                        request_started = None;
-                    } else if request_started.is_none() {
+                    if parser.buffered_len() > 0 && request_started.is_none() {
                         request_started = Some(current_time().as_nanos());
                     }
                     let bytes_read = match read_request_bytes(
@@ -4182,11 +4175,7 @@ impl TcpServer {
                         }
                         head_admitted = true;
                     }
-                    // The deadline runs while the parser holds part of a
-                    // request; empty lines it discarded are not one.
-                    if parser.buffered_len() == 0 {
-                        request_started = None;
-                    } else if request_started.is_none() {
+                    if parser.buffered_len() > 0 && request_started.is_none() {
                         request_started = Some(current_time().as_nanos());
                     }
                     let bytes_read = match read_request_bytes(
@@ -4575,7 +4564,8 @@ enum SniffedProtocol {
 /// [`request_read_wait`] says, so bytes that trickle in still have to arrive
 /// by [`ServerConfig::request_read_timeout`]: past it, this returns
 /// [`SniffedProtocol::Http1`] with what arrived, and the HTTP/1.1 loop
-/// answers 408. Waiting out the keep-alive timeout is an error.
+/// refuses it (408, or 501 once the preface's `PRI` request line is whole).
+/// Waiting out the keep-alive timeout is an error.
 async fn sniff_protocol(
     stream: &mut TcpStream,
     config: &ServerConfig,
@@ -4620,7 +4610,11 @@ async fn sniff_protocol(
         }
     }
 
-    Ok((SniffedProtocol::Http2PriorKnowledge, buffered, first_byte_at))
+    Ok((
+        SniffedProtocol::Http2PriorKnowledge,
+        buffered,
+        first_byte_at,
+    ))
 }
 
 const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x1;

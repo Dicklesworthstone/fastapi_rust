@@ -260,6 +260,47 @@ fn expect_continue_is_answered_before_the_body() {
     }
 }
 
+/// An HTTP/1.0 client does not wait for `100 Continue`, so its
+/// `Expect: 100-continue` is ignored (RFC 9110 section 10.1.1): nothing is
+/// sent before the body, then the handler's response.
+#[test]
+fn an_http10_expectation_is_ignored() {
+    for mode in MODES {
+        let running = spawn(mode, config());
+        let mut stream = connect(running.addr);
+        stream
+            .write_all(
+                b"POST /upload HTTP/1.0\r\nHost: localhost\r\nContent-Length: 5\r\n\
+                  Expect: 100-continue\r\n\r\n",
+            )
+            .expect("head");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("short read timeout");
+        let interim = read_until(&mut stream, |received| !received.is_empty());
+        assert!(
+            interim.is_empty(),
+            "{mode:?}: nothing before an HTTP/1.0 body: {:?}",
+            String::from_utf8_lossy(&interim)
+        );
+        stream
+            .set_read_timeout(Some(CLIENT_READ_TIMEOUT))
+            .expect("read timeout");
+        stream.write_all(b"hello").expect("body");
+        let response = String::from_utf8_lossy(&read_until(&mut stream, |received| {
+            received.ends_with(b"handled")
+        }))
+        .into_owned();
+        assert!(
+            response.starts_with("HTTP/1.1 200 "),
+            "{mode:?}: {response:?}"
+        );
+        assert!(!response.contains("100 Continue"), "{mode:?}: {response:?}");
+        assert_eq!(running.calls(), 1, "{mode:?}");
+        running.stop();
+    }
+}
+
 /// An unsupported expectation and a disallowed Host are refused from the
 /// head alone, without waiting for the declared body.
 #[test]
@@ -376,6 +417,111 @@ fn a_trickled_request_gets_408_at_the_read_deadline() {
     }
 }
 
+/// The first bytes of the HTTP/2 preface, a byte every 200 ms with no line
+/// end, arrive while the server checks for that preface. They are the start
+/// of a request too, so they get 408 at the 1 s deadline. Without it each
+/// read waits the 3 s keep-alive timeout, and the connection ends with no
+/// response once the bytes stop.
+#[test]
+fn a_trickled_preface_gets_408_at_the_read_deadline() {
+    for mode in MODES {
+        let running = spawn(mode, config_with_read_deadline());
+        let mut stream = connect(running.addr);
+        let started = Instant::now();
+        let mut trickle = stream.try_clone().expect("clone");
+        let writer = std::thread::spawn(move || {
+            for byte in b"PRI * HTTP/2.0" {
+                if trickle.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let response = read_to_end(&mut stream);
+        let elapsed = started.elapsed();
+        drop(stream.shutdown(std::net::Shutdown::Both));
+        writer.join().expect("writer join");
+        assert!(
+            response.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+            "{mode:?}: a trickled preface needs a 408: {response:?}"
+        );
+        assert!(
+            elapsed + Duration::from_millis(50) >= READ_DEADLINE,
+            "{mode:?}: the 408 came before the deadline, after {elapsed:?}"
+        );
+        assert_eq!(running.calls(), 0, "{mode:?}");
+        running.stop();
+    }
+}
+
+/// Empty lines before a request line are ignored (RFC 9112 section 2.2),
+/// both one sent right after a body and one sent on its own.
+#[test]
+fn stray_empty_lines_are_ignored() {
+    for mode in MODES {
+        let running = spawn(mode, config_with_read_deadline());
+        let mut stream = connect(running.addr);
+        let request = b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello";
+        stream.write_all(request).expect("first request");
+        stream
+            .write_all(b"\r\n")
+            .expect("empty line after the body");
+        let first = read_until(&mut stream, |received| received.ends_with(b"handled"));
+        assert!(
+            first.starts_with(b"HTTP/1.1 200 "),
+            "{mode:?}: {:?}",
+            String::from_utf8_lossy(&first)
+        );
+        stream.write_all(b"\r\n").expect("empty line alone");
+        stream.write_all(request).expect("second request");
+        let second = read_until(&mut stream, |received| received.ends_with(b"handled"));
+        assert!(
+            second.starts_with(b"HTTP/1.1 200 "),
+            "{mode:?}: {:?}",
+            String::from_utf8_lossy(&second)
+        );
+        assert_eq!(running.calls(), 2, "{mode:?}");
+        running.stop();
+    }
+}
+
+/// Ignored empty lines still count against the read deadline, so a client
+/// sending one every 200 ms, well inside the 3 s keep-alive timeout, gets
+/// 408 at the 1 s deadline instead of holding the connection open. If they
+/// did not count, the server would keep reading them, and the connection
+/// would end with no response once they stopped.
+#[test]
+fn empty_lines_alone_get_408_at_the_read_deadline() {
+    for mode in MODES {
+        let running = spawn(mode, config_with_read_deadline());
+        let mut stream = connect(running.addr);
+        let started = Instant::now();
+        let mut trickle = stream.try_clone().expect("clone");
+        let writer = std::thread::spawn(move || {
+            for _ in 0..20 {
+                if trickle.write_all(b"\r\n").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let response = read_to_end(&mut stream);
+        let elapsed = started.elapsed();
+        drop(stream.shutdown(std::net::Shutdown::Both));
+        writer.join().expect("writer join");
+        assert!(
+            response.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+            "{mode:?}: empty lines alone need a 408: {response:?}"
+        );
+        assert!(
+            elapsed + Duration::from_millis(50) >= READ_DEADLINE,
+            "{mode:?}: the 408 came before the deadline, after {elapsed:?}"
+        );
+        assert_eq!(running.calls(), 0, "{mode:?}");
+        running.stop();
+    }
+}
+
 /// The deadline counts from a request's first byte, not from the last
 /// request: a keep-alive connection idle for longer than the deadline still
 /// serves its next request.
@@ -434,6 +580,11 @@ fn malformed_requests_get_a_final_status() {
         (
             "BREW /upload HTTP/1.1\r\nHost: localhost\r\n\r\n".to_string(),
             "501 Not Implemented",
+        ),
+        (
+            // Not a method at all: a malformed line, not an unknown method.
+            "G@T /upload HTTP/1.1\r\nHost: localhost\r\n\r\n".to_string(),
+            "400 Bad Request",
         ),
         (
             "POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n"

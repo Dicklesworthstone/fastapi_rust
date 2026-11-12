@@ -912,9 +912,9 @@ impl StatefulParser {
                     // RFC 9112 section 2.2: ignore empty lines before a
                     // request line, such as a stray CRLF a client sent after
                     // the previous request's body. They are discarded, so
-                    // they neither build up in the buffer nor make an idle
-                    // connection look like one with a request under way, and
-                    // `consumed` does not count them.
+                    // they do not build up in the buffer, and `consumed`
+                    // does not count them. (The server still counts them
+                    // against the request read deadline.)
                     let empty_lines = leading_empty_lines_len(&self.buffer);
                     if empty_lines > 0 {
                         self.buffer.drain(..empty_lines);
@@ -1974,8 +1974,8 @@ mod tests {
         assert_eq!(request.path(), "/b");
         assert_eq!(parser.buffered_len(), 0);
 
-        // A lone empty line is discarded rather than held as the start of a
-        // request, including one split across reads.
+        // A lone empty line is discarded from the buffer, including one
+        // split across reads.
         let mut parser = StatefulParser::new();
         assert!(matches!(
             parser.feed(b"\r\n").unwrap(),

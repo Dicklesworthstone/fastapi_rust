@@ -57,7 +57,7 @@
 //!
 //! After sending this, the server proceeds to read the request body.
 
-use fastapi_core::{Request, Response, ResponseBody, StatusCode};
+use fastapi_core::{HttpVersion, Request, Response, ResponseBody, StatusCode};
 use std::sync::Arc;
 
 /// The raw bytes for an HTTP/1.1 100 Continue response.
@@ -116,11 +116,24 @@ impl ExpectHandler {
     /// Check if a request has an Expect header and what it contains.
     ///
     /// Returns:
-    /// - `ExpectResult::NoExpectation` - No Expect header, proceed normally
+    /// - `ExpectResult::NoExpectation` - No Expect header, or a
+    ///   `100-continue` in an HTTP/1.0 request, which a server must ignore
+    ///   (RFC 9110 section 10.1.1): such a client does not wait for
+    ///   `100 Continue` and need not understand a 1xx response
     /// - `ExpectResult::ExpectsContinue` - Expect: 100-continue present
     /// - `ExpectResult::UnknownExpectation` - Unknown expectation value
     #[must_use]
     pub fn check_expect(request: &Request) -> ExpectResult {
+        match Self::expectation(request) {
+            ExpectResult::ExpectsContinue if request.version() == HttpVersion::Http10 => {
+                ExpectResult::NoExpectation
+            }
+            result => result,
+        }
+    }
+
+    /// What the request's Expect header asks for, whatever its HTTP version.
+    fn expectation(request: &Request) -> ExpectResult {
         match request.headers().get("expect") {
             None => ExpectResult::NoExpectation,
             Some(value) => {
@@ -458,6 +471,25 @@ mod tests {
         if let ExpectResult::UnknownExpectation(val) = result {
             assert_eq!(val, "something-else");
         }
+    }
+
+    #[test]
+    fn check_expect_ignores_100_continue_in_http10() {
+        let mut req = request_with_expect("100-continue");
+        req.set_version(HttpVersion::Http10);
+        assert!(matches!(
+            ExpectHandler::check_expect(&req),
+            ExpectResult::NoExpectation
+        ));
+        assert!(!ExpectHandler::expects_continue(&req));
+
+        // Only 100-continue is ignored; another expectation still fails.
+        let mut req = request_with_expect("something-else");
+        req.set_version(HttpVersion::Http10);
+        assert!(matches!(
+            ExpectHandler::check_expect(&req),
+            ExpectResult::UnknownExpectation(_)
+        ));
     }
 
     #[test]
