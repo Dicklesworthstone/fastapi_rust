@@ -157,7 +157,8 @@ impl<'a> RequestLine<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `ParseError::InvalidRequestLine` if the format is invalid.
+    /// Returns `ParseError::InvalidRequestLine` if the format is invalid,
+    /// including a method that is not a token.
     /// Returns `ParseError::InvalidMethod` if the HTTP method is not recognized.
     pub fn parse(buffer: &'a [u8]) -> Result<Self, ParseError> {
         // Find the end of the request line (before any \r\n)
@@ -174,8 +175,11 @@ impl<'a> RequestLine<'a> {
         // Split by spaces: METHOD SP URI SP VERSION
         let mut parts = line.splitn(3, |&b| b == b' ');
 
-        // Parse method
+        // Parse method (a token, RFC 9110 section 9.1)
         let method_bytes = parts.next().ok_or(ParseError::InvalidRequestLine)?;
+        if !is_token(method_bytes) {
+            return Err(ParseError::InvalidRequestLine);
+        }
         let method = Method::from_bytes(method_bytes).ok_or(ParseError::InvalidMethod)?;
 
         // Parse URI (path + optional query)
@@ -295,8 +299,12 @@ fn is_token_char(b: u8) -> bool {
     )
 }
 
-fn is_valid_header_name(bytes: &[u8]) -> bool {
+fn is_token(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.iter().all(|&b| is_token_char(b))
+}
+
+fn is_valid_header_name(bytes: &[u8]) -> bool {
+    is_token(bytes)
 }
 
 fn has_invalid_header_value_bytes(value: &[u8]) -> bool {
@@ -781,7 +789,8 @@ impl Default for Parser {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum ParseStatus {
-    /// Parsing completed with a request and bytes consumed.
+    /// Parsing completed with a request and the bytes it consumed (empty
+    /// lines discarded before its request line are not counted).
     Complete { request: Request, consumed: usize },
     /// More data is required to complete the request.
     Incomplete,
@@ -899,26 +908,38 @@ impl StatefulParser {
         loop {
             let state = std::mem::replace(&mut self.state, ParseState::RequestLine);
             match state {
-                ParseState::RequestLine => match parse_request_line_with_len_limit(
-                    &self.buffer,
-                    self.limits.max_request_line_len,
-                ) {
-                    Ok((request, header_start)) => {
-                        self.state = ParseState::Headers {
-                            request,
-                            header_start,
-                        };
+                ParseState::RequestLine => {
+                    // RFC 9112 section 2.2: ignore empty lines before a
+                    // request line, such as a stray CRLF a client sent after
+                    // the previous request's body. They are discarded, so
+                    // they neither build up in the buffer nor make an idle
+                    // connection look like one with a request under way, and
+                    // `consumed` does not count them.
+                    let empty_lines = leading_empty_lines_len(&self.buffer);
+                    if empty_lines > 0 {
+                        self.buffer.drain(..empty_lines);
                     }
-                    Err(ParseError::Incomplete) => {
-                        if self.buffer.len() > self.limits.max_request_line_len {
-                            self.state = ParseState::RequestLine;
-                            return Err(ParseError::RequestLineTooLong);
+                    match parse_request_line_with_len_limit(
+                        &self.buffer,
+                        self.limits.max_request_line_len,
+                    ) {
+                        Ok((request, header_start)) => {
+                            self.state = ParseState::Headers {
+                                request,
+                                header_start,
+                            };
                         }
-                        self.state = ParseState::RequestLine;
-                        return Ok(ParseStatus::Incomplete);
+                        Err(ParseError::Incomplete) => {
+                            if self.buffer.len() > self.limits.max_request_line_len {
+                                self.state = ParseState::RequestLine;
+                                return Err(ParseError::RequestLineTooLong);
+                            }
+                            self.state = ParseState::RequestLine;
+                            return Ok(ParseStatus::Incomplete);
+                        }
+                        Err(err) => return Err(err),
                     }
-                    Err(err) => return Err(err),
-                },
+                }
                 ParseState::Headers {
                     mut request,
                     header_start,
@@ -1032,6 +1053,15 @@ fn find_header_end_from(buffer: &[u8], start: usize) -> Option<usize> {
     find_header_end(&buffer[start..]).map(|pos| start + pos)
 }
 
+/// The length of the empty lines (CRLF pairs) at the start of `buffer`.
+fn leading_empty_lines_len(buffer: &[u8]) -> usize {
+    let mut len = 0;
+    while buffer[len..].starts_with(b"\r\n") {
+        len += 2;
+    }
+    len
+}
+
 fn parse_request_line_with_len_limit(
     buffer: &[u8],
     max_len: usize,
@@ -1063,6 +1093,12 @@ fn parse_request_line(line: &[u8]) -> Result<Request, ParseError> {
     let mut parts = line.split(|&b| b == b' ');
 
     let method_bytes = parts.next().ok_or(ParseError::InvalidRequestLine)?;
+    // A method is a token (RFC 9110 section 9.1). Anything else, an empty
+    // one included, is a malformed line rather than a method the server does
+    // not implement.
+    if !is_token(method_bytes) {
+        return Err(ParseError::InvalidRequestLine);
+    }
     let method = Method::from_bytes(method_bytes).ok_or(ParseError::InvalidMethod)?;
 
     let uri_bytes = parts.next().ok_or(ParseError::InvalidRequestLine)?;
@@ -1909,6 +1945,69 @@ mod tests {
         assert_eq!(request.path(), "/b");
         assert_eq!(request.headers().get("host"), Some(&b"example.com"[..]));
         assert_eq!(parser.buffered_len(), 0);
+    }
+
+    #[test]
+    fn stateful_parser_ignores_empty_lines_before_a_request_line() {
+        // Stray empty lines after a body, then the next request
+        // (RFC 9112 section 2.2).
+        let first = b"POST /a HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi";
+        let second = b"GET /b HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut combined = Vec::new();
+        combined.extend_from_slice(first);
+        combined.extend_from_slice(b"\r\n\r\n");
+        combined.extend_from_slice(second);
+
+        let mut parser = StatefulParser::new();
+        let (request, consumed) = match parser.feed(&combined).unwrap() {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("expected the first request"),
+        };
+        assert_eq!(consumed, first.len());
+        assert_eq!(request.path(), "/a");
+
+        let (request, consumed) = match parser.feed(&[]).unwrap() {
+            ParseStatus::Complete { request, consumed } => (request, consumed),
+            ParseStatus::Incomplete => panic!("the empty lines must be skipped"),
+        };
+        assert_eq!(consumed, second.len());
+        assert_eq!(request.path(), "/b");
+        assert_eq!(parser.buffered_len(), 0);
+
+        // A lone empty line is discarded rather than held as the start of a
+        // request, including one split across reads.
+        let mut parser = StatefulParser::new();
+        assert!(matches!(
+            parser.feed(b"\r\n").unwrap(),
+            ParseStatus::Incomplete
+        ));
+        assert_eq!(parser.buffered_len(), 0);
+        assert!(matches!(
+            parser.feed(b"\r").unwrap(),
+            ParseStatus::Incomplete
+        ));
+        match parser.feed(b"\nGET /c HTTP/1.1\r\n\r\n").unwrap() {
+            ParseStatus::Complete { request, .. } => assert_eq!(request.path(), "/c"),
+            ParseStatus::Incomplete => panic!("expected the request after the empty line"),
+        }
+    }
+
+    #[test]
+    fn stateful_parser_refuses_a_method_that_is_not_a_token() {
+        for line in [&b"G@T / HTTP/1.1\r\n\r\n"[..], b" GET / HTTP/1.1\r\n\r\n"] {
+            let mut parser = StatefulParser::new();
+            assert!(
+                matches!(parser.feed(line), Err(ParseError::InvalidRequestLine)),
+                "{:?}",
+                String::from_utf8_lossy(line)
+            );
+        }
+        // A token the server does not implement is a different refusal.
+        let mut parser = StatefulParser::new();
+        assert!(matches!(
+            parser.feed(b"BREW / HTTP/1.1\r\n\r\n"),
+            Err(ParseError::InvalidMethod)
+        ));
     }
 
     // ========================================================================

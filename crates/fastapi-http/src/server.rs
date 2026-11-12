@@ -702,33 +702,30 @@ async fn refuse_slow_request(
     ))
 }
 
-/// Reads more of an HTTP/1.1 request into `read_buffer` and returns how many
-/// bytes arrived (0 when the peer closed). Each read waits at most the
-/// keep-alive timeout and, once the request has begun, no longer than what
-/// remains of [`ServerConfig::request_read_timeout`].
-///
-/// `request_started` holds when the request's first byte arrived: callers set
-/// it when the parser already holds bytes, this sets it when a read brings
-/// the first ones, and callers clear it when a request completes. Waiting out
-/// the keep-alive timeout is [`ServerError::KeepAliveTimeout`]; passing the
-/// request deadline answers 408 first (see [`refuse_slow_request`]).
-async fn read_request_bytes(
-    stream: &mut TcpStream,
-    response_writer: &mut ResponseWriter,
-    read_buffer: &mut [u8],
-    config: &ServerConfig,
-    request_started: &mut Option<u64>,
-) -> Result<usize, ServerError> {
-    let remaining = match *request_started {
+/// How long the next read of an HTTP/1.1 request may wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestReadWait {
+    /// The request began more than [`ServerConfig::request_read_timeout`] ago.
+    Expired,
+    /// Wait at most `limit` (`None`: no limit). `deadline_bound` says the
+    /// request deadline, not the keep-alive timeout, is what ends the wait.
+    Wait {
+        limit: Option<Duration>,
+        deadline_bound: bool,
+    },
+}
+
+/// The wait for the next read: the keep-alive timeout and, once the request
+/// has begun (`request_started`, in [`current_time`] nanoseconds), no longer
+/// than what remains of [`ServerConfig::request_read_timeout`]. A zero
+/// duration turns either limit off.
+fn request_read_wait(config: &ServerConfig, request_started: Option<u64>) -> RequestReadWait {
+    let remaining = match request_started {
         Some(started) if !config.request_read_timeout.is_zero() => {
             let elapsed = Duration::from_nanos(current_time().as_nanos().saturating_sub(started));
             match config.request_read_timeout.checked_sub(elapsed) {
                 Some(remaining) if !remaining.is_zero() => Some(remaining),
-                _ => {
-                    return Err(
-                        refuse_slow_request(stream, response_writer, read_buffer, config).await,
-                    );
-                }
+                _ => return RequestReadWait::Expired,
             }
         }
         _ => None,
@@ -738,7 +735,41 @@ async fn read_request_bytes(
     // the keep-alive timeout.
     let deadline_bound =
         remaining.is_some_and(|remaining| keep_alive.is_none_or(|k| remaining <= k));
-    let read = match keep_alive.into_iter().chain(remaining).min() {
+    RequestReadWait::Wait {
+        limit: keep_alive.into_iter().chain(remaining).min(),
+        deadline_bound,
+    }
+}
+
+/// Reads more of an HTTP/1.1 request into `read_buffer` and returns how many
+/// bytes arrived (0 when the peer closed). Each read waits at most the
+/// keep-alive timeout and, once the request has begun, no longer than what
+/// remains of [`ServerConfig::request_read_timeout`] (see
+/// [`request_read_wait`]).
+///
+/// `request_started` holds when the request's first byte arrived: callers set
+/// it when the parser holds bytes and clear it when the parser holds none
+/// (a request completed, or only empty lines arrived), and this sets it when
+/// a read brings the first ones. Waiting out the keep-alive timeout is
+/// [`ServerError::KeepAliveTimeout`]; passing the request deadline answers
+/// 408 first (see [`refuse_slow_request`]).
+async fn read_request_bytes(
+    stream: &mut TcpStream,
+    response_writer: &mut ResponseWriter,
+    read_buffer: &mut [u8],
+    config: &ServerConfig,
+    request_started: &mut Option<u64>,
+) -> Result<usize, ServerError> {
+    let (limit, deadline_bound) = match request_read_wait(config, *request_started) {
+        RequestReadWait::Expired => {
+            return Err(refuse_slow_request(stream, response_writer, read_buffer, config).await);
+        }
+        RequestReadWait::Wait {
+            limit,
+            deadline_bound,
+        } => (limit, deadline_bound),
+    };
+    let read = match limit {
         None => read_into_buffer(stream, read_buffer).await,
         Some(wait) => read_with_timeout(stream, read_buffer, wait).await,
     };
@@ -934,7 +965,7 @@ where
     H: Fn(RequestContext, &mut Request) -> Fut,
     Fut: Future<Output = Response>,
 {
-    let (proto, mut buffered) = sniff_protocol(&mut stream, config.keep_alive_timeout).await?;
+    let (proto, mut buffered, sniff_started) = sniff_protocol(&mut stream, config).await?;
     if proto == SniffedProtocol::Http2PriorKnowledge && config.http2_prior_knowledge {
         return process_connection_http2(cx, request_counter, stream, config, handler).await;
     }
@@ -945,7 +976,7 @@ where
     let mut requests_on_connection: usize = 0;
     let max_requests = config.max_requests_per_connection;
     let mut head_admitted = false;
-    let mut request_started = None;
+    let mut request_started = sniff_started;
 
     loop {
         // Check for cancellation
@@ -987,7 +1018,11 @@ where
                     }
                     head_admitted = true;
                 }
-                if parser.buffered_len() > 0 && request_started.is_none() {
+                // The deadline runs while the parser holds part of a
+                // request; empty lines it discarded are not one.
+                if parser.buffered_len() == 0 {
+                    request_started = None;
+                } else if request_started.is_none() {
                     request_started = Some(current_time().as_nanos());
                 }
                 let bytes_read = match read_request_bytes(
@@ -2839,8 +2874,8 @@ impl TcpServer {
         peer_addr: SocketAddr,
         app: &App,
     ) -> Result<(), ServerError> {
-        let (proto, mut buffered) =
-            sniff_protocol(&mut stream, self.config.keep_alive_timeout).await?;
+        let (proto, mut buffered, sniff_started) =
+            sniff_protocol(&mut stream, &self.config).await?;
         if !buffered.is_empty() {
             self.record_bytes_in(buffered.len() as u64);
         }
@@ -2857,7 +2892,7 @@ impl TcpServer {
         let mut requests_on_connection: usize = 0;
         let max_requests = self.config.max_requests_per_connection;
         let mut head_admitted = false;
-        let mut request_started = None;
+        let mut request_started = sniff_started;
 
         loop {
             if cx.is_cancel_requested() {
@@ -2896,7 +2931,11 @@ impl TcpServer {
                         }
                         head_admitted = true;
                     }
-                    if parser.buffered_len() > 0 && request_started.is_none() {
+                    // The deadline runs while the parser holds part of a
+                    // request; empty lines it discarded are not one.
+                    if parser.buffered_len() == 0 {
+                        request_started = None;
+                    } else if request_started.is_none() {
                         request_started = Some(current_time().as_nanos());
                     }
                     let bytes_read = match read_request_bytes(
@@ -4085,8 +4124,8 @@ impl TcpServer {
         _peer_addr: SocketAddr,
         handler: &dyn fastapi_core::Handler,
     ) -> Result<(), ServerError> {
-        let (proto, mut buffered) =
-            sniff_protocol(&mut stream, self.config.keep_alive_timeout).await?;
+        let (proto, mut buffered, sniff_started) =
+            sniff_protocol(&mut stream, &self.config).await?;
         if !buffered.is_empty() {
             self.record_bytes_in(buffered.len() as u64);
         }
@@ -4102,7 +4141,7 @@ impl TcpServer {
         let mut requests_on_connection: usize = 0;
         let max_requests = self.config.max_requests_per_connection;
         let mut head_admitted = false;
-        let mut request_started = None;
+        let mut request_started = sniff_started;
 
         loop {
             // Check for cancellation
@@ -4143,7 +4182,11 @@ impl TcpServer {
                         }
                         head_admitted = true;
                     }
-                    if parser.buffered_len() > 0 && request_started.is_none() {
+                    // The deadline runs while the parser holds part of a
+                    // request; empty lines it discarded are not one.
+                    if parser.buffered_len() == 0 {
+                        request_started = None;
+                    } else if request_started.is_none() {
                         request_started = Some(current_time().as_nanos());
                     }
                     let bytes_read = match read_request_bytes(
@@ -4526,33 +4569,58 @@ enum SniffedProtocol {
 
 /// Sniff whether the connection is HTTP/2 prior-knowledge (h2c preface).
 ///
-/// Returns the inferred protocol and the bytes already consumed from the stream.
+/// Returns the inferred protocol, the bytes already read from the stream, and
+/// when the first of them arrived (in [`current_time`] nanoseconds), which
+/// the HTTP/1.1 loop takes as the start of its first request. Reads wait as
+/// [`request_read_wait`] says, so bytes that trickle in still have to arrive
+/// by [`ServerConfig::request_read_timeout`]: past it, this returns
+/// [`SniffedProtocol::Http1`] with what arrived, and the HTTP/1.1 loop
+/// answers 408. Waiting out the keep-alive timeout is an error.
 async fn sniff_protocol(
     stream: &mut TcpStream,
-    keep_alive_timeout: Duration,
-) -> io::Result<(SniffedProtocol, Vec<u8>)> {
+    config: &ServerConfig,
+) -> io::Result<(SniffedProtocol, Vec<u8>, Option<u64>)> {
     let mut buffered: Vec<u8> = Vec::new();
+    let mut first_byte_at = None;
     let preface = http2::PREFACE;
 
     while buffered.len() < preface.len() {
+        let (limit, deadline_bound) = match request_read_wait(config, first_byte_at) {
+            RequestReadWait::Expired => {
+                return Ok((SniffedProtocol::Http1, buffered, first_byte_at));
+            }
+            RequestReadWait::Wait {
+                limit,
+                deadline_bound,
+            } => (limit, deadline_bound),
+        };
         let mut tmp = vec![0u8; preface.len() - buffered.len()];
-        let n = if keep_alive_timeout.is_zero() {
-            read_into_buffer(stream, &mut tmp).await?
-        } else {
-            read_with_timeout(stream, &mut tmp, keep_alive_timeout).await?
+        let read = match limit {
+            None => read_into_buffer(stream, &mut tmp).await,
+            Some(wait) => read_with_timeout(stream, &mut tmp, wait).await,
+        };
+        let n = match read {
+            Ok(n) => n,
+            Err(e) if deadline_bound && e.kind() == io::ErrorKind::TimedOut => {
+                return Ok((SniffedProtocol::Http1, buffered, first_byte_at));
+            }
+            Err(e) => return Err(e),
         };
         if n == 0 {
             // EOF before any meaningful determination; treat as HTTP/1 with whatever we saw.
-            return Ok((SniffedProtocol::Http1, buffered));
+            return Ok((SniffedProtocol::Http1, buffered, first_byte_at));
         }
 
+        if first_byte_at.is_none() {
+            first_byte_at = Some(current_time().as_nanos());
+        }
         buffered.extend_from_slice(&tmp[..n]);
         if !preface.starts_with(&buffered) {
-            return Ok((SniffedProtocol::Http1, buffered));
+            return Ok((SniffedProtocol::Http1, buffered, first_byte_at));
         }
     }
 
-    Ok((SniffedProtocol::Http2PriorKnowledge, buffered))
+    Ok((SniffedProtocol::Http2PriorKnowledge, buffered, first_byte_at))
 }
 
 const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x1;
