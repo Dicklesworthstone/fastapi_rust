@@ -6,7 +6,7 @@ This project is a Rust web framework inspired by Python's [FastAPI](https://fast
 
 Commit links point to `https://github.com/Dicklesworthstone/fastapi_rust/commit/<hash>`.
 
-Scope window: first commit (2026-01-17) through v0.5.0 (2026-10-08).
+Scope window: first commit (2026-01-17) through v0.6.0 (2026-11-22).
 
 Sources: git history and tags on `main`, GitHub Releases, and the crates.io
 version list for `fastapi-rust`. Dates are the local commit/tag dates; crates.io
@@ -16,6 +16,7 @@ shows the same publishes in UTC (which can be one day later).
 
 | Version | Date | Git tag | GitHub Release | crates.io | Notes |
 |---------|------|---------|----------------|-----------|-------|
+| 0.6.0 | 2026-11-22 | [v0.6.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.6.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.6.0) | [yes](https://crates.io/crates/fastapi-rust/0.6.0) | asupersync 0.7 (breaking); HTTP/1.1 head admission, read deadlines, and opt-out h2c prior-knowledge; wired per-App exception handlers across macro/fluent routes and extractors; security/dependency refresh (0 audit vulns); release profile `opt-level = 3` + LTO |
 | 0.5.0 | 2026-10-08 | [v0.5.0](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.5.0) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.5.0) | [yes](https://crates.io/crates/fastapi-rust/0.5.0) | asupersync 0.5 (breaking); typed OpenAPI schemas and security metadata; router backtracking; middleware short-circuit/fallback wrapping; dependency cleanup finalization |
 | 0.4.4 | 2026-08-24 | [v0.4.4](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.4) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.4) | [yes](https://crates.io/crates/fastapi-rust/0.4.4) | futures-executor out of the normal dep graph (GH#31); builder metadata precedence |
 | 0.4.3 | 2026-08-20 | [v0.4.3](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.3) | [yes](https://github.com/Dicklesworthstone/fastapi_rust/releases/tag/v0.4.3) | [yes](https://crates.io/crates/fastapi-rust/0.4.3) | macro route path works for facade consumers; Json responses; builder title/version |
@@ -31,6 +32,81 @@ shows the same publishes in UTC (which can be one day later).
 ---
 
 ## [Unreleased]
+
+## [v0.6.0] -- 2026-11-22
+
+A breaking release moving the async runtime to **asupersync 0.7**, hardening
+HTTP/1.1 head admission, request read deadlines, and HTTP/2 prior-knowledge
+controls, wiring per-`App` registered exception handlers into macro/fluent
+routes and extractors, and refreshing dependencies to zero `cargo audit`
+vulnerabilities. Library crates: install from crates.io (`fastapi-rust = "0.6.0"`).
+
+### Migrating from 0.5.x
+
+- **asupersync 0.5 -> 0.7** ([d265d45](https://github.com/Dicklesworthstone/fastapi_rust/commit/d265d45),
+  [e7cb834](https://github.com/Dicklesworthstone/fastapi_rust/commit/e7cb834)).
+  Depend on `asupersync = { version = "0.7", default-features = false }` alongside
+  `fastapi-rust = "0.6.0"`. MSRV remains Rust **1.95**.
+- **`IntoResponse for Result<T, E>` requires `E: 'static`**
+  ([3e87de2](https://github.com/Dicklesworthstone/fastapi_rust/commit/3e87de2)) so
+  registered exception handlers can perform exact-type lookup on `Err(E)` via
+  `IntoResponse::into_response_with_context`. All built-in error and extractor
+  rejection types are already `'static`.
+
+### Added and Fixed
+
+- **Per-`App` exception handlers wired to route errors and extractor rejections**
+  ([3e87de2](https://github.com/Dicklesworthstone/fastapi_rust/commit/3e87de2)):
+  `App::handle` bridges `Arc<ExceptionHandlers>` into request extensions before
+  middleware execution. Macro routes (`#[get]`, `#[post]`, etc.) and fluent
+  routes (`AppBuilder::get`/`post`/..., `RouteEntry::new`) now dispatch
+  `Result<T, E>` errors (including type aliases and `-> impl IntoResponse`) and
+  outer `FromRequest::Error` rejections to exact-type registered handlers before
+  middleware `after()` hooks and dependency cleanups run. Unregistered errors
+  (including non-`Error` / non-`Sync` response-valued errors) retain their
+  `IntoResponse` fallback, explicit `Response` values are never reinterpreted,
+  and `Option<T>` extractors continue to swallow extraction failures as `None`.
+- **HTTP/1.1 head admission, read deadlines, and protocol hardening**
+  ([c0f054d](https://github.com/Dicklesworthstone/fastapi_rust/commit/c0f054d),
+  [2498d3f](https://github.com/Dicklesworthstone/fastapi_rust/commit/2498d3f),
+  [6d9b4ca](https://github.com/Dicklesworthstone/fastapi_rust/commit/6d9b4ca),
+  [638b442](https://github.com/Dicklesworthstone/fastapi_rust/commit/638b442),
+  [84fb342](https://github.com/Dicklesworthstone/fastapi_rust/commit/84fb342),
+  [92a9dcd](https://github.com/Dicklesworthstone/fastapi_rust/commit/92a9dcd),
+  [3e1f04f](https://github.com/Dicklesworthstone/fastapi_rust/commit/3e1f04f)):
+  - Validate request heads before reading request bodies and gate `Expect: 100-continue`
+    (ignoring `100-continue` on HTTP/1.0).
+  - Bound total request-body reads and leading blank lines against the request
+    read deadline, returning `408 Request Timeout` on expiry.
+  - Answer every refused request cleanly, serve short requests whole, reject
+    non-token HTTP methods, and allow servers to disable HTTP/2 prior-knowledge
+    (`h2c`) negotiation (`ServerConfig::with_http2_prior_knowledge(false)`).
+  - Extend real-TCP head admission coverage to `serve_on_app_concurrent`.
+- **Installer and scaffolding fixes**
+  ([d90732a](https://github.com/Dicklesworthstone/fastapi_rust/commit/d90732a)):
+  `install.sh` now runs cleanly under stock macOS Bash 3.2 (guarding empty
+  arrays under `set -u`) and scaffolds `fastapi-rust = "0.6.0"` with
+  `asupersync = { version = "0.7", default-features = false }`.
+
+### Dependencies, Security, and Build
+
+- **Tokio-free lockfile policy enforced by test**
+  ([da70f7f](https://github.com/Dicklesworthstone/fastapi_rust/commit/da70f7f)):
+  Restored the held `wasm-bindgen-futures 0.4.78` family and added
+  `crates/fastapi/tests/lock_policy.rs` so `tokio` cannot re-enter `Cargo.lock`.
+- **Dependency and security refresh — 0 `cargo audit` vulnerabilities**
+  ([08f7251](https://github.com/Dicklesworthstone/fastapi_rust/commit/08f7251),
+  [0a18547](https://github.com/Dicklesworthstone/fastapi_rust/commit/0a18547),
+  [d265d45](https://github.com/Dicklesworthstone/fastapi_rust/commit/d265d45),
+  [e7cb834](https://github.com/Dicklesworthstone/fastapi_rust/commit/e7cb834)):
+  Upgraded `asupersync` to 0.7.0, `rich_rust` to 0.2.4, `parking_lot` to 0.13.0,
+  `proptest` to 1.12.0, `ctutils` to 0.4.8 (`RUSTSEC-2026-0385`), `pulldown-cmark`
+  to 0.13.6 (`RUSTSEC-2026-0433`, `RUSTSEC-2026-0414`), `rustix` to 1.1.6
+  (`RUSTSEC-2026-0486`), `serde_json` to 1.0.154, `flate2` to 1.1.11, `syn` to
+  3.0.10, `regex` to 1.13.2, and `unicode-width` to 0.2.3. See `UPGRADE_LOG.md`.
+- **Workspace release profile configured** (`opt-level = 3`, `lto = true`,
+  `codegen-units = 1`, `strip = true`) with same-host A/B HTTP parser
+  benchmarks verifying zero performance regressions vs `v0.5.0`.
 
 ## [v0.5.0] -- 2026-10-08
 

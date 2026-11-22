@@ -106,7 +106,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 
 ### Release Profile
 
-The workspace does not yet define a custom release profile. When added, the standard high-performance configuration applies:
+The workspace defines a high-performance release profile:
 
 ```toml
 [profile.release]

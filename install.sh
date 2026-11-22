@@ -39,11 +39,11 @@ shopt -s lastpipe 2>/dev/null || true
 OWNER="${OWNER:-Dicklesworthstone}"
 REPO="${REPO:-fastapi_rust}"
 CRATE="fastapi-rust"
-# Minimum rustc for the fastapi-rust 0.4.1+ dependency graph (asupersync 0.4 -> sysinfo 0.39).
+# Minimum rustc for the fastapi-rust 0.6.0+ dependency graph (asupersync 0.7 -> sysinfo 0.40).
 MSRV="1.95.0"
 # Last-resort version if crates.io cannot be reached and no --version was given.
-FALLBACK_VERSION="0.4.3"
-ASUPERSYNC_REQ="0.4"
+FALLBACK_VERSION="0.6.0"
+ASUPERSYNC_REQ="0.7"
 
 VERSION="${VERSION:-}"
 NEW_NAME=""
