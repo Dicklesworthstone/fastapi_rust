@@ -20,7 +20,7 @@ regex = "1"
 unicode-width = "0.2"
 
 # Rich output library (optional)
-rich_rust = { version = "0.2.3", optional = true }
+rich_rust = { version = "0.2.4", optional = true }
 
 [features]
 default = ["rich"]

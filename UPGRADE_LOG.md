@@ -1,5 +1,24 @@
 # Dependency Upgrade Log
 
+## 2026-11-22 asupersync 0.7.0, rich_rust 0.2.4, and security refresh (v0.6.0)
+
+Upgraded direct and audited transitive dependencies to latest crates.io releases
+while preserving MSRV 1.95 and the Tokio-free lockfile policy (`wasm-bindgen-futures`
+remains held at 0.4.78; `crates/fastapi/tests/lock_policy.rs` enforces zero `tokio*`
+entries):
+
+- `asupersync` 0.6.2 -> 0.7.0 (`franken-decision`, `franken-evidence`, `franken-kernel`
+  0.6.0 -> 0.7.0; `sysinfo` 0.39.6 -> 0.40.4, MSRV 1.95; `portable-atomic` 1.15.0).
+- `rich_rust` 0.2.3 -> 0.2.4 (pulls `pulldown-cmark` 0.13.6, `fancy-regex` 0.20.2,
+  `lru` 0.19.1), resolving `RUSTSEC-2026-0433` and `RUSTSEC-2026-0414`.
+- `ctutils` 0.4.3 -> 0.4.8 (resolves `RUSTSEC-2026-0385`).
+- `rustix` 1.1.5 -> 1.1.6 (resolves `RUSTSEC-2026-0486`).
+- Lockfile patch refreshes: `serde_json` 1.0.151 -> 1.0.154, `flate2` 1.1.10 -> 1.1.11,
+  `syn` 3.0.6 -> 3.0.10, `regex` 1.13.1 -> 1.13.2 (`regex-automata` 0.4.19,
+  `regex-syntax` 0.8.12), `unicode-width` 0.2.2 -> 0.2.3.
+- `cargo audit`: 0 vulnerabilities (2 upstream-pinned `syntect` unmaintained warnings:
+  `bincode` 1.3.3, `yaml-rust` 0.4.5).
+
 ## 2026-11-09 asupersync 0.5.0 -> 0.6.2
 
 frankenterm moved to asupersync 0.6.2 and hands its `Cx` to fastapi through

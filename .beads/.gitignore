@@ -45,6 +45,10 @@ sync_base.jsonl
 
 # Local history backups
 .br_history/
+.br_recovery/
+recovery_*/
+.br-wal-index-*/
+*.tmp
 
 # bv (beads viewer) lock file
 .bv.lock
