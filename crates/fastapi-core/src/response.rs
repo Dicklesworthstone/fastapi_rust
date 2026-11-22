@@ -679,6 +679,25 @@ impl Response {
 pub trait IntoResponse {
     /// Convert into a response.
     fn into_response(self) -> Response;
+
+    /// Convert into a response with access to the active request context and
+    /// request extensions (such as the current [`crate::App`]'s
+    /// [`crate::ExceptionHandlers`] registry).
+    ///
+    /// Most response types delegate directly to [`Self::into_response`].
+    /// `Result<T, E>` overrides this method to consult exact-type registered
+    /// exception handlers for `Err(E)` before falling back to `E::into_response`,
+    /// without reinterpreting already-converted [`Response`] values.
+    fn into_response_with_context(
+        self,
+        _ctx: &crate::context::RequestContext,
+        _req: &crate::request::Request,
+    ) -> Response
+    where
+        Self: Sized,
+    {
+        self.into_response()
+    }
 }
 
 impl IntoResponse for Response {
@@ -709,11 +728,22 @@ impl IntoResponse for String {
     }
 }
 
-impl<T: IntoResponse, E: IntoResponse> IntoResponse for Result<T, E> {
+impl<T: IntoResponse, E: IntoResponse + 'static> IntoResponse for Result<T, E> {
     fn into_response(self) -> Response {
         match self {
             Ok(v) => v.into_response(),
             Err(e) => e.into_response(),
+        }
+    }
+
+    fn into_response_with_context(
+        self,
+        ctx: &crate::context::RequestContext,
+        req: &crate::request::Request,
+    ) -> Response {
+        match self {
+            Ok(v) => v.into_response_with_context(ctx, req),
+            Err(e) => crate::app::resolve_exception_or_into_response(ctx, req, e),
         }
     }
 }

@@ -2105,3 +2105,321 @@ fn post_route_rejects_negative_price_with_handler_detail() {
     let error: serde_json::Value = response.json().expect("JSON error");
     assert_eq!(error["detail"], "price must be non-negative");
 }
+
+// =============================================================================
+// Typed exception-handler integration (macro routes, extractors, fallbacks)
+// =============================================================================
+
+#[derive(Debug)]
+struct DomainConflictError {
+    code: &'static str,
+}
+
+impl std::fmt::Display for DomainConflictError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "domain conflict: {}", self.code)
+    }
+}
+
+impl std::error::Error for DomainConflictError {}
+
+impl IntoResponse for DomainConflictError {
+    fn into_response(self) -> Response {
+        Response::with_status(StatusCode::INTERNAL_SERVER_ERROR).body(ResponseBody::Bytes(
+            format!("fallback:{}", self.code).into_bytes(),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct UnregisteredDomainError(&'static str);
+
+impl std::fmt::Display for UnregisteredDomainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for UnregisteredDomainError {}
+
+impl IntoResponse for UnregisteredDomainError {
+    fn into_response(self) -> Response {
+        Response::with_status(StatusCode::from_u16(418)).body(ResponseBody::Bytes(
+            format!("unregistered:{}", self.0).into_bytes(),
+        ))
+    }
+}
+
+/// Intentionally implements neither `std::error::Error` nor `Sync` (`Rc`).
+struct NonErrorNotSync(std::rc::Rc<str>);
+
+impl IntoResponse for NonErrorNotSync {
+    fn into_response(self) -> Response {
+        Response::with_status(StatusCode::from_u16(422)).body(ResponseBody::Bytes(
+            format!("non-error:{}", self.0).into_bytes(),
+        ))
+    }
+}
+
+struct LifecycleOrderMiddleware {
+    events: CleanupEvents,
+}
+
+impl fastapi_rust::fastapi_core::Middleware for LifecycleOrderMiddleware {
+    fn before<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        _req: &'a mut Request,
+    ) -> fastapi_rust::fastapi_core::BoxFuture<'a, fastapi_rust::fastapi_core::ControlFlow> {
+        self.events.record("middleware before");
+        Box::pin(async { fastapi_rust::fastapi_core::ControlFlow::Continue })
+    }
+
+    fn after<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+        _req: &'a Request,
+        response: Response,
+    ) -> fastapi_rust::fastapi_core::BoxFuture<'a, Response> {
+        self.events.record("middleware after");
+        Box::pin(async move { response.header("x-mw-after", b"seen".to_vec()) })
+    }
+}
+
+#[get("/eh/result")]
+async fn eh_result_route_fn(
+    _cx: &Cx,
+    inner: DependsCleanup<InnerResource>,
+) -> Result<Json<Item>, DomainConflictError> {
+    inner.0.0.record("handler");
+    Err(DomainConflictError { code: "dup-id" })
+}
+
+#[get("/eh/path/{id}")]
+async fn eh_path_route_fn(_cx: &Cx, id: Path<i64>) -> Json<i64> {
+    Json(id.0)
+}
+
+#[get("/eh/optional/{id}")]
+async fn eh_optional_path_route_fn(_cx: &Cx, id: Option<Path<i64>>) -> Json<Option<i64>> {
+    Json(id.map(|p| p.0))
+}
+
+type AliasedConflictResult = Result<Json<Item>, DomainConflictError>;
+
+#[get("/eh/alias")]
+async fn eh_alias_route_fn(_cx: &Cx) -> AliasedConflictResult {
+    Err(DomainConflictError { code: "alias-dup" })
+}
+
+#[get("/eh/opaque")]
+async fn eh_opaque_route_fn(_cx: &Cx) -> impl IntoResponse {
+    Err::<Json<Item>, DomainConflictError>(DomainConflictError { code: "opaque-dup" })
+}
+
+#[get("/eh/unregistered")]
+async fn eh_unregistered_route_fn(_cx: &Cx) -> Result<Json<Item>, UnregisteredDomainError> {
+    Err(UnregisteredDomainError("keep-fallback"))
+}
+
+#[get("/eh/non-error")]
+async fn eh_non_error_route_fn(_cx: &Cx) -> Result<Json<Item>, NonErrorNotSync> {
+    Err(NonErrorNotSync(std::rc::Rc::from("rc-payload")))
+}
+
+#[get("/eh/explicit-response")]
+async fn eh_explicit_response_route_fn(_cx: &Cx) -> Response {
+    Response::with_status(StatusCode::ACCEPTED).body(ResponseBody::Bytes(b"explicit-202".to_vec()))
+}
+
+#[test]
+fn exception_handler_intercepts_macro_result_before_middleware_and_cleanup() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let events = CleanupEvents(Arc::new(Mutex::new(Vec::new())));
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let eh_events = events.clone();
+    let eh_calls = Arc::clone(&handler_calls);
+
+    let app = App::builder()
+        .state(events.clone())
+        .middleware(LifecycleOrderMiddleware {
+            events: events.clone(),
+        })
+        .exception_handler::<DomainConflictError, _>(move |_ctx, err| {
+            eh_calls.fetch_add(1, Ordering::SeqCst);
+            eh_events.record("exception handler");
+            Response::with_status(StatusCode::from_u16(409))
+                .header("x-handled-by", b"domain-conflict".to_vec())
+                .body(ResponseBody::Bytes(
+                    format!("handled:{}", err.code).into_bytes(),
+                ))
+        })
+        .route_entry(eh_result_route_fn_route())
+        .build();
+
+    let response = TestClient::new(app).get("/eh/result").send();
+    assert_eq!(response.status().as_u16(), 409);
+    assert_eq!(response.text(), "handled:dup-id");
+    assert_eq!(
+        response.header("x-handled-by"),
+        Some(b"domain-conflict".as_slice())
+    );
+    assert_eq!(response.header("x-mw-after"), Some(b"seen".as_slice()));
+    assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        events.snapshot(),
+        vec![
+            "middleware before",
+            "setup inner",
+            "handler",
+            "exception handler",
+            "middleware after",
+            "cleanup inner",
+        ]
+    );
+}
+
+#[test]
+fn exception_handler_intercepts_extractor_per_app_and_preserves_optional() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls_a = Arc::new(AtomicUsize::new(0));
+    let calls_a_ref = Arc::clone(&calls_a);
+    let app_a = App::builder()
+        .exception_handler::<fastapi_rust::fastapi_core::PathExtractError, _>(move |_ctx, err| {
+            calls_a_ref.fetch_add(1, Ordering::SeqCst);
+            Response::with_status(StatusCode::from_u16(409))
+                .header("x-app", b"alpha".to_vec())
+                .body(ResponseBody::Bytes(format!("alpha:{err}").into_bytes()))
+        })
+        .route_entry(eh_path_route_fn_route())
+        .route_entry(eh_optional_path_route_fn_route())
+        .build();
+
+    let app_b = App::builder()
+        .exception_handler::<fastapi_rust::fastapi_core::PathExtractError, _>(|_ctx, err| {
+            Response::with_status(StatusCode::BAD_REQUEST)
+                .header("x-app", b"beta".to_vec())
+                .body(ResponseBody::Bytes(format!("beta:{err}").into_bytes()))
+        })
+        .route_entry(eh_path_route_fn_route())
+        .build();
+
+    let app_default = App::builder().route_entry(eh_path_route_fn_route()).build();
+
+    let res_a = TestClient::new(app_a).get("/eh/path/not-an-int").send();
+    assert_eq!(res_a.status().as_u16(), 409);
+    assert_eq!(res_a.header("x-app"), Some(b"alpha".as_slice()));
+    assert!(res_a.text().starts_with("alpha:"));
+    assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+
+    // Separate App has its own isolated handler, and unconfigured App keeps 422 fallback.
+    let res_b = TestClient::new(app_b).get("/eh/path/not-an-int").send();
+    assert_eq!(res_b.status().as_u16(), 400);
+    assert_eq!(res_b.header("x-app"), Some(b"beta".as_slice()));
+    assert!(res_b.text().starts_with("beta:"));
+
+    let res_default = TestClient::new(app_default)
+        .get("/eh/path/not-an-int")
+        .send();
+    assert_eq!(res_default.status().as_u16(), 422);
+
+    // Optional extractor swallows inner failure and never invokes PathExtractError handler.
+    let calls_opt = Arc::new(AtomicUsize::new(0));
+    let calls_opt_ref = Arc::clone(&calls_opt);
+    let app_opt = App::builder()
+        .exception_handler::<fastapi_rust::fastapi_core::PathExtractError, _>(move |_ctx, _err| {
+            calls_opt_ref.fetch_add(1, Ordering::SeqCst);
+            Response::with_status(StatusCode::from_u16(409))
+        })
+        .route_entry(eh_optional_path_route_fn_route())
+        .build();
+    let res_opt = TestClient::new(app_opt).get("/eh/optional/bad").send();
+    assert_eq!(res_opt.status().as_u16(), 200);
+    assert_eq!(res_opt.json::<Option<i64>>().expect("optional json"), None);
+    assert_eq!(calls_opt.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn exception_handler_dispatches_alias_opaque_and_preserves_fallbacks() {
+    let app = App::builder()
+        .exception_handler::<DomainConflictError, _>(|_ctx, err| {
+            Response::with_status(StatusCode::from_u16(409)).body(ResponseBody::Bytes(
+                format!("custom:{}", err.code).into_bytes(),
+            ))
+        })
+        .route_entry(eh_alias_route_fn_route())
+        .route_entry(eh_opaque_route_fn_route())
+        .route_entry(eh_unregistered_route_fn_route())
+        .route_entry(eh_non_error_route_fn_route())
+        .route_entry(eh_explicit_response_route_fn_route())
+        .build();
+
+    let client = TestClient::new(app);
+
+    let alias_res = client.get("/eh/alias").send();
+    assert_eq!(alias_res.status().as_u16(), 409);
+    assert_eq!(alias_res.text(), "custom:alias-dup");
+
+    let opaque_res = client.get("/eh/opaque").send();
+    assert_eq!(opaque_res.status().as_u16(), 409);
+    assert_eq!(opaque_res.text(), "custom:opaque-dup");
+
+    let unreg_res = client.get("/eh/unregistered").send();
+    assert_eq!(unreg_res.status().as_u16(), 418);
+    assert_eq!(unreg_res.text(), "unregistered:keep-fallback");
+
+    let non_err_res = client.get("/eh/non-error").send();
+    assert_eq!(non_err_res.status().as_u16(), 422);
+    assert_eq!(non_err_res.text(), "non-error:rc-payload");
+
+    let explicit_res = client.get("/eh/explicit-response").send();
+    assert_eq!(explicit_res.status().as_u16(), 202);
+    assert_eq!(explicit_res.text(), "explicit-202");
+}
+
+#[test]
+fn exception_handler_fluent_routes_accept_into_response_and_results() {
+    let app = App::builder()
+        .with_default_exception_handlers()
+        .exception_handler::<DomainConflictError, _>(|_ctx, err| {
+            Response::with_status(StatusCode::from_u16(409))
+                .header("x-fluent-eh", b"yes".to_vec())
+                .body(ResponseBody::Bytes(
+                    format!("fluent:{}", err.code).into_bytes(),
+                ))
+        })
+        .get("/fluent/err", |_ctx, _req| async {
+            Err::<&'static str, DomainConflictError>(DomainConflictError { code: "fluent-dup" })
+        })
+        .get("/fluent/ok", |_ctx, _req| async { "fluent-ok" })
+        .get("/fluent/default-http-err", |_ctx, _req| async {
+            Err::<&'static str, HttpError>(HttpError::bad_request().with_detail("bad fluent input"))
+        })
+        .get("/fluent/explicit", |_ctx, _req| async {
+            Response::with_status(StatusCode::ACCEPTED)
+                .body(ResponseBody::Bytes(b"fluent-explicit".to_vec()))
+        })
+        .build();
+
+    let client = TestClient::new(app);
+
+    let err_res = client.get("/fluent/err").send();
+    assert_eq!(err_res.status().as_u16(), 409);
+    assert_eq!(err_res.header("x-fluent-eh"), Some(b"yes".as_slice()));
+    assert_eq!(err_res.text(), "fluent:fluent-dup");
+
+    let ok_res = client.get("/fluent/ok").send();
+    assert_eq!(ok_res.status().as_u16(), 200);
+    assert_eq!(ok_res.text(), "fluent-ok");
+
+    let http_err_res = client.get("/fluent/default-http-err").send();
+    assert_eq!(http_err_res.status().as_u16(), 400);
+    let body: serde_json::Value = http_err_res.json().expect("default HttpError JSON");
+    assert_eq!(body["detail"], "bad fluent input");
+
+    let explicit_res = client.get("/fluent/explicit").send();
+    assert_eq!(explicit_res.status().as_u16(), 202);
+    assert_eq!(explicit_res.text(), "fluent-explicit");
+}

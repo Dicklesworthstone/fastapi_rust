@@ -700,3 +700,135 @@ fn h2c_prior_knowledge_can_be_turned_off() {
         running.stop();
     }
 }
+
+#[derive(Debug)]
+struct TcpDomainConflict(&'static str);
+
+impl std::fmt::Display for TcpDomainConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for TcpDomainConflict {}
+
+impl fastapi_core::IntoResponse for TcpDomainConflict {
+    fn into_response(self) -> Response {
+        Response::with_status(fastapi_core::StatusCode::INTERNAL_SERVER_ERROR).body(
+            ResponseBody::Bytes(format!("fallback:{}", self.0).into_bytes()),
+        )
+    }
+}
+
+fn build_tcp_exception_app() -> App {
+    App::builder()
+        .exception_handler::<TcpDomainConflict, _>(|_ctx, err| {
+            Response::with_status(fastapi_core::StatusCode::from_u16(409))
+                .header("x-tcp-eh", b"domain".to_vec())
+                .body(ResponseBody::Bytes(format!("tcp:{}", err.0).into_bytes()))
+        })
+        .exception_handler::<fastapi_core::PathExtractError, _>(|_ctx, err| {
+            Response::with_status(fastapi_core::StatusCode::from_u16(409))
+                .header("x-tcp-eh", b"path".to_vec())
+                .body(ResponseBody::Bytes(format!("tcp-path:{err}").into_bytes()))
+        })
+        .get("/eh/fluent", |_ctx, _req| async {
+            Err::<&'static str, TcpDomainConflict>(TcpDomainConflict("conflict-1"))
+        })
+        .route_entry(fastapi_core::RouteEntry::new_boxed(
+            fastapi_core::Method::Get,
+            "/eh/extract/{id}",
+            |ctx, req| {
+                Box::pin(async move {
+                    match <fastapi_core::Path<i64> as fastapi_core::FromRequest>::from_request(
+                        ctx, req,
+                    )
+                    .await
+                    {
+                        Ok(p) => {
+                            Response::ok().body(ResponseBody::Bytes(p.0.to_string().into_bytes()))
+                        }
+                        Err(err) => {
+                            fastapi_core::app::resolve_exception_or_into_response(ctx, req, err)
+                        }
+                    }
+                })
+            },
+        ))
+        .get("/eh/ok", |_ctx, _req| async { "tcp-ok" })
+        .build()
+}
+
+#[test]
+fn exception_handler_runs_over_real_tcp_for_app_and_handler_paths() {
+    for mode in [Mode::App, Mode::AppConcurrent, Mode::Handler] {
+        let server = Arc::new(TcpServer::new(
+            ServerConfig::new("127.0.0.1:0").with_keep_alive_timeout(Duration::from_secs(5)),
+        ));
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let thread_server = Arc::clone(&server);
+
+        let thread = std::thread::spawn(move || {
+            let reactor = create_reactor().expect("reactor");
+            let runtime = RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let cx = Cx::current().expect("runtime Cx");
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind");
+                addr_tx
+                    .send(listener.local_addr().expect("local addr"))
+                    .expect("send addr");
+                let app = build_tcp_exception_app();
+                let _ = match mode {
+                    Mode::App => {
+                        thread_server
+                            .serve_on_app(&cx, listener, Arc::new(app))
+                            .await
+                    }
+                    Mode::AppConcurrent => {
+                        thread_server
+                            .serve_on_app_concurrent(&cx, listener, Arc::new(app))
+                            .await
+                    }
+                    Mode::Handler => {
+                        let handler: Arc<dyn fastapi_core::Handler> = Arc::new(app);
+                        thread_server.serve_on_handler(&cx, listener, handler).await
+                    }
+                    Mode::Closure => unreachable!(),
+                };
+            });
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server address");
+
+        for (path, expected_status, expected_body) in [
+            ("/eh/fluent", "HTTP/1.1 409 ", "tcp:conflict-1"),
+            ("/eh/extract/not-a-number", "HTTP/1.1 409 ", "tcp-path:"),
+            ("/eh/ok", "HTTP/1.1 200 OK", "tcp-ok"),
+        ] {
+            let mut stream = connect(addr);
+            let req =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            stream.write_all(req.as_bytes()).expect("write request");
+            let response = read_to_end(&mut stream);
+            assert!(
+                response.starts_with(expected_status),
+                "{mode:?} {path}: {response:?}"
+            );
+            assert!(
+                response.contains(expected_body),
+                "{mode:?} {path}: {response:?}"
+            );
+        }
+
+        server.shutdown();
+        drop(TcpStream::connect(addr));
+        thread.join().expect("server thread join");
+    }
+}

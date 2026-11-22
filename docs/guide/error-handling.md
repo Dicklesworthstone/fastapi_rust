@@ -19,19 +19,29 @@ let error = HttpError::internal("Something went wrong");
 
 ## Exception Handlers
 
-Register custom exception handlers:
+Register per-`App` custom exception handlers on `AppBuilder`:
 
 ```rust
-use fastapi::core::{App, Response, StatusCode};
+use fastapi_rust::prelude::*;
+use fastapi_rust::ResponseBody;
 
 let app = App::builder()
-    .exception_handler::<MyCustomError>(|err| {
+    .exception_handler::<MyCustomError, _>(|_ctx, err| {
         Response::with_status(StatusCode::BAD_REQUEST)
-            .body(format!("Custom error: {}", err).into())
+            .body(ResponseBody::Bytes(format!("Custom error: {err}").into_bytes()))
     })
-    .get("/", handler)
+    .route_entry(my_handler_route())
+    .get("/fluent", |_ctx, _req| async {
+        Err::<&'static str, MyCustomError>(MyCustomError::from("invalid"))
+    })
     .build();
 ```
+
+### Dispatch and Fallback Rules
+
+- **Route `Result` errors and extractor rejections**: Macro routes (`#[get]`, `#[post]`, etc.) and fluent routes (`AppBuilder::get`/`post`/...) convert `Result<T, E>` errors (including type aliases and `-> impl IntoResponse`) and `FromRequest::Error` rejections by consulting the active `App`'s `ExceptionHandlers` registry before response middleware `after()` hooks and dependency cleanups run.
+- **Exact-type lookup**: Lookup matches the concrete Rust `TypeId` of the error (for extractors, the outer `FromRequest::Error` rejection type such as `PathExtractError` or `JsonExtractError`, rather than inferred HTTP status codes or inner `ValidationErrors`).
+- **Fallback and boundaries**: Unregistered errors (including response-valued errors that do not implement `std::error::Error` or `Sync`) fall back directly to their `IntoResponse::into_response` implementation. Already-converted `Response` values and successful responses are never reinterpreted, and `Option<T>` extractors continue to swallow extraction failures as `None`. Registries are scoped per `App` with no global cross-talk.
 
 ## Error Response Pattern
 

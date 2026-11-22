@@ -474,13 +474,16 @@ impl APIRouter {
 
     /// Adds a route with the given method and path.
     #[must_use]
-    pub fn route<H, Fut>(mut self, path: impl Into<String>, method: Method, handler: H) -> Self
+    pub fn route<H, Fut, R>(mut self, path: impl Into<String>, method: Method, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         let boxed: BoxHandler = Box::new(move |ctx, req| {
-            Box::pin(handler(ctx, req)) as crate::middleware::BoxFuture<'_, Response>
+            let fut = handler(ctx, req);
+            Box::pin(async move { fut.await.into_response_with_context(ctx, req) })
+                as crate::middleware::BoxFuture<'_, Response>
         });
         self.routes.push(RouterRoute {
             method,
@@ -496,70 +499,77 @@ impl APIRouter {
 
     /// Adds a GET route.
     #[must_use]
-    pub fn get<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn get<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Get, handler)
     }
 
     /// Adds a POST route.
     #[must_use]
-    pub fn post<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn post<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Post, handler)
     }
 
     /// Adds a PUT route.
     #[must_use]
-    pub fn put<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn put<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Put, handler)
     }
 
     /// Adds a DELETE route.
     #[must_use]
-    pub fn delete<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn delete<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Delete, handler)
     }
 
     /// Adds a PATCH route.
     #[must_use]
-    pub fn patch<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn patch<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Patch, handler)
     }
 
     /// Adds an OPTIONS route.
     #[must_use]
-    pub fn options<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn options<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Options, handler)
     }
 
     /// Adds a HEAD route.
     #[must_use]
-    pub fn head<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn head<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Head, handler)
     }

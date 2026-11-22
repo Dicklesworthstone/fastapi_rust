@@ -813,10 +813,11 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
             // Normalize errors through a generic function before matching. Matching
             // Infallible directly would make the response conversion an unreachable
             // call for optional extractors and emit warnings in consumer crates.
-            let #ident: #ty = match <#ty as fastapi_core::FromRequest>::from_request(ctx, req)
-                .await
-                .map_err(__into_response)
-            {
+            let #ident: #ty = match __extract_or_response(
+                <#ty as fastapi_core::FromRequest>::from_request(ctx, req).await,
+                ctx,
+                req,
+            ) {
                 Ok(v) => v,
                 Err(response) => return response,
             };
@@ -870,8 +871,23 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
         /// both extractor errors and handler return values into a [`fastapi_core::Response`].
         #[allow(non_snake_case)]
         pub fn #route_entry_fn_name() -> fastapi_core::RouteEntry {
-            fn __into_response<T: fastapi_core::IntoResponse>(v: T) -> fastapi_core::Response {
-                v.into_response()
+            fn __into_response_with_context<T: fastapi_core::IntoResponse>(
+                ctx: &fastapi_core::RequestContext,
+                req: &fastapi_core::Request,
+                v: T,
+            ) -> fastapi_core::Response {
+                v.into_response_with_context(ctx, req)
+            }
+
+            #[allow(dead_code)]
+            fn __extract_or_response<T, E: fastapi_core::IntoResponse + 'static>(
+                result: Result<T, E>,
+                ctx: &fastapi_core::RequestContext,
+                req: &fastapi_core::Request,
+            ) -> Result<T, fastapi_core::Response> {
+                result.map_err(|err| {
+                    fastapi_core::app::resolve_exception_or_into_response(ctx, req, err)
+                })
             }
 
             let __route = #route_fn_name();
@@ -879,7 +895,7 @@ pub fn route_impl(method: &str, attr: TokenStream, item: TokenStream) -> TokenSt
                 Box::pin(async move {
                     #(#arg_extracts)*
                     let out = #call_handler;
-                    __into_response(out)
+                    __into_response_with_context(ctx, req, out)
                 }) as fastapi_core::BoxFuture<'_, fastapi_core::Response>
             })
             #request_schema_call

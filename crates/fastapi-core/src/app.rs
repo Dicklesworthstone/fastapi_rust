@@ -332,13 +332,16 @@ impl RouteEntry {
     /// Plain `fn(&RequestContext, &mut Request) -> Ready<Response>` handlers and
     /// `async fn` handlers that clone what they need fit here. Handlers that must
     /// borrow `ctx`/`req` across an `.await` use [`RouteEntry::new_boxed`].
-    pub fn new<H, Fut>(method: Method, path: impl Into<String>, handler: H) -> Self
+    pub fn new<H, Fut, R>(method: Method, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         Self::new_boxed(method, path, move |ctx, req| {
-            Box::pin(handler(ctx, req)) as BoxFuture<'_, Response>
+            let fut = handler(ctx, req);
+            Box::pin(async move { fut.await.into_response_with_context(ctx, req) })
+                as BoxFuture<'_, Response>
         })
     }
 
@@ -682,6 +685,8 @@ pub type BoxExceptionHandler = Box<
     dyn Fn(&RequestContext, Box<dyn std::error::Error + Send + Sync>) -> Response + Send + Sync,
 >;
 
+type BoxAnyExceptionHandler = Box<dyn Fn(&RequestContext, Box<dyn Any>) -> Response + Send + Sync>;
+
 /// Registry for custom exception handlers.
 ///
 /// This allows applications to register handlers for specific error types,
@@ -718,7 +723,7 @@ pub type BoxExceptionHandler = Box<
 /// ```
 #[derive(Default)]
 pub struct ExceptionHandlers {
-    handlers: HashMap<TypeId, BoxExceptionHandler>,
+    handlers: HashMap<TypeId, BoxAnyExceptionHandler>,
 }
 
 impl ExceptionHandlers {
@@ -760,7 +765,7 @@ impl ExceptionHandlers {
     ) where
         E: std::error::Error + Send + Sync + 'static,
     {
-        let boxed_handler: BoxExceptionHandler = Box::new(move |ctx, err| {
+        let boxed_handler: BoxAnyExceptionHandler = Box::new(move |ctx, err| {
             // Try to downcast the error to the expected type
             match err.downcast::<E>() {
                 Ok(typed_err) => handler(ctx, *typed_err),
@@ -800,6 +805,19 @@ impl ExceptionHandlers {
             .map(|handler| handler(ctx, Box::new(err)))
     }
 
+    /// Attempts to dispatch an owned `'static` value to an exact-type registered
+    /// exception handler without requiring `std::error::Error` or `Sync` at the
+    /// call site.
+    ///
+    /// Returns `Ok(Response)` if a handler is registered for `E`, or `Err(err)`
+    /// untouched without heap allocation if none is registered.
+    pub fn try_handle_any<E: 'static>(&self, ctx: &RequestContext, err: E) -> Result<Response, E> {
+        let Some(handler) = self.handlers.get(&TypeId::of::<E>()) else {
+            return Err(err);
+        };
+        Ok(handler(ctx, Box::new(err)))
+    }
+
     /// Handles an error, falling back to a default 500 response if no handler is found.
     pub fn handle_or_default<E>(&self, ctx: &RequestContext, err: E) -> Response
     where
@@ -837,6 +855,32 @@ impl std::fmt::Debug for ExceptionHandlers {
         f.debug_struct("ExceptionHandlers")
             .field("count", &self.handlers.len())
             .finish()
+    }
+}
+
+/// Converts an owned `'static` error value into a [`Response`], consulting the
+/// active [`App`]'s registered [`ExceptionHandlers`] extension for an exact-type
+/// match before falling back to [`crate::IntoResponse::into_response`].
+///
+/// Lookup uses the exact concrete type `E` (for extractors, the outer
+/// `FromRequest::Error` rejection type). Already-converted [`Response`] values
+/// are never reinterpreted.
+#[must_use]
+pub fn resolve_exception_or_into_response<E>(
+    ctx: &RequestContext,
+    req: &Request,
+    err: E,
+) -> Response
+where
+    E: crate::IntoResponse + 'static,
+{
+    if let Some(handlers) = req.get_extension::<Arc<ExceptionHandlers>>() {
+        match handlers.try_handle_any(ctx, err) {
+            Ok(response) => response,
+            Err(unhandled) => unhandled.into_response(),
+        }
+    } else {
+        err.into_response()
     }
 }
 
@@ -1247,10 +1291,11 @@ impl AppBuilder {
     ///
     /// Routes are matched in the order they are added.
     #[must_use]
-    pub fn route<H, Fut>(mut self, path: impl Into<String>, method: Method, handler: H) -> Self
+    pub fn route<H, Fut, R>(mut self, path: impl Into<String>, method: Method, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.routes.push(RouteEntry::new(method, path, handler));
         self
@@ -1285,50 +1330,55 @@ impl AppBuilder {
 
     /// Adds a GET route.
     #[must_use]
-    pub fn get<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn get<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Get, handler)
     }
 
     /// Adds a POST route.
     #[must_use]
-    pub fn post<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn post<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Post, handler)
     }
 
     /// Adds a PUT route.
     #[must_use]
-    pub fn put<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn put<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Put, handler)
     }
 
     /// Adds a DELETE route.
     #[must_use]
-    pub fn delete<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn delete<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Delete, handler)
     }
 
     /// Adds a PATCH route.
     #[must_use]
-    pub fn patch<H, Fut>(self, path: impl Into<String>, handler: H) -> Self
+    pub fn patch<H, Fut, R>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Fn(&RequestContext, &mut Request) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Response> + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: crate::IntoResponse + 'static,
     {
         self.route(path, Method::Patch, handler)
     }
@@ -1947,6 +1997,7 @@ impl App {
         req.insert_extension(crate::extract::AppState::from_container(Arc::clone(
             &self.state,
         )));
+        req.insert_extension(Arc::clone(&self.exception_handlers));
         // Use the trie-based router for efficient matching with path parameter extraction
         let handler = match self.router.lookup(req.path(), req.method()) {
             RouteLookup::Match(route_match) => {
